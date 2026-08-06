@@ -42,9 +42,48 @@
  	MessageQueue_Free(client->MsgQueue);
  	WTSCloseServer(client->vcm);
  	region16_uninit(&(client->invalidRegion));
- 	DeleteCriticalSection(&(client->lock));
- 
- 	client->MsgQueue = nullptr;
+	DeleteCriticalSection(&(client->lock));
+
+	client->MsgQueue = nullptr;
+@@ -416,11 +416,16 @@
+ 	WINPR_ASSERT(server);
+ 	WINPR_ASSERT(server->surface);
+ 	WINPR_ASSERT(settings);
+
+-	WINPR_ASSERT(server->surface->width <= UINT16_MAX);
+-	WINPR_ASSERT(server->surface->height <= UINT16_MAX);
+-	viewport.right = (UINT16)server->surface->width;
+-	viewport.bottom = (UINT16)server->surface->height;
++	EnterCriticalSection(&(server->surface->lock));
++	const UINT32 surfaceWidth = server->surface->width;
++	const UINT32 surfaceHeight = server->surface->height;
++	LeaveCriticalSection(&(server->surface->lock));
++	/* MACRDP_SURFACE_DIMENSIONS_LOCK */
++	WINPR_ASSERT(surfaceWidth <= UINT16_MAX);
++	WINPR_ASSERT(surfaceHeight <= UINT16_MAX);
++	viewport.right = (UINT16)surfaceWidth;
++	viewport.bottom = (UINT16)surfaceHeight;
+
+ 	if (server->shareSubRect)
+ 	{
+@@ -480,12 +480,15 @@
+ 	WINPR_ASSERT(client);
+
+ 	settings = client->context.settings;
+ 	peer = client->context.peer;
+ 	WINPR_ASSERT(peer);
+ 	WINPR_ASSERT(client->server);
+ 	WINPR_ASSERT(client->server->surface);
+
+-	const UINT32 resizeWidth = client->server->surface->width;
+-	const UINT32 resizeHeight = client->server->surface->height;
++	EnterCriticalSection(&(client->server->surface->lock));
++	const UINT32 resizeWidth = client->server->surface->width;
++	const UINT32 resizeHeight = client->server->surface->height;
++	LeaveCriticalSection(&(client->server->surface->lock));
++	/* MACRDP_RESIZE_DIMENSIONS_LOCK */
+
+ 	if (client->resizeRequested)
 @@ -2200,20 +2203,54 @@
  	return ret;
  }
