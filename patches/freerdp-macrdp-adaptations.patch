@@ -274,7 +274,7 @@
  	return ret;
  }
  
-@@ -2725,43 +2803,41 @@
+@@ -2725,43 +2803,48 @@
  			{
  				/* Send screen update or resize to this client */
  
@@ -300,7 +300,14 @@
 +					else
 +					{
 +						/* Send frame */
-+						if (!shadow_client_send_surface_update(client, &gfxstatus, UpdateSubscriber))
++						const ULONGLONG updateStarted = GetTickCount64();
++						const BOOL updateOk =
++							shadow_client_send_surface_update(client, &gfxstatus, UpdateSubscriber);
++						const ULONGLONG updateElapsed = GetTickCount64() - updateStarted;
++						if (updateElapsed >= 200)
++							WLog_WARN(TAG, "Slow client frame handling: %llums",
++							          (unsigned long long)updateElapsed);
++						if (!updateOk)
 +						{
 +							WLog_ERR(TAG, "Failed to send surface update");
 +							break;
@@ -569,3 +576,32 @@
  	ExitThread(0);
  	return 0;
  }
+--- a/server/shadow/shadow_mcevent.c
++++ b/server/shadow/shadow_mcevent.c
+@@ -19,5 +19,7 @@
+ #include <freerdp/config.h>
+ 
+ #include <winpr/assert.h>
++#include <winpr/sysinfo.h>
++#include <inttypes.h>
+ #include <freerdp/log.h>
+ #include "shadow.h"
+@@ -136,11 +138,18 @@
+ static void WaitForSubscribers(rdpShadowMultiClientEvent* event)
+ {
+ 	if (event->consuming > 0)
+ 	{
+ 		/* Wait for clients done */
+ 		WLog_VRB(TAG, "Server wait event %d. %d clients.\n", event->eventid, event->consuming);
++		const ULONGLONG waitStarted = GetTickCount64();
++		const int expectedConsumers = event->consuming;
+ 		LeaveCriticalSection(&(event->lock));
+ 		(void)WaitForSingleObject(event->doneEvent, INFINITE);
+ 		EnterCriticalSection(&(event->lock));
+ 		WLog_VRB(TAG, "Server quit event %d. %d clients.\n", event->eventid, event->consuming);
++		const ULONGLONG waitElapsed = GetTickCount64() - waitStarted;
++		if (waitElapsed >= 200)
++			WLog_WARN(TAG, "Frame barrier event %d waited %" PRIu64 "ms for %d client(s)",
++			          event->eventid, (uint64_t)waitElapsed, expectedConsumers);
++		/* MACRDP_FRAME_BARRIER_DIAGNOSTICS */
+ 	}

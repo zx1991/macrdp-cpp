@@ -95,6 +95,17 @@ Use the same username and password. The server listens on TCP port 3389 by
 default; use `--port 3390` and connect to `host:3390` when another service
 already occupies that port.
 
+If GFX/H.264 updates are slow on a high-latency or bandwidth-limited link,
+try the incremental SurfaceBits path:
+
+```bash
+printf '%s\n' 'change-this-password' | \
+  ./build/macrdp-server --user Xian --password-stdin --no-gfx
+```
+
+This path sends changed rectangles with the classic RDP update channel instead
+of encoding every desktop update as a full-screen GFX/H.264 frame.
+
 For an existing FreeRDP NTLM SAM file, use `--sam-file path/to/file.sam`.
 `--security tls` and `--security rdp` are available for compatibility testing,
 but NLA is the default and recommended mode. Empty passwords are rejected.

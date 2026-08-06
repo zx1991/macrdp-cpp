@@ -50,6 +50,7 @@ struct Options {
     std::uint32_t max_width = 0;
     std::uint32_t max_height = 0;
     bool avc444 = false;
+    bool no_gfx = false;
     bool password_from_stdin = false;
     std::string log_level = "INFO";
 };
@@ -87,6 +88,7 @@ void print_usage(const char* program) {
         << "  --max-width <pixels>        Optional capture width limit\n"
         << "  --max-height <pixels>       Optional capture height limit\n"
         << "  --avc444                    Use AVC444 (higher CPU and color fidelity)\n"
+        << "  --no-gfx                    Use incremental SurfaceBits updates instead of GFX/H.264\n"
         << "  --user <name>               Login user for generated SAM/TLS auth\n"
         << "  --domain <name>             Optional login domain\n"
         << "  --password <value>          Login password (visible in process list)\n"
@@ -238,6 +240,8 @@ bool parse_options(int argc, char** argv, Options& options) {
             }
         } else if (argument == "--avc444") {
             options.avc444 = true;
+        } else if (argument == "--no-gfx") {
+            options.no_gfx = true;
         } else if (argument == "--user") {
             if (!next_value(index, argc, argv, options.username)) {
                 std::cerr << "--user requires a non-empty value\n";
@@ -422,6 +426,7 @@ bool configure_server(rdpShadowServer* server, const Options& options, const std
     server->h264BitRate = options.h264_bitrate;
     server->h264FrameRate = options.frame_rate;
     server->h264QP = 0;
+    const bool use_graphics_pipeline = !options.no_gfx;
 
     // The direct bridge accepts AVC420/I420. AVC444 has a separate YUV444
     // stream and therefore remains on FreeRDP's FFmpeg fallback path.
@@ -436,7 +441,8 @@ bool configure_server(rdpShadowServer* server, const Options& options, const std
         || !freerdp_settings_set_bool(server->settings, FreeRDP_NSCodec, TRUE)
         || !freerdp_settings_set_bool(server->settings, FreeRDP_RemoteFxCodec, TRUE)
         || !freerdp_settings_set_bool(server->settings, FreeRDP_RemoteFxImageCodec, TRUE)
-        || !freerdp_settings_set_bool(server->settings, FreeRDP_SupportGraphicsPipeline, TRUE)
+        || !freerdp_settings_set_bool(
+               server->settings, FreeRDP_SupportGraphicsPipeline, use_graphics_pipeline)
         || !freerdp_settings_set_bool(server->settings, FreeRDP_GfxProgressive, TRUE)
         || !freerdp_settings_set_bool(server->settings, FreeRDP_GfxProgressiveV2, TRUE)
         || !freerdp_settings_set_bool(server->settings, FreeRDP_GfxPlanar, TRUE)
@@ -446,9 +452,11 @@ bool configure_server(rdpShadowServer* server, const Options& options, const std
     }
 
 #if defined(WITH_GFX_H264)
-    if (!freerdp_settings_set_bool(server->settings, FreeRDP_GfxH264, TRUE)
-        || !freerdp_settings_set_bool(server->settings, FreeRDP_GfxAVC444, options.avc444)
-        || !freerdp_settings_set_bool(server->settings, FreeRDP_GfxAVC444v2, options.avc444)) {
+    if (!freerdp_settings_set_bool(server->settings, FreeRDP_GfxH264, use_graphics_pipeline)
+        || !freerdp_settings_set_bool(
+               server->settings, FreeRDP_GfxAVC444, use_graphics_pipeline && options.avc444)
+        || !freerdp_settings_set_bool(
+               server->settings, FreeRDP_GfxAVC444v2, use_graphics_pipeline && options.avc444)) {
         return false;
     }
 #else
