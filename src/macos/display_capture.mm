@@ -92,6 +92,67 @@ bool sample_status_is_usable(CMSampleBufferRef sample_buffer) {
     return status == SCFrameStatusComplete;
 }
 
+void copy_dirty_rects(
+    CMSampleBufferRef sample_buffer,
+    std::uint32_t width,
+    std::uint32_t height,
+    macrdp::Frame& frame) {
+    CFArrayRef attachments = CMSampleBufferGetSampleAttachmentsArray(
+        sample_buffer,
+        false);
+    if (attachments == nullptr || CFArrayGetCount(attachments) == 0) {
+        return;
+    }
+
+    NSDictionary* dictionary = (__bridge NSDictionary*)CFArrayGetValueAtIndex(
+        attachments,
+        0);
+    id dirty_rects_object = dictionary[SCStreamFrameInfoDirtyRects];
+    if (dirty_rects_object == nil
+        || ![dirty_rects_object isKindOfClass:[NSArray class]]) {
+        return;
+    }
+
+    const double max_width = static_cast<double>(width);
+    const double max_height = static_cast<double>(height);
+    for (id object in static_cast<NSArray*>(dirty_rects_object)) {
+        if (![object isKindOfClass:[NSValue class]]) {
+            continue;
+        }
+
+        CGRect rect{};
+        [static_cast<NSValue*>(object) getValue:&rect size:sizeof(rect)];
+        const double raw_right = rect.origin.x + rect.size.width;
+        const double raw_bottom = rect.origin.y + rect.size.height;
+        if (!std::isfinite(rect.origin.x) || !std::isfinite(rect.origin.y)
+            || !std::isfinite(raw_right) || !std::isfinite(raw_bottom)
+            || rect.size.width <= 0.0 || rect.size.height <= 0.0) {
+            continue;
+        }
+
+        const auto left = static_cast<std::uint32_t>(std::clamp(
+            std::floor(rect.origin.x),
+            0.0,
+            max_width));
+        const auto top = static_cast<std::uint32_t>(std::clamp(
+            std::floor(rect.origin.y),
+            0.0,
+            max_height));
+        const auto right = static_cast<std::uint32_t>(std::clamp(
+            std::ceil(raw_right),
+            0.0,
+            max_width));
+        const auto bottom = static_cast<std::uint32_t>(std::clamp(
+            std::ceil(raw_bottom),
+            0.0,
+            max_height));
+        macrdp::FrameRect dirty{left, top, right, bottom};
+        if (dirty.valid()) {
+            frame.dirty_rects.push_back(dirty);
+        }
+    }
+}
+
 bool copy_sample_buffer(CMSampleBufferRef sample_buffer, macrdp::Frame& frame) {
     if (sample_buffer == nullptr || !sample_status_is_usable(sample_buffer)) {
         return false;
@@ -142,6 +203,11 @@ bool copy_sample_buffer(CMSampleBufferRef sample_buffer, macrdp::Frame& frame) {
     }
 
     CVPixelBufferUnlockBaseAddress(pixel_buffer, kCVPixelBufferLock_ReadOnly);
+    copy_dirty_rects(
+        sample_buffer,
+        copied.width,
+        copied.height,
+        copied);
     frame = std::move(copied);
     return true;
 }

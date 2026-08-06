@@ -57,16 +57,19 @@
  
  	if (client->resizeRequested)
  	{
-@@ -2205,10 +2216,44 @@
+@@ -2205,10 +2216,69 @@
   *
   * @return TRUE on success (or nothing need to be updated)
   */
-+static BOOL shadow_client_snapshot_surface(rdpShadowClient* client, rdpShadowSurface* surface)
++static BOOL shadow_client_snapshot_surface(rdpShadowClient* client, rdpShadowSurface* surface,
++                                           const REGION16* copyRegion)
 +{
 +	WINPR_ASSERT(client);
 +	WINPR_ASSERT(surface);
++	WINPR_ASSERT(copyRegion);
++	/* MACRDP_CLIENT_INCREMENTAL_SNAPSHOT */
 +
-+	if (!surface->data || surface->scanline == 0 || surface->height == 0 ||
++	if (!surface->data || surface->width == 0 || surface->scanline == 0 || surface->height == 0 ||
 +	    surface->height > SIZE_MAX / surface->scanline)
 +		return FALSE;
 +
@@ -80,10 +83,32 @@
 +		client->macrdpFrameDataSize = required;
 +	}
 +
-+	for (UINT32 row = 0; row < surface->height; row++)
++	const BOOL fullCopy = !client->macrdpFrameData ||
++	                      client->macrdpFrameDataWidth != surface->width ||
++	                      client->macrdpFrameDataHeight != surface->height ||
++	                      client->macrdpFrameDataStride != surface->scanline;
++	if (fullCopy)
 +	{
-+		memcpy(client->macrdpFrameData + ((size_t)row * surface->scanline),
-+		       surface->data + ((size_t)row * surface->scanline), surface->scanline);
++		for (UINT32 row = 0; row < surface->height; row++)
++		{
++			memcpy(client->macrdpFrameData + ((size_t)row * surface->scanline),
++			       surface->data + ((size_t)row * surface->scanline), surface->scanline);
++		}
++	}
++	else
++	{
++		UINT32 numRects = 0;
++		const RECTANGLE_16* rects = region16_rects(copyRegion, &numRects);
++		for (UINT32 index = 0; index < numRects; index++)
++		{
++			const RECTANGLE_16* rect = &rects[index];
++			for (UINT32 row = rect->top; row < rect->bottom; row++)
++			{
++				const size_t offset = ((size_t)row * surface->scanline) + ((size_t)rect->left * 4U);
++				const size_t length = ((size_t)rect->right - rect->left) * 4U;
++				memcpy(client->macrdpFrameData + offset, surface->data + offset, length);
++			}
++		}
 +	}
 +
 +	client->macrdpFrameDataWidth = surface->width;
@@ -200,7 +225,7 @@
  	nHeight = extents->bottom - extents->top;
 -	pSrcData = surface->data;
 -	nSrcStep = surface->scanline;
-+	if (!shadow_client_snapshot_surface(client, surface))
++	if (!shadow_client_snapshot_surface(client, surface, &invalidRegion))
 +	{
 +		ret = FALSE;
 +		goto release_surface;

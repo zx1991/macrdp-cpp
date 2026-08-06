@@ -459,7 +459,50 @@ bool copy_frame_to_surface(MacShadowSubsystem* subsystem, const macrdp::Frame& f
     }
 
     bool changed = false;
-    if (frame.width == surface->width && frame.height == surface->height) {
+    bool copy_succeeded = true;
+    const bool matching_dimensions = frame.width == surface->width
+        && frame.height == surface->height;
+    if (matching_dimensions && !frame.dirty_rects.empty()) {
+        // ScreenCaptureKit supplies complete frames but also identifies the
+        // portions that changed. Keep the surface copy proportional to that
+        // metadata and let the RDP layer carry the exact invalid region.
+        for (const auto& frame_rect : frame.dirty_rects) {
+            const auto left = std::min(frame_rect.left, surface->width);
+            const auto top = std::min(frame_rect.top, surface->height);
+            const auto right = std::min(frame_rect.right, surface->width);
+            const auto bottom = std::min(frame_rect.bottom, surface->height);
+            if (left >= right || top >= bottom) {
+                continue;
+            }
+
+            for (std::uint32_t y = top; y < bottom; ++y) {
+                auto* destination = surface->data
+                    + static_cast<std::size_t>(y) * surface->scanline
+                    + static_cast<std::size_t>(left) * 4;
+                const auto* source = frame.bgra.data()
+                    + static_cast<std::size_t>(y) * frame.stride
+                    + static_cast<std::size_t>(left) * 4;
+                std::memcpy(
+                    destination,
+                    source,
+                    static_cast<std::size_t>(right - left) * 4);
+            }
+
+            RECTANGLE_16 dirty{};
+            dirty.left = static_cast<UINT16>(left);
+            dirty.top = static_cast<UINT16>(top);
+            dirty.right = static_cast<UINT16>(right);
+            dirty.bottom = static_cast<UINT16>(bottom);
+            if (!region16_union_rect(
+                    &surface->invalidRegion,
+                    &surface->invalidRegion,
+                    &dirty)) {
+                copy_succeeded = false;
+                break;
+            }
+            changed = true;
+        }
+    } else if (matching_dimensions) {
         for (std::uint32_t y = 0; y < surface->height; ++y) {
             auto* destination = surface->data + y * surface->scanline;
             const auto* source = frame.bgra.data() + y * frame.stride;
@@ -503,14 +546,18 @@ bool copy_frame_to_surface(MacShadowSubsystem* subsystem, const macrdp::Frame& f
         }
     }
 
-    if (changed) {
+    if (changed && (!matching_dimensions || frame.dirty_rects.empty())) {
         RECTANGLE_16 dirty{};
         dirty.right = static_cast<UINT16>(surface->width);
         dirty.bottom = static_cast<UINT16>(surface->height);
-        (void)region16_union_rect(
+        copy_succeeded = region16_union_rect(
             &surface->invalidRegion,
             &surface->invalidRegion,
             &dirty);
+    }
+    if (!copy_succeeded) {
+        LeaveCriticalSection(&surface->lock);
+        return false;
     }
     LeaveCriticalSection(&surface->lock);
 
@@ -523,6 +570,13 @@ bool copy_frame_to_surface(MacShadowSubsystem* subsystem, const macrdp::Frame& f
     // the same lock while consuming the published frame.
     shadow_subsystem_frame_update(&subsystem->common);
     const auto update_finished = std::chrono::steady_clock::now();
+
+    // All clients have copied the frame snapshot at this point. The next
+    // frame should contribute a fresh dirty region instead of inheriting old
+    // rectangles forever.
+    EnterCriticalSection(&surface->lock);
+    region16_clear(&surface->invalidRegion);
+    LeaveCriticalSection(&surface->lock);
 
     const auto copy_time = std::chrono::duration_cast<std::chrono::milliseconds>(
         copy_finished - copy_started);
