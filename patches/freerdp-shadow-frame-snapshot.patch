@@ -1,0 +1,367 @@
+--- a/include/freerdp/server/shadow.h	2026-07-16 15:15:05
++++ b/include/freerdp/server/shadow.h	2026-08-06 14:56:58
+@@ -115,16 +115,22 @@
+ 		BOOL inLobby;
+ 		BOOL mayView;
+ 		BOOL mayInteract;
+ 		BOOL suppressOutput;
+ 		UINT16 surfaceId;
+ 		wMessageQueue* MsgQueue;
+ 		CRITICAL_SECTION lock;
+ 		REGION16 invalidRegion;
++		BYTE* macrdpFrameData;
++		size_t macrdpFrameDataSize;
++		UINT32 macrdpFrameDataWidth;
++		UINT32 macrdpFrameDataHeight;
++		UINT32 macrdpFrameDataStride;
++		/* MACRDP_CLIENT_FRAME_SNAPSHOT */
+ 		rdpShadowServer* server;
+ 		rdpShadowEncoder* encoder;
+ 		rdpShadowSubsystem* subsystem;
+ 
+ 		UINT32 pointerX;
+ 		UINT32 pointerY;
+ 
+ 		HANDLE vcm;
+--- a/server/shadow/shadow_client.c	2026-07-16 15:15:05
++++ b/server/shadow/shadow_client.c	2026-08-06 14:59:27
+@@ -237,16 +237,19 @@
+ 	if (!client)
+ 		return;
+ 
+ 	server = client->server;
+ 	if (server && server->clients)
+ 		ArrayList_Remove(server->clients, (void*)client);
+ 
+ 	shadow_encoder_free(client->encoder);
++	free(client->macrdpFrameData);
++	client->macrdpFrameData = nullptr;
++	client->macrdpFrameDataSize = 0;
+ 
+ 	/* Clear queued messages and free resource */
+ 	MessageQueue_Free(client->MsgQueue);
+ 	WTSCloseServer(client->vcm);
+ 	region16_uninit(&(client->invalidRegion));
+ 	DeleteCriticalSection(&(client->lock));
+ 
+ 	client->MsgQueue = nullptr;
+@@ -2200,20 +2203,54 @@
+ 	return ret;
+ }
+ 
+ /**
+  * Function description
+  *
+  * @return TRUE on success (or nothing need to be updated)
+  */
++static BOOL shadow_client_snapshot_surface(rdpShadowClient* client, rdpShadowSurface* surface)
++{
++	WINPR_ASSERT(client);
++	WINPR_ASSERT(surface);
++
++	if (!surface->data || surface->scanline == 0 || surface->height == 0 ||
++	    surface->height > SIZE_MAX / surface->scanline)
++		return FALSE;
++
++	const size_t required = (size_t)surface->scanline * surface->height;
++	if (client->macrdpFrameDataSize < required)
++	{
++		BYTE* buffer = (BYTE*)realloc(client->macrdpFrameData, required);
++		if (!buffer)
++			return FALSE;
++		client->macrdpFrameData = buffer;
++		client->macrdpFrameDataSize = required;
++	}
++
++	for (UINT32 row = 0; row < surface->height; row++)
++	{
++		memcpy(client->macrdpFrameData + ((size_t)row * surface->scanline),
++		       surface->data + ((size_t)row * surface->scanline), surface->scanline);
++	}
++
++	client->macrdpFrameDataWidth = surface->width;
++	client->macrdpFrameDataHeight = surface->height;
++	client->macrdpFrameDataStride = surface->scanline;
++	return TRUE;
++}
++
+ WINPR_ATTR_NODISCARD
+-static BOOL shadow_client_send_surface_update(rdpShadowClient* client, SHADOW_GFX_STATUS* pStatus)
++static BOOL shadow_client_send_surface_update(rdpShadowClient* client, SHADOW_GFX_STATUS* pStatus,
++                                              void* updateSubscriber)
+ {
+ 	BOOL ret = TRUE;
++	BOOL has_update = FALSE;
++	BOOL surface_locked = FALSE;
+ 	INT64 nXSrc = 0;
+ 	INT64 nYSrc = 0;
+ 	INT64 nWidth = 0;
+ 	INT64 nHeight = 0;
+ 	rdpContext* context = (rdpContext*)client;
+ 	rdpSettings* settings = nullptr;
+ 	rdpShadowServer* server = nullptr;
+ 	rdpShadowSurface* surface = nullptr;
+@@ -2222,77 +2259,104 @@
+ 	const RECTANGLE_16* extents = nullptr;
+ 	BYTE* pSrcData = nullptr;
+ 	UINT32 nSrcStep = 0;
+ 	UINT32 SrcFormat = 0;
+ 	UINT32 numRects = 0;
+ 	const RECTANGLE_16* rects = nullptr;
+ 
+ 	if (!context || !pStatus)
++	{
++		(void)shadow_multiclient_consume(updateSubscriber);
+ 		return FALSE;
++	}
+ 
+ 	settings = context->settings;
+ 	server = client->server;
+ 
+ 	if (!settings || !server)
++	{
++		(void)shadow_multiclient_consume(updateSubscriber);
+ 		return FALSE;
++	}
+ 
+ 	surface = client->inLobby ? server->lobby : server->surface;
+ 
+ 	if (!surface)
++	{
++		(void)shadow_multiclient_consume(updateSubscriber);
+ 		return FALSE;
++	}
+ 
+-	{
+-		EnterCriticalSection(&(client->lock));
+-		region16_init(&invalidRegion);
++	region16_init(&invalidRegion);
++	EnterCriticalSection(&(client->lock));
+ 
+-		const BOOL res = region16_copy(&invalidRegion, &(client->invalidRegion));
+-		region16_clear(&(client->invalidRegion));
+-		LeaveCriticalSection(&(client->lock));
+-		if (!res)
+-			goto out;
++	const BOOL res = region16_copy(&invalidRegion, &(client->invalidRegion));
++	region16_clear(&(client->invalidRegion));
++	LeaveCriticalSection(&(client->lock));
++	if (!res)
++	{
++		region16_uninit(&invalidRegion);
++		(void)shadow_multiclient_consume(updateSubscriber);
++		return FALSE;
+ 	}
+ 
+ 	EnterCriticalSection(&surface->lock);
++	surface_locked = TRUE;
+ 	rects = region16_rects(&(surface->invalidRegion), &numRects);
+ 
+ 	for (UINT32 index = 0; index < numRects; index++)
+ 	{
+ 		if (!region16_union_rect(&invalidRegion, &invalidRegion, &rects[index]))
+-			goto out;
++		{
++			ret = FALSE;
++			goto release_surface;
++		}
+ 	}
+ 
+ 	surfaceRect.left = 0;
+ 	surfaceRect.top = 0;
+ 	WINPR_ASSERT(surface->width <= UINT16_MAX);
+ 	WINPR_ASSERT(surface->height <= UINT16_MAX);
+ 	surfaceRect.right = (UINT16)surface->width;
+ 	surfaceRect.bottom = (UINT16)surface->height;
+ 	if (!region16_intersect_rect(&invalidRegion, &invalidRegion, &surfaceRect))
+-		goto out;
++	{
++		ret = FALSE;
++		goto release_surface;
++	}
+ 
+ 	if (server->shareSubRect)
+ 	{
+ 		if (!region16_intersect_rect(&invalidRegion, &invalidRegion, &(server->subRect)))
+-			goto out;
++		{
++			ret = FALSE;
++			goto release_surface;
++		}
+ 	}
+ 
+ 	if (region16_is_empty(&invalidRegion))
+ 	{
+ 		/* No image region need to be updated. Success */
+-		goto out;
++		goto release_surface;
+ 	}
++	has_update = TRUE;
+ 
+ 	extents = region16_extents(&invalidRegion);
+ 	nXSrc = extents->left;
+ 	nYSrc = extents->top;
+ 	nWidth = extents->right - extents->left;
+ 	nHeight = extents->bottom - extents->top;
+-	pSrcData = surface->data;
+-	nSrcStep = surface->scanline;
++	if (!shadow_client_snapshot_surface(client, surface))
++	{
++		ret = FALSE;
++		goto release_surface;
++	}
++	pSrcData = client->macrdpFrameData;
++	nSrcStep = client->macrdpFrameDataStride;
+ 	SrcFormat = surface->format;
+ 
+ 	/* Move to new pSrcData / nXSrc / nYSrc according to sub rect */
+ 	if (server->shareSubRect)
+ 	{
+ 		INT32 subX = 0;
+ 		INT32 subY = 0;
+ 		subX = server->subRect.left;
+@@ -2301,16 +2365,25 @@
+ 		nYSrc -= subY;
+ 		WINPR_ASSERT(nXSrc >= 0);
+ 		WINPR_ASSERT(nXSrc <= UINT16_MAX);
+ 		WINPR_ASSERT(nYSrc >= 0);
+ 		WINPR_ASSERT(nYSrc <= UINT16_MAX);
+ 		pSrcData = &pSrcData[((UINT16)subY * nSrcStep) + ((UINT16)subX * 4U)];
+ 	}
+ 
++release_surface:
++	if (surface_locked)
++		LeaveCriticalSection(&surface->lock);
++	region16_uninit(&invalidRegion);
++	/* The snapshot is complete. Let the publisher advance before encoding or writing. */
++	(void)shadow_multiclient_consume(updateSubscriber);
++	if (!ret || !has_update)
++		return ret;
++
+ 	// WLog_INFO(TAG, "shadow_client_send_surface_update: x: %" PRId64 " y: %" PRId64 " width: %"
+ 	// PRId64 " height: %" PRId64 " right: %" PRId64 " bottom: %" PRId64, 	nXSrc, nYSrc, nWidth,
+ 	// nHeight, nXSrc + nWidth, nYSrc + nHeight);
+ 
+ 	if (freerdp_settings_get_bool(settings, FreeRDP_SupportGraphicsPipeline))
+ 	{
+ 		if (pStatus->gfxOpened && client->areGfxCapsReady)
+ 		{
+@@ -2318,20 +2391,20 @@
+ 			nWidth = freerdp_settings_get_uint32(settings, FreeRDP_DesktopWidth);
+ 			nHeight = freerdp_settings_get_uint32(settings, FreeRDP_DesktopHeight);
+ 
+ 			/* Create primary surface if have not */
+ 			if (!pStatus->gfxSurfaceCreated)
+ 			{
+ 				/* Only init surface when we have h264 supported */
+ 				if (!(ret = shadow_client_rdpgfx_reset_graphic(client)))
+-					goto out;
++					return ret;
+ 
+ 				if (!(ret = shadow_client_rdpgfx_new_surface(client)))
+-					goto out;
++					return ret;
+ 
+ 				pStatus->gfxSurfaceCreated = TRUE;
+ 			}
+ 
+ 			WINPR_ASSERT(nWidth >= 0);
+ 			WINPR_ASSERT(nWidth <= UINT16_MAX);
+ 			WINPR_ASSERT(nHeight >= 0);
+ 			WINPR_ASSERT(nHeight <= UINT16_MAX);
+@@ -2365,19 +2438,16 @@
+ 		WINPR_ASSERT(nWidth >= 0);
+ 		WINPR_ASSERT(nWidth <= UINT16_MAX);
+ 		WINPR_ASSERT(nHeight >= 0);
+ 		WINPR_ASSERT(nHeight <= UINT16_MAX);
+ 		ret = shadow_client_send_bitmap_update(client, pSrcData, nSrcStep, (UINT16)nXSrc,
+ 		                                       (UINT16)nYSrc, (UINT16)nWidth, (UINT16)nHeight);
+ 	}
+ 
+-out:
+-	LeaveCriticalSection(&surface->lock);
+-	region16_uninit(&invalidRegion);
+ 	return ret;
+ }
+ 
+ /**
+  * Function description
+  * Notify client for resize. The new desktop width/height
+  * should have already been updated in rdpSettings.
+  *
+@@ -2720,52 +2790,50 @@
+ 			 * scanline, invalid region, etc) is not changed until it is reset
+ 			 * (at shadow_multiclient_consume). As best practice, subsystem
+ 			 * implementation should invoke shadow_subsystem_frame_update which
+ 			 * triggers the event and then wait for completion */
+ 			if (client->activated && !client->suppressOutput)
+ 			{
+ 				/* Send screen update or resize to this client */
+ 
+-				/* Check resize */
+-				if (shadow_client_recalc_desktop_size(client))
+-				{
+-					/* Screen size changed, do resize */
+-					if (!shadow_client_send_resize(client, &gfxstatus))
++					/* Check resize */
++					if (shadow_client_recalc_desktop_size(client))
+ 					{
+-						WLog_ERR(TAG, "Failed to send resize message");
+-						break;
++						/* Screen size changed, do resize */
++						if (!shadow_client_send_resize(client, &gfxstatus))
++						{
++							(void)shadow_multiclient_consume(UpdateSubscriber);
++							WLog_ERR(TAG, "Failed to send resize message");
++							break;
++						}
++						(void)shadow_multiclient_consume(UpdateSubscriber);
+ 					}
++					else
++					{
++						/* Send frame */
++						if (!shadow_client_send_surface_update(client, &gfxstatus, UpdateSubscriber))
++						{
++							WLog_ERR(TAG, "Failed to send surface update");
++							break;
++						}
++					}
+ 				}
+ 				else
+ 				{
+-					/* Send frame */
+-					if (!shadow_client_send_surface_update(client, &gfxstatus))
++					/* Our client don't receive graphic updates. Just save the invalid region */
++					if (!shadow_client_no_surface_update(client, &gfxstatus))
+ 					{
+-						WLog_ERR(TAG, "Failed to send surface update");
++						(void)shadow_multiclient_consume(UpdateSubscriber);
++						WLog_ERR(TAG, "Failed to handle surface update");
+ 						break;
+ 					}
+-				}
+-			}
+-			else
+-			{
+-				/* Our client don't receive graphic updates. Just save the invalid region */
+-				if (!shadow_client_no_surface_update(client, &gfxstatus))
+-				{
+-					WLog_ERR(TAG, "Failed to handle surface update");
+-					break;
++					(void)shadow_multiclient_consume(UpdateSubscriber);
+ 				}
+ 			}
+-
+-			/*
+-			 * The return value of shadow_multiclient_consume is whether or not
+-			 * the subscriber really consumes the event. It's not cared currently.
+-			 */
+-			(void)shadow_multiclient_consume(UpdateSubscriber);
+-		}
+ 
+ 		WINPR_ASSERT(peer->CheckFileDescriptor);
+ 		if (!peer->CheckFileDescriptor(peer))
+ 		{
+ 			WLog_ERR(TAG, "Failed to check FreeRDP file descriptor");
+ 			goto fail;
+ 		}

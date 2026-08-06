@@ -191,6 +191,64 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(freerdp)
 
+# FreeRDP holds its shared surface lock while each client encodes and writes a
+# frame. On macOS, one slow RDP client can therefore stall capture for every
+# other client. Apply the checked-in patch to the pinned source tree so each
+# client snapshots the frame before doing any slow work. The patch only
+# changes the generated FetchContent tree; it never changes an upstream
+# checkout or installs a dependency.
+set(MACRDP_FREERDP_FRAME_SNAPSHOT_PATCH
+    "${CMAKE_CURRENT_SOURCE_DIR}/patches/freerdp-shadow-frame-snapshot.patch")
+set(MACRDP_FREERDP_SHADOW_HEADER
+    "${freerdp_SOURCE_DIR}/include/freerdp/server/shadow.h")
+set(MACRDP_FREERDP_SHADOW_CLIENT
+    "${freerdp_SOURCE_DIR}/server/shadow/shadow_client.c")
+if(NOT EXISTS "${MACRDP_FREERDP_FRAME_SNAPSHOT_PATCH}")
+    message(FATAL_ERROR
+        "Missing checked-in FreeRDP frame snapshot patch")
+endif()
+if(NOT EXISTS "${MACRDP_FREERDP_SHADOW_HEADER}"
+   OR NOT EXISTS "${MACRDP_FREERDP_SHADOW_CLIENT}")
+    message(FATAL_ERROR
+        "Pinned FreeRDP source is missing the shadow client files required by macrdp")
+endif()
+
+file(READ "${MACRDP_FREERDP_SHADOW_HEADER}" MACRDP_SHADOW_HEADER_CONTENT)
+file(READ "${MACRDP_FREERDP_SHADOW_CLIENT}" MACRDP_SHADOW_CLIENT_CONTENT)
+string(FIND "${MACRDP_SHADOW_HEADER_CONTENT}" "MACRDP_CLIENT_FRAME_SNAPSHOT"
+    MACRDP_SHADOW_HEADER_PATCH_OFFSET)
+string(FIND "${MACRDP_SHADOW_CLIENT_CONTENT}" "shadow_client_snapshot_surface"
+    MACRDP_SHADOW_CLIENT_PATCH_OFFSET)
+
+if(MACRDP_SHADOW_HEADER_PATCH_OFFSET EQUAL -1
+   AND MACRDP_SHADOW_CLIENT_PATCH_OFFSET EQUAL -1)
+    find_program(MACRDP_PATCH_EXECUTABLE patch)
+    if(NOT MACRDP_PATCH_EXECUTABLE)
+        message(FATAL_ERROR
+            "The 'patch' utility is required to patch the pinned FreeRDP source")
+    endif()
+
+    execute_process(
+        COMMAND "${MACRDP_PATCH_EXECUTABLE}" -N -t -p1
+            -i "${MACRDP_FREERDP_FRAME_SNAPSHOT_PATCH}"
+        WORKING_DIRECTORY "${freerdp_SOURCE_DIR}"
+        RESULT_VARIABLE MACRDP_FRAME_SNAPSHOT_PATCH_RESULT
+        OUTPUT_VARIABLE MACRDP_FRAME_SNAPSHOT_PATCH_OUTPUT
+        ERROR_VARIABLE MACRDP_FRAME_SNAPSHOT_PATCH_ERROR
+    )
+    if(NOT MACRDP_FRAME_SNAPSHOT_PATCH_RESULT EQUAL 0)
+        message(FATAL_ERROR
+            "Unable to patch pinned FreeRDP for per-client frame snapshots.\n"
+            "stdout: ${MACRDP_FRAME_SNAPSHOT_PATCH_OUTPUT}\n"
+            "stderr: ${MACRDP_FRAME_SNAPSHOT_PATCH_ERROR}")
+    endif()
+elseif(MACRDP_SHADOW_HEADER_PATCH_OFFSET EQUAL -1
+       OR MACRDP_SHADOW_CLIENT_PATCH_OFFSET EQUAL -1)
+    message(FATAL_ERROR
+        "Pinned FreeRDP has a partial macrdp frame snapshot patch; "
+        "remove the generated FetchContent source and reconfigure")
+endif()
+
 if(MACRDP_USE_VIDEOTOOLBOX_H264_ENCODING)
     foreach(MACRDP_FREERDP_CODEC_TARGET IN ITEMS freerdp-codecs freerdp)
         if(TARGET ${MACRDP_FREERDP_CODEC_TARGET})
@@ -371,9 +429,8 @@ if(EXISTS "${MACRDP_FREERDP_H264_SOURCE}")
             MACRDP_VIDEOTOOLBOX_OPTIONS_OFFSET)
         if(MACRDP_VIDEOTOOLBOX_OPTIONS_OFFSET EQUAL -1)
             string(REPLACE
-                "\tav_opt_set(sys->codecEncoderContext, \"tune\", \"zerolatency\", AV_OPT_SEARCH_CHILDREN);"
-                "\tav_opt_set(sys->codecEncoderContext, \"tune\", \"zerolatency\", AV_OPT_SEARCH_CHILDREN);\n#ifdef MACRDP_USE_VIDEOTOOLBOX_H264_ENCODING\n\t\tif (sys->codecEncoder == avcodec_find_encoder_by_name(\"h264_videotoolbox\"))\n\t\t{\n\t\t\t/* MACRDP_VIDEOTOOLBOX_OPTIONS */\n\t\t\t(void)av_opt_set(sys->codecEncoderContext, \"realtime\", \"1\", AV_OPT_SEARCH_CHILDREN);\n\t\t\t(void)av_opt_set(sys->codecEncoderContext, \"prio_speed\", \"1\", AV_OPT_SEARCH_CHILDREN);\n\t\t\t(void)av_opt_set_int(sys->codecEncoderContext, \"max_ref_frames\", 1, AV_OPT_SEARCH_CHILDREN);\n\t\t}\n#endif"
-                "\tav_opt_set(sys->codecEncoderContext, \"tune\", \"zerolatency\", AV_OPT_SEARCH_CHILDREN);\n#ifdef MACRDP_USE_VIDEOTOOLBOX_H264_ENCODING\n\t\tif (sys->codecEncoder == avcodec_find_encoder_by_name(\"h264_videotoolbox\"))\n\t\t{\n\t\t\t/* MACRDP_VIDEOTOOLBOX_OPTIONS */\n\t\t\t(void)av_opt_set(sys->codecEncoderContext, \"realtime\", \"1\", AV_OPT_SEARCH_CHILDREN);\n\t\t\t(void)av_opt_set(sys->codecEncoderContext, \"prio_speed\", \"1\", AV_OPT_SEARCH_CHILDREN);\n\t\t}\n#endif"
+                "av_opt_set(sys->codecEncoderContext, \"tune\", \"zerolatency\", AV_OPT_SEARCH_CHILDREN);"
+                "av_opt_set(sys->codecEncoderContext, \"tune\", \"zerolatency\", AV_OPT_SEARCH_CHILDREN);\n#ifdef MACRDP_USE_VIDEOTOOLBOX_H264_ENCODING\n\t\tif (sys->codecEncoder == avcodec_find_encoder_by_name(\"h264_videotoolbox\"))\n\t\t{\n\t\t\t/* MACRDP_VIDEOTOOLBOX_OPTIONS */\n\t\t\t(void)av_opt_set(sys->codecEncoderContext, \"realtime\", \"1\", AV_OPT_SEARCH_CHILDREN);\n\t\t\t(void)av_opt_set(sys->codecEncoderContext, \"prio_speed\", \"1\", AV_OPT_SEARCH_CHILDREN);\n\t\t\t(void)av_opt_set_int(sys->codecEncoderContext, \"max_ref_frames\", 1, AV_OPT_SEARCH_CHILDREN);\n\t\t}\n#endif"
                 MACRDP_FREERDP_H264_CONTENT
                 "${MACRDP_FREERDP_H264_CONTENT}")
 
