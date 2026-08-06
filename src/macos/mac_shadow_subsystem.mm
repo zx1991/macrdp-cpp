@@ -24,6 +24,7 @@
 #include <optional>
 #include <string>
 #include <thread>
+#include <utility>
 
 #define TAG SERVER_TAG("macrdp")
 
@@ -183,17 +184,29 @@ UINT32 mac_shadow_enum_monitors(MONITOR_DEF* monitors, UINT32 max_monitors) {
     return 1;
 }
 
+std::pair<std::uint32_t, std::uint32_t> shadow_surface_dimensions(
+    const MacShadowSubsystem* subsystem) {
+    if (subsystem == nullptr || subsystem->common.server == nullptr
+        || subsystem->common.server->surface == nullptr) {
+        return {0, 0};
+    }
+
+    auto* surface = subsystem->common.server->surface;
+    EnterCriticalSection(&surface->lock);
+    const auto dimensions = std::pair{surface->width, surface->height};
+    LeaveCriticalSection(&surface->lock);
+    return dimensions;
+}
+
 CGPoint display_point(const MacShadowSubsystem* subsystem, UINT16 x, UINT16 y) {
     const CGRect bounds = CGDisplayBounds(CGMainDisplayID());
-    const auto surface = subsystem->common.server == nullptr
-        ? nullptr
-        : subsystem->common.server->surface;
-    const double width = surface == nullptr || surface->width == 0
+    const auto [surface_width, surface_height] = shadow_surface_dimensions(subsystem);
+    const double width = surface_width == 0
         ? std::max(1.0, bounds.size.width - 1.0)
-        : std::max(1.0, static_cast<double>(surface->width) - 1.0);
-    const double height = surface == nullptr || surface->height == 0
+        : std::max(1.0, static_cast<double>(surface_width) - 1.0);
+    const double height = surface_height == 0
         ? std::max(1.0, bounds.size.height - 1.0)
-        : std::max(1.0, static_cast<double>(surface->height) - 1.0);
+        : std::max(1.0, static_cast<double>(surface_height) - 1.0);
     const double normalized_x = std::clamp(static_cast<double>(x) / width, 0.0, 1.0);
     const double normalized_y = std::clamp(static_cast<double>(y) / height, 0.0, 1.0);
     return CGPointMake(
@@ -616,16 +629,20 @@ int mac_shadow_subsystem_start(rdpShadowSubsystem* base) {
     }
 
     auto options = macrdp::DisplayCaptureOptions{};
+    const auto [surface_width, surface_height] = shadow_surface_dimensions(subsystem);
+    if (surface_width == 0 || surface_height == 0) {
+        return -1;
+    }
     options.max_width = subsystem->capture_config.max_width == 0
-        ? subsystem->common.server->surface->width
+        ? surface_width
         : std::min(
               subsystem->capture_config.max_width,
-              subsystem->common.server->surface->width);
+              surface_width);
     options.max_height = subsystem->capture_config.max_height == 0
-        ? subsystem->common.server->surface->height
+        ? surface_height
         : std::min(
               subsystem->capture_config.max_height,
-              subsystem->common.server->surface->height);
+              surface_height);
     options.frame_rate = subsystem->capture_config.frame_rate;
     options.show_cursor = false;
     subsystem->capture = std::make_unique<macrdp::DisplayCapture>(options);
@@ -748,17 +765,22 @@ rdpShadowSubsystem* mac_shadow_subsystem_new() {
             if (mac == nullptr) {
                 return false;
             }
-            const auto* surface = mac->common.server == nullptr
-                ? nullptr
-                : mac->common.server->surface;
-            const auto width = surface == nullptr ? UINT16_MAX : surface->width;
-            const auto height = surface == nullptr ? UINT16_MAX : surface->height;
+            std::int32_t pointer_x = 0;
+            std::int32_t pointer_y = 0;
+            {
+                std::lock_guard input_lock(mac->input_mutex);
+                pointer_x = mac->pointer_x;
+                pointer_y = mac->pointer_y;
+            }
+            const auto [surface_width, surface_height] = shadow_surface_dimensions(mac);
+            const auto width = surface_width == 0 ? UINT16_MAX : surface_width;
+            const auto height = surface_height == 0 ? UINT16_MAX : surface_height;
             const auto x = static_cast<UINT16>(std::clamp<std::int32_t>(
-                mac->pointer_x + x_delta,
+                pointer_x + x_delta,
                 0,
                 static_cast<std::int32_t>(width > 0 ? width - 1 : 0)));
             const auto y = static_cast<UINT16>(std::clamp<std::int32_t>(
-                mac->pointer_y + y_delta,
+                pointer_y + y_delta,
                 0,
                 static_cast<std::int32_t>(height > 0 ? height - 1 : 0)));
             return post_mouse_event(mac, flags | PTR_FLAGS_MOVE, x, y) ? true : false;
