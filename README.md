@@ -20,6 +20,10 @@ a fallback. AVC444 remains available for clients that need higher chroma
 fidelity; it uses the FFmpeg path because the direct bridge currently accepts
 I420/AVC420 input.
 
+The server currently does not expose a macOS microphone. FreeRDP's AUDIN input
+channel is disabled, so Windows audio output can still be used without an
+unused microphone channel affecting connection setup.
+
 ## Build
 
 ```bash
@@ -89,6 +93,11 @@ already occupies that port.
 For an existing FreeRDP NTLM SAM file, use `--sam-file path/to/file.sam`.
 `--security tls` and `--security rdp` are available for compatibility testing,
 but NLA is the default and recommended mode. Empty passwords are rejected.
+
+The server logs the captured frame size and RDP surface size once per change.
+They should normally match. A `Slow frame update` warning reports the time
+spent copying a frame and waiting for the RDP client to consume and send it;
+the latter is the useful indicator when the remote image is delayed.
 
 The first server start requires Screen Recording permission. Grant it to the
 terminal or executable in System Settings > Privacy & Security > Screen

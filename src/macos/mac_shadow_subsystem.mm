@@ -14,6 +14,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cinttypes>
 #include <cstdint>
 #include <cstring>
 #include <memory>
@@ -33,6 +34,15 @@ struct CredentialConfig {
 
 std::mutex g_credentials_mutex;
 CredentialConfig g_credentials;
+
+struct CaptureConfig {
+    std::uint32_t max_width = 0;
+    std::uint32_t max_height = 0;
+    std::uint32_t frame_rate = 30;
+};
+
+std::mutex g_capture_config_mutex;
+CaptureConfig g_capture_config;
 
 void clear_secret(std::string& value) {
     volatile char* data = value.empty() ? nullptr : value.data();
@@ -72,11 +82,17 @@ struct mac_shadow_subsystem {
     std::string username;
     std::string domain;
     std::string password;
+    CaptureConfig capture_config;
     bool left_button_down = false;
     bool right_button_down = false;
     bool other_button_down = false;
     std::int32_t pointer_x = 0;
     std::int32_t pointer_y = 0;
+    std::uint32_t last_frame_width = 0;
+    std::uint32_t last_frame_height = 0;
+    std::uint32_t last_surface_width = 0;
+    std::uint32_t last_surface_height = 0;
+    std::chrono::steady_clock::time_point last_slow_frame_log{};
 };
 
 using MacShadowSubsystem = struct mac_shadow_subsystem;
@@ -357,7 +373,22 @@ bool copy_frame_to_surface(MacShadowSubsystem* subsystem, const macrdp::Frame& f
         return false;
     }
 
+    const auto copy_started = std::chrono::steady_clock::now();
     EnterCriticalSection(&surface->lock);
+    const auto surface_width = surface->width;
+    const auto surface_height = surface->height;
+    if (frame.width != subsystem->last_frame_width
+        || frame.height != subsystem->last_frame_height
+        || surface_width != subsystem->last_surface_width
+        || surface_height != subsystem->last_surface_height) {
+        WLog_INFO(TAG, "Capture frame %ux%u, RDP surface %ux%u",
+                  frame.width, frame.height, surface_width, surface_height);
+        subsystem->last_frame_width = frame.width;
+        subsystem->last_frame_height = frame.height;
+        subsystem->last_surface_width = surface_width;
+        subsystem->last_surface_height = surface_height;
+    }
+
     bool changed = false;
     if (frame.width == surface->width && frame.height == surface->height) {
         for (std::uint32_t y = 0; y < surface->height; ++y) {
@@ -366,11 +397,18 @@ bool copy_frame_to_surface(MacShadowSubsystem* subsystem, const macrdp::Frame& f
             if (std::memcmp(destination, source, static_cast<std::size_t>(surface->width) * 4)
                 != 0) {
                 changed = true;
+                break;
             }
-            std::memcpy(
-                destination,
-                source,
-                static_cast<std::size_t>(surface->width) * 4);
+        }
+        if (changed) {
+            for (std::uint32_t y = 0; y < surface->height; ++y) {
+                auto* destination = surface->data + y * surface->scanline;
+                const auto* source = frame.bgra.data() + y * frame.stride;
+                std::memcpy(
+                    destination,
+                    source,
+                    static_cast<std::size_t>(surface->width) * 4);
+            }
         }
     } else {
         // ScreenCaptureKit and RDP may use different Retina coordinate spaces.
@@ -407,10 +445,31 @@ bool copy_frame_to_surface(MacShadowSubsystem* subsystem, const macrdp::Frame& f
     }
     LeaveCriticalSection(&surface->lock);
 
-    if (changed) {
-        // The surface lock must be released before this barrier: clients take
-        // the same lock while consuming the published frame.
-        shadow_subsystem_frame_update(&subsystem->common);
+    if (!changed) {
+        return true;
+    }
+
+    const auto copy_finished = std::chrono::steady_clock::now();
+    // The surface lock must be released before this barrier: clients take
+    // the same lock while consuming the published frame.
+    shadow_subsystem_frame_update(&subsystem->common);
+    const auto update_finished = std::chrono::steady_clock::now();
+
+    const auto copy_time = std::chrono::duration_cast<std::chrono::milliseconds>(
+        copy_finished - copy_started);
+    const auto publish_wait = std::chrono::duration_cast<std::chrono::milliseconds>(
+        update_finished - copy_finished);
+    if (copy_time >= std::chrono::milliseconds{100}
+        || publish_wait >= std::chrono::milliseconds{200}) {
+        const auto now = std::chrono::steady_clock::now();
+        if (subsystem->last_slow_frame_log.time_since_epoch().count() == 0
+            || now - subsystem->last_slow_frame_log >= std::chrono::seconds{1}) {
+            WLog_WARN(TAG, "Slow frame update: copy=%" PRId64 "ms publish_wait=%" PRId64
+                           "ms capture=%ux%u surface=%ux%u",
+                      copy_time.count(), publish_wait.count(), frame.width, frame.height,
+                      surface_width, surface_height);
+            subsystem->last_slow_frame_log = now;
+        }
     }
     return true;
 }
@@ -464,9 +523,17 @@ int mac_shadow_subsystem_start(rdpShadowSubsystem* base) {
     }
 
     auto options = macrdp::DisplayCaptureOptions{};
-    options.max_width = subsystem->common.server->surface->width;
-    options.max_height = subsystem->common.server->surface->height;
-    options.frame_rate = 30;
+    options.max_width = subsystem->capture_config.max_width == 0
+        ? subsystem->common.server->surface->width
+        : std::min(
+              subsystem->capture_config.max_width,
+              subsystem->common.server->surface->width);
+    options.max_height = subsystem->capture_config.max_height == 0
+        ? subsystem->common.server->surface->height
+        : std::min(
+              subsystem->capture_config.max_height,
+              subsystem->common.server->surface->height);
+    options.frame_rate = subsystem->capture_config.frame_rate;
     options.show_cursor = false;
     subsystem->capture = std::make_unique<macrdp::DisplayCapture>(options);
     if (!subsystem->capture->start()) {
@@ -527,6 +594,10 @@ rdpShadowSubsystem* mac_shadow_subsystem_new() {
         subsystem->username = g_credentials.username;
         subsystem->domain = g_credentials.domain;
         subsystem->password = g_credentials.password;
+    }
+    {
+        std::lock_guard lock(g_capture_config_mutex);
+        subsystem->capture_config = g_capture_config;
     }
 
     subsystem->common.SynchronizeEvent = [](rdpShadowSubsystem*, rdpShadowClient*, UINT32) {
@@ -629,4 +700,44 @@ extern "C" void macrdp_shadow_set_credentials(
     g_credentials.domain = domain == nullptr ? std::string{} : domain;
     clear_secret(g_credentials.password);
     g_credentials.password = password == nullptr ? std::string{} : password;
+}
+
+extern "C" void macrdp_shadow_set_capture_options(
+    std::uint32_t max_width,
+    std::uint32_t max_height,
+    std::uint32_t frame_rate) {
+    std::lock_guard lock(g_capture_config_mutex);
+    g_capture_config.max_width = max_width;
+    g_capture_config.max_height = max_height;
+    g_capture_config.frame_rate = std::clamp(frame_rate, std::uint32_t{1}, std::uint32_t{60});
+}
+
+bool macrdp_shadow_preflight_capture(std::string& error) {
+    macrdp::DisplayCaptureOptions options;
+    options.max_width = 64;
+    options.max_height = 64;
+    options.frame_rate = 1;
+    options.show_cursor = false;
+
+    macrdp::DisplayCapture capture(options);
+    if (!capture.start()) {
+        error = capture.last_error();
+        if (error.empty()) {
+            error = "ScreenCaptureKit refused to start";
+        }
+        return false;
+    }
+
+    const auto frame = capture.next_frame(std::chrono::milliseconds{2500});
+    if (!frame.has_value()) {
+        error = capture.last_error();
+        if (error.empty()) {
+            error = "ScreenCaptureKit did not deliver a complete frame";
+        }
+        capture.stop();
+        return false;
+    }
+
+    capture.stop();
+    return true;
 }

@@ -46,6 +46,9 @@ struct Options {
     std::string sam_file;
     std::filesystem::path config_dir;
     std::uint32_t h264_bitrate = 16'000'000;
+    std::uint32_t frame_rate = 30;
+    std::uint32_t max_width = 0;
+    std::uint32_t max_height = 0;
     bool avc444 = false;
     bool password_from_stdin = false;
     std::string log_level = "INFO";
@@ -80,6 +83,9 @@ void print_usage(const char* program) {
         << "  --port <number>             Listen port (default: 3389)\n"
         << "  --security <nla|tls|rdp>    Security protocol (default: nla)\n"
         << "  --bitrate <value>           H.264 rate, e.g. 16M (default: 16M)\n"
+        << "  --fps <number>              Capture/encode rate, 1-60 (default: 30)\n"
+        << "  --max-width <pixels>        Optional capture width limit\n"
+        << "  --max-height <pixels>       Optional capture height limit\n"
         << "  --avc444                    Use AVC444 (higher CPU and color fidelity)\n"
         << "  --user <name>               Login user for generated SAM/TLS auth\n"
         << "  --domain <name>             Optional login domain\n"
@@ -138,6 +144,25 @@ bool parse_bitrate(std::string_view value, std::uint32_t& bitrate) {
     return true;
 }
 
+bool parse_uint32_range(
+    std::string_view value,
+    std::uint32_t minimum,
+    std::uint32_t maximum,
+    std::uint32_t& result_value) {
+    if (value.empty()) {
+        return false;
+    }
+
+    std::uint64_t parsed = 0;
+    const auto result = std::from_chars(value.data(), value.data() + value.size(), parsed);
+    if (result.ec != std::errc{} || result.ptr != value.data() + value.size()
+        || parsed < minimum || parsed > maximum) {
+        return false;
+    }
+    result_value = static_cast<std::uint32_t>(parsed);
+    return true;
+}
+
 bool parse_security(std::string_view value, SecurityMode& mode) {
     if (value == "nla") {
         mode = SecurityMode::nla;
@@ -183,6 +208,32 @@ bool parse_options(int argc, char** argv, Options& options) {
             if (!next_value(index, argc, argv, value)
                 || !parse_bitrate(value, options.h264_bitrate)) {
                 std::cerr << "--bitrate must be a positive value in bps, Kbps, or Mbps\n";
+                return false;
+            }
+        } else if (argument == "--fps") {
+            if (!next_value(index, argc, argv, value)
+                || !parse_uint32_range(value, 1, 60, options.frame_rate)) {
+                std::cerr << "--fps must be between 1 and 60\n";
+                return false;
+            }
+        } else if (argument == "--max-width") {
+            if (!next_value(index, argc, argv, value)
+                || !parse_uint32_range(
+                       value,
+                       1,
+                       std::numeric_limits<std::uint16_t>::max(),
+                       options.max_width)) {
+                std::cerr << "--max-width must be between 1 and 65535\n";
+                return false;
+            }
+        } else if (argument == "--max-height") {
+            if (!next_value(index, argc, argv, value)
+                || !parse_uint32_range(
+                       value,
+                       1,
+                       std::numeric_limits<std::uint16_t>::max(),
+                       options.max_height)) {
+                std::cerr << "--max-height must be between 1 and 65535\n";
                 return false;
             }
         } else if (argument == "--avc444") {
@@ -369,12 +420,16 @@ bool configure_server(rdpShadowServer* server, const Options& options, const std
     // Windows 11 24H2 clients are more reliable with one bitmap rectangle.
     server->SupportMultiRectBitmapUpdates = FALSE;
     server->h264BitRate = options.h264_bitrate;
-    server->h264FrameRate = 30;
+    server->h264FrameRate = options.frame_rate;
     server->h264QP = 0;
 
     // The direct bridge accepts AVC420/I420. AVC444 has a separate YUV444
     // stream and therefore remains on FreeRDP's FFmpeg fallback path.
     macrdp_vt_h264_encoder_set_enabled(options.avc444 ? 0 : 1);
+    macrdp_shadow_set_capture_options(
+        options.max_width,
+        options.max_height,
+        options.frame_rate);
 
     if (!set_security(server->settings, options.security)
         || !freerdp_settings_set_uint32(server->settings, FreeRDP_ColorDepth, 32)
@@ -490,6 +545,18 @@ int main(int argc, char** argv) {
         return 1;
     }
 
+    std::string capture_error;
+    if (!macrdp_shadow_preflight_capture(capture_error)) {
+        std::cerr << "Unable to access the macOS display before starting the RDP listener: "
+                  << capture_error << "\n"
+                  << "Grant Screen Recording permission and run from the logged-in GUI session.\n";
+        shadow_server_uninit(server);
+        shadow_server_free(server);
+        macrdp_shadow_set_credentials(nullptr, nullptr, nullptr);
+        clear_secret(options.password);
+        return 1;
+    }
+
     if (shadow_server_start(server) < 0) {
         std::cerr << "Unable to start FreeRDP shadow server\n";
         shadow_server_uninit(server);
@@ -508,9 +575,11 @@ int main(int argc, char** argv) {
                       : options.security == SecurityMode::tls ? "TLS" : "RDP")
               << " security\n";
 
+    bool server_failed = false;
     while (!g_stop_requested) {
         if (server->thread != nullptr
             && WaitForSingleObject(server->thread, 0) == WAIT_OBJECT_0) {
+            server_failed = true;
             break;
         }
         std::this_thread::sleep_for(std::chrono::milliseconds{250});
@@ -521,5 +590,8 @@ int main(int argc, char** argv) {
     shadow_server_free(server);
     macrdp_shadow_set_credentials(nullptr, nullptr, nullptr);
     clear_secret(options.password);
-    return 0;
+    if (server_failed) {
+        std::cerr << "RDP server stopped unexpectedly\n";
+    }
+    return server_failed ? 1 : 0;
 }

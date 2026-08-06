@@ -129,6 +129,7 @@ set(WITH_VAAPI_H264_ENCODING OFF CACHE BOOL "Do not configure VAAPI H.264 encodi
 # channel set intentionally small for this first macOS server milestone.
 foreach(MACRDP_DISABLED_CHANNEL IN ITEMS
     AINPUT
+    AUDIN
     CLIPRDR
     DISP
     DRIVE
@@ -155,7 +156,7 @@ foreach(MACRDP_DISABLED_CHANNEL IN ITEMS
     VIDEO)
     set(CHANNEL_${MACRDP_DISABLED_CHANNEL} OFF CACHE BOOL "Disable unused FreeRDP channel" FORCE)
 endforeach()
-foreach(MACRDP_REQUIRED_CHANNEL IN ITEMS AUDIN DRDYNVC ENCOMSP RDPGFX RDPSND REMDESK)
+foreach(MACRDP_REQUIRED_CHANNEL IN ITEMS DRDYNVC ENCOMSP RDPGFX RDPSND REMDESK)
     set(CHANNEL_${MACRDP_REQUIRED_CHANNEL} ON CACHE BOOL "Enable required FreeRDP channel" FORCE)
 endforeach()
 
@@ -424,7 +425,7 @@ set(MACRDP_FREERDP_SHADOW_SOURCES
     ${freerdp_SOURCE_DIR}/server/shadow/shadow_encomsp.c
     ${freerdp_SOURCE_DIR}/server/shadow/shadow_remdesk.c
     ${freerdp_SOURCE_DIR}/server/shadow/shadow_rdpsnd.c
-    ${freerdp_SOURCE_DIR}/server/shadow/shadow_audin.c
+    src/macos/shadow_audin_stub.c
     ${freerdp_SOURCE_DIR}/server/shadow/shadow_rdpgfx.c
     ${freerdp_SOURCE_DIR}/server/shadow/shadow_subsystem.c
     ${freerdp_SOURCE_DIR}/server/shadow/shadow_mcevent.c

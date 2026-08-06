@@ -3,6 +3,11 @@
 #include <freerdp/server/shadow.h>
 
 #ifdef __cplusplus
+#include <cstdint>
+#include <string>
+#endif
+
+#ifdef __cplusplus
 extern "C"
 {
 #endif
@@ -14,6 +19,16 @@ void macrdp_shadow_set_credentials(
     const char* domain,
     const char* password);
 
+void macrdp_shadow_set_capture_options(
+    std::uint32_t max_width,
+    std::uint32_t max_height,
+    std::uint32_t frame_rate);
+
 #ifdef __cplusplus
 }
+
+// Validate ScreenCaptureKit before opening the RDP listener. The check uses a
+// tiny stream and waits for one complete frame, so TCC and GUI-session errors
+// are reported at startup instead of after the listener is already advertised.
+bool macrdp_shadow_preflight_capture(std::string& error);
 #endif

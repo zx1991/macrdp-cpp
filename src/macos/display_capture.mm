@@ -87,7 +87,9 @@ bool sample_status_is_usable(CMSampleBufferRef sample_buffer) {
     }
 
     const auto status = static_cast<SCFrameStatus>([status_value integerValue]);
-    return status == SCFrameStatusComplete || status == SCFrameStatusStarted;
+    // Started/Idle samples can contain an incomplete surface. Passing them
+    // through creates stale or partially updated frames under load.
+    return status == SCFrameStatusComplete;
 }
 
 bool copy_sample_buffer(CMSampleBufferRef sample_buffer, macrdp::Frame& frame) {
