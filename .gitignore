@@ -1,0 +1,5 @@
+/build/
+/capture.ppm
+/capture.h264
+/encoder-test.h264
+.DS_Store
