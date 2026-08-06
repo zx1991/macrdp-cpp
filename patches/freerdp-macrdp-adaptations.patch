@@ -135,7 +135,7 @@
  	INT64 nXSrc = 0;
  	INT64 nYSrc = 0;
  	INT64 nWidth = 0;
-@@ -2227,37 +2272,53 @@
+@@ -2227,37 +2298,53 @@
  	const RECTANGLE_16* rects = nullptr;
  
  	if (!context || !pStatus)
@@ -185,7 +185,7 @@
  	EnterCriticalSection(&surface->lock);
 +	surface_locked = TRUE;
 +	snapshotGeneration = surface->macrdpFrameGeneration;
-	rects = region16_rects(&(surface->invalidRegion), &numRects);
+ 	rects = region16_rects(&(surface->invalidRegion), &numRects);
  
  	for (UINT32 index = 0; index < numRects; index++)
  	{
@@ -198,7 +198,7 @@
  	}
  
  	surfaceRect.left = 0;
-@@ -2267,27 +2327,39 @@
+@@ -2267,27 +2354,39 @@
  	surfaceRect.right = (UINT16)surface->width;
  	surfaceRect.bottom = (UINT16)surface->height;
  	if (!region16_intersect_rect(&invalidRegion, &invalidRegion, &surfaceRect))
@@ -243,7 +243,7 @@
  	SrcFormat = surface->format;
  
  	/* Move to new pSrcData / nXSrc / nYSrc according to sub rect */
-@@ -2306,6 +2378,21 @@
+@@ -2306,6 +2405,21 @@
  		pSrcData = &pSrcData[((UINT16)subY * nSrcStep) + ((UINT16)subX * 4U)];
  	}
  
@@ -265,7 +265,7 @@
  	// WLog_INFO(TAG, "shadow_client_send_surface_update: x: %" PRId64 " y: %" PRId64 " width: %"
  	// PRId64 " height: %" PRId64 " right: %" PRId64 " bottom: %" PRId64, 	nXSrc, nYSrc, nWidth,
  	// nHeight, nXSrc + nWidth, nYSrc + nHeight);
-@@ -2323,10 +2404,10 @@
+@@ -2323,10 +2437,10 @@
  			{
  				/* Only init surface when we have h264 supported */
  				if (!(ret = shadow_client_rdpgfx_reset_graphic(client)))
@@ -278,7 +278,7 @@
  
  				pStatus->gfxSurfaceCreated = TRUE;
  			}
-@@ -2370,9 +2451,6 @@
+@@ -2370,9 +2484,6 @@
  		                                       (UINT16)nYSrc, (UINT16)nWidth, (UINT16)nHeight);
  	}
  
@@ -288,7 +288,9 @@
  	return ret;
  }
  
-@@ -2561,15 +2561,21 @@
+@@ -2451,17 +2562,23 @@
+  */
+ WINPR_ATTR_NODISCARD
  static inline BOOL shadow_client_no_surface_update(rdpShadowClient* client,
 -                                                   SHADOW_GFX_STATUS* pStatus)
 +                                                   SHADOW_GFX_STATUS* pStatus,
@@ -311,7 +313,7 @@
  	LeaveCriticalSection(&surface->lock);
  	return rc;
  }
-@@ -2651,5 +2651,9 @@
+@@ -2651,6 +2768,12 @@
  	rc = peer->Initialize(peer);
  	if (!rc)
  		goto out;
@@ -319,11 +321,26 @@
 +	if (!freerdp_settings_set_bool(settings, FreeRDP_WaitForOutputBufferFlush, FALSE))
 +		goto out;
 +	/* MACRDP_NONBLOCKING_OUTPUT */
++	BOOL outputBlocked = FALSE;
++	BOOL frameDeferred = FALSE;
  
  	update = peer->context->update;
-@@ -2715,9 +2721,28 @@
+ 	WINPR_ASSERT(update);
+@@ -2707,13 +2830,40 @@
+ 			events[nCount++] = gfxevent;
+ #endif
+ 
+-		status = WaitForMultipleObjects(nCount, events, FALSE, INFINITE);
++		const DWORD waitTimeout = outputBlocked ? 16 : INFINITE;
++		status = WaitForMultipleObjects(nCount, events, FALSE, waitTimeout);
+ 
+ 		if (status == WAIT_FAILED)
+ 			goto fail;
+ 
+-		if (WaitForSingleObject(UpdateEvent, 0) == WAIT_OBJECT_0)
++		outputBlocked = FALSE;
 +		if (peer->IsWriteBlocked && peer->IsWriteBlocked(peer))
-+		{
+ 		{
 +			const int drainStatus =
 +				peer->DrainOutputBuffer ? peer->DrainOutputBuffer(peer) : -1;
 +			if (drainStatus < 0)
@@ -339,91 +356,104 @@
 +			WLog_ERR(TAG, "Failed to check FreeRDP input before frame update");
 +			goto fail;
 +		}
++		if (peer->IsWriteBlocked && peer->IsWriteBlocked(peer))
++			outputBlocked = TRUE;
 +
--		if (WaitForSingleObject(UpdateEvent, 0) == WAIT_OBJECT_0)
-+		if (WaitForSingleObject(UpdateEvent, 0) == WAIT_OBJECT_0 &&
-+		    shadow_multiclient_subscriber_pending(UpdateSubscriber))
- 		{
++		const BOOL updatePending =
++			WaitForSingleObject(UpdateEvent, 0) == WAIT_OBJECT_0 &&
++			shadow_multiclient_subscriber_pending(UpdateSubscriber);
++		const BOOL retryDeferred = frameDeferred && !outputBlocked;
++
++		if (updatePending || retryDeferred)
++		{
  			/* The UpdateEvent means to start sending current frame. It is
  			 * triggered from subsystem implementation and it should ensure
  			 * that the screen and primary surface meta data (width, height,
- 			 * scanline, invalid region, etc) is not changed until it is reset
+@@ -2721,8 +2871,22 @@
  			 * (at shadow_multiclient_consume). As best practice, subsystem
  			 * implementation should invoke shadow_subsystem_frame_update which
  			 * triggers the event and then wait for completion */
-@@ -2725,43 +2803,46 @@
+-			if (client->activated && !client->suppressOutput)
++			if (outputBlocked && updatePending)
  			{
++				/* MACRDP_SKIP_BLOCKED_FRAME */
++				/* Preserve the dirty region without doing another expensive encode
++				 * while the non-blocking transport is backed up. Input is still
++				 * processed above, and a writable pass retries the coalesced frame. */
++				if (!shadow_client_no_surface_update(client, &gfxstatus, UpdateSubscriber))
++				{
++					WLog_ERR(TAG, "Failed to defer surface update while output is blocked");
++					break;
++				}
++				if (client->activated && !client->suppressOutput)
++					frameDeferred = TRUE;
++			}
++			else if (client->activated && !client->suppressOutput)
++			{
  				/* Send screen update or resize to this client */
  
--				/* Check resize */
--				if (shadow_client_recalc_desktop_size(client))
--				{
--					/* Screen size changed, do resize */
--					if (!shadow_client_send_resize(client, &gfxstatus))
-+					/* Check resize */
-+					if (shadow_client_recalc_desktop_size(client))
+ 				/* Check resize */
+@@ -2731,36 +2895,41 @@
+ 					/* Screen size changed, do resize */
+ 					if (!shadow_client_send_resize(client, &gfxstatus))
  					{
--						WLog_ERR(TAG, "Failed to send resize message");
--						break;
-+						/* Screen size changed, do resize */
-+						if (!shadow_client_send_resize(client, &gfxstatus))
-+						{
-+							(void)shadow_multiclient_consume_nowait(UpdateSubscriber);
-+							WLog_ERR(TAG, "Failed to send resize message");
-+							break;
-+						}
 +						(void)shadow_multiclient_consume_nowait(UpdateSubscriber);
+ 						WLog_ERR(TAG, "Failed to send resize message");
+ 						break;
  					}
-+					else
-+					{
-+						/* Send frame */
-+						const ULONGLONG updateStarted = GetTickCount64();
-+						const BOOL updateOk =
-+							shadow_client_send_surface_update(client, &gfxstatus, UpdateSubscriber);
-+						const ULONGLONG updateElapsed = GetTickCount64() - updateStarted;
-+						if (updateElapsed >= 200)
-+							WLog_WARN(TAG, "Slow client frame handling: %llums",
-+							          (unsigned long long)updateElapsed);
-+						if (!updateOk)
-+						{
-+							WLog_ERR(TAG, "Failed to send surface update");
-+							break;
-+						}
-+					}
++					(void)shadow_multiclient_consume_nowait(UpdateSubscriber);
++					frameDeferred = FALSE;
  				}
  				else
  				{
--					/* Send frame */
+ 					/* Send frame */
 -					if (!shadow_client_send_surface_update(client, &gfxstatus))
-+					/* Our client don't receive graphic updates. Just save the invalid region */
-+					if (!shadow_client_no_surface_update(client, &gfxstatus, UpdateSubscriber))
++					const ULONGLONG updateStarted = GetTickCount64();
++					const BOOL updateOk =
++						shadow_client_send_surface_update(client, &gfxstatus, UpdateSubscriber);
++					const ULONGLONG updateElapsed = GetTickCount64() - updateStarted;
++					if (updateElapsed >= 200)
++						WLog_WARN(TAG, "Slow client frame handling: %llums",
++						          (unsigned long long)updateElapsed);
++					if (!updateOk)
  					{
--						WLog_ERR(TAG, "Failed to send surface update");
-+						WLog_ERR(TAG, "Failed to handle surface update");
+ 						WLog_ERR(TAG, "Failed to send surface update");
  						break;
  					}
--				}
--			}
++					frameDeferred = FALSE;
+ 				}
+ 			}
 -			else
--			{
--				/* Our client don't receive graphic updates. Just save the invalid region */
++			else if (updatePending)
+ 			{
+ 				/* Our client don't receive graphic updates. Just save the invalid region */
 -				if (!shadow_client_no_surface_update(client, &gfxstatus))
--				{
--					WLog_ERR(TAG, "Failed to handle surface update");
--					break;
-				}
-			}
- 
++				if (!shadow_client_no_surface_update(client, &gfxstatus, UpdateSubscriber))
+ 				{
+ 					WLog_ERR(TAG, "Failed to handle surface update");
+ 					break;
+ 				}
+ 			}
++		}
+-
 -			/*
 -			 * The return value of shadow_multiclient_consume is whether or not
 -			 * the subscriber really consumes the event. It's not cared currently.
 -			 */
 -			(void)shadow_multiclient_consume(UpdateSubscriber);
 -		}
--
-		WINPR_ASSERT(peer->CheckFileDescriptor);
-		if (!peer->CheckFileDescriptor(peer))
-		{
+ 
+ 		WINPR_ASSERT(peer->CheckFileDescriptor);
+ 		if (!peer->CheckFileDescriptor(peer))
+@@ -2768,6 +2936,8 @@
+ 			WLog_ERR(TAG, "Failed to check FreeRDP file descriptor");
+ 			goto fail;
+ 		}
++		if (peer->IsWriteBlocked && peer->IsWriteBlocked(peer))
++			outputBlocked = TRUE;
+ 
+ 		if (client->activated &&
+ 		    WTSVirtualChannelManagerIsChannelJoined(client->vcm, DRDYNVC_SVC_CHANNEL_NAME))
 --- a/libfreerdp/codec/h264_ffmpeg.c
 +++ b/libfreerdp/codec/h264_ffmpeg.c
 @@ -21,6 +21,9 @@
