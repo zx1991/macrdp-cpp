@@ -159,6 +159,25 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(freerdp)
 
+# FreeRDP's FFmpeg H.264 wrapper leaves AVCodecContext::gop_size at zero.
+# FFmpeg defines zero as intra-only encoding, which makes every desktop frame
+# an expensive I-frame. Apply the small real-time streaming fix after
+# FetchContent has populated the pinned source tree so clean builds retain it.
+set(MACRDP_FREERDP_H264_SOURCE
+    "${freerdp_SOURCE_DIR}/libfreerdp/codec/h264_ffmpeg.c")
+if(EXISTS "${MACRDP_FREERDP_H264_SOURCE}")
+    file(READ "${MACRDP_FREERDP_H264_SOURCE}" MACRDP_FREERDP_H264_CONTENT)
+    string(FIND "${MACRDP_FREERDP_H264_CONTENT}" "MACRDP_GOP_FIX" MACRDP_GOP_FIX_OFFSET)
+    if(MACRDP_GOP_FIX_OFFSET EQUAL -1)
+        string(REPLACE
+            "\tsys->codecEncoderContext->delay = 0;"
+            "\tsys->codecEncoderContext->delay = 0;\n\t/* MACRDP_GOP_FIX: allow P-frames for interactive desktop streaming. */\n\tsys->codecEncoderContext->gop_size = 60;\n\tsys->codecEncoderContext->max_b_frames = 0;"
+            MACRDP_FREERDP_H264_CONTENT
+            "${MACRDP_FREERDP_H264_CONTENT}")
+        file(WRITE "${MACRDP_FREERDP_H264_SOURCE}" "${MACRDP_FREERDP_H264_CONTENT}")
+    endif()
+endif()
+
 set(MACRDP_FREERDP_SHADOW_SOURCES
     ${freerdp_SOURCE_DIR}/server/shadow/shadow_client.c
     ${freerdp_SOURCE_DIR}/server/shadow/shadow_lobby.c
