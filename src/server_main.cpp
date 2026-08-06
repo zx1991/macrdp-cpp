@@ -8,6 +8,7 @@
 #include <winpr/synch.h>
 
 #include "mac_shadow_subsystem.hpp"
+#include "macrdp/videotoolbox_h264.h"
 
 #include <algorithm>
 #include <atomic>
@@ -370,6 +371,10 @@ bool configure_server(rdpShadowServer* server, const Options& options, const std
     server->h264BitRate = options.h264_bitrate;
     server->h264FrameRate = 30;
     server->h264QP = 0;
+
+    // The direct bridge accepts AVC420/I420. AVC444 has a separate YUV444
+    // stream and therefore remains on FreeRDP's FFmpeg fallback path.
+    macrdp_vt_h264_encoder_set_enabled(options.avc444 ? 0 : 1);
 
     if (!set_security(server->settings, options.security)
         || !freerdp_settings_set_uint32(server->settings, FreeRDP_ColorDepth, 32)
