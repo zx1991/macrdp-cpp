@@ -34,6 +34,8 @@ int main() {
             && expect_dimensions(1920, 1080, 1280, 0, 1280, 720)
             && expect_dimensions(1920, 1080, 0, 720, 1280, 720)
             && expect_dimensions(1920, 1080, 4000, 4000, 1920, 1080)
+            && expect_dimensions(1919, 1079, 1280, 720, 1280, 718)
+            && expect_dimensions(3, 3, 0, 0, 2, 2)
         ? 0
         : 1;
 }

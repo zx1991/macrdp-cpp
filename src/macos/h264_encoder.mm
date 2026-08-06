@@ -403,7 +403,12 @@ bool H264Encoder::Impl::encode(
         return false;
     }
 
-    CVPixelBufferLockBaseAddress(pixel_buffer, 0);
+    const auto lock_status = CVPixelBufferLockBaseAddress(pixel_buffer, 0);
+    if (lock_status != kCVReturnSuccess) {
+        CVPixelBufferRelease(pixel_buffer);
+        set_error(status_description(lock_status, "CVPixelBufferLockBaseAddress"));
+        return false;
+    }
     auto* destination = static_cast<std::uint8_t*>(CVPixelBufferGetBaseAddress(pixel_buffer));
     const auto destination_stride = CVPixelBufferGetBytesPerRow(pixel_buffer);
     const auto row_bytes = static_cast<std::size_t>(frame.width) * 4;

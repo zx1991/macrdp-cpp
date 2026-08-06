@@ -497,6 +497,39 @@ if(EXISTS "${MACRDP_FREERDP_SHADOW_SURFACE_SOURCE}")
     endif()
 endif()
 
+# FreeRDP stops the shadow subsystem before notifying clients to quit. A
+# publishing capture thread can be waiting for those clients at the frame
+# barrier, so the server cannot reach the quit broadcast. Notify clients first
+# and only then join the subsystem threads.
+set(MACRDP_FREERDP_SHADOW_SERVER_SOURCE
+    "${freerdp_SOURCE_DIR}/server/shadow/shadow_server.c")
+if(EXISTS "${MACRDP_FREERDP_SHADOW_SERVER_SOURCE}")
+    file(READ "${MACRDP_FREERDP_SHADOW_SERVER_SOURCE}" MACRDP_SHADOW_SERVER_CONTENT)
+    string(FIND "${MACRDP_SHADOW_SERVER_CONTENT}" "MACRDP_SHADOW_STOP_ORDER"
+        MACRDP_SHADOW_STOP_ORDER_OFFSET)
+    if(MACRDP_SHADOW_STOP_ORDER_OFFSET EQUAL -1)
+        string(REPLACE
+            "\tlistener->Close(listener);\n\tshadow_subsystem_stop(server->subsystem);\n\n\t/* Signal to the clients that server is being stopped and wait for them\n\t * to disconnect. */\n\tif (shadow_client_boardcast_quit(server, 0))"
+            "\tlistener->Close(listener);\n\n\t/* Signal to the clients before stopping the subsystem. The publisher may\n\t * be waiting for this client's frame barrier. */\n\tif (shadow_client_boardcast_quit(server, 0))"
+            MACRDP_SHADOW_SERVER_CONTENT
+            "${MACRDP_SHADOW_SERVER_CONTENT}")
+        string(REPLACE
+            "\t\t}\n\t}\n\n\tExitThread(0);"
+            "\t\t}\n\t}\n\n\tshadow_subsystem_stop(server->subsystem);\n\n\t/* MACRDP_SHADOW_STOP_ORDER */\n\tExitThread(0);"
+            MACRDP_SHADOW_SERVER_CONTENT
+            "${MACRDP_SHADOW_SERVER_CONTENT}")
+
+        string(FIND "${MACRDP_SHADOW_SERVER_CONTENT}" "MACRDP_SHADOW_STOP_ORDER"
+            MACRDP_SHADOW_STOP_ORDER_OFFSET)
+        if(MACRDP_SHADOW_STOP_ORDER_OFFSET EQUAL -1)
+            message(FATAL_ERROR
+                "Unable to reorder FreeRDP shadow server shutdown")
+        endif()
+        file(WRITE "${MACRDP_FREERDP_SHADOW_SERVER_SOURCE}"
+            "${MACRDP_SHADOW_SERVER_CONTENT}")
+    endif()
+endif()
+
 set(MACRDP_FREERDP_SHADOW_SOURCES
     ${freerdp_SOURCE_DIR}/server/shadow/shadow_client.c
     ${freerdp_SOURCE_DIR}/server/shadow/shadow_lobby.c

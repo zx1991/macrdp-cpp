@@ -15,11 +15,13 @@
 #include <atomic>
 #include <chrono>
 #include <cinttypes>
+#include <condition_variable>
 #include <cstdint>
 #include <cstring>
 #include <cstdlib>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <thread>
 
@@ -77,9 +79,13 @@ struct mac_shadow_subsystem {
     rdpShadowSubsystem common{};
     std::unique_ptr<macrdp::DisplayCapture> capture;
     std::thread capture_thread;
+    std::thread publish_thread;
     std::atomic_bool stop_requested{false};
     std::mutex lifecycle_mutex;
     std::mutex input_mutex;
+    std::mutex pending_frame_mutex;
+    std::condition_variable pending_frame_condition;
+    std::optional<macrdp::Frame> pending_frame;
     std::string username;
     std::string domain;
     std::string password;
@@ -183,11 +189,11 @@ CGPoint display_point(const MacShadowSubsystem* subsystem, UINT16 x, UINT16 y) {
         ? nullptr
         : subsystem->common.server->surface;
     const double width = surface == nullptr || surface->width == 0
-        ? std::max(1.0, bounds.size.width)
-        : static_cast<double>(surface->width);
+        ? std::max(1.0, bounds.size.width - 1.0)
+        : std::max(1.0, static_cast<double>(surface->width) - 1.0);
     const double height = surface == nullptr || surface->height == 0
-        ? std::max(1.0, bounds.size.height)
-        : static_cast<double>(surface->height);
+        ? std::max(1.0, bounds.size.height - 1.0)
+        : std::max(1.0, static_cast<double>(surface->height) - 1.0);
     const double normalized_x = std::clamp(static_cast<double>(x) / width, 0.0, 1.0);
     const double normalized_y = std::clamp(static_cast<double>(y) / height, 0.0, 1.0);
     return CGPointMake(
@@ -524,23 +530,60 @@ bool copy_frame_to_surface(MacShadowSubsystem* subsystem, const macrdp::Frame& f
     return true;
 }
 
+void request_capture_stop(MacShadowSubsystem* subsystem, const char* error) {
+    if (error != nullptr && error[0] != '\0') {
+        WLog_ERR(TAG, "Screen capture stopped: %s", error);
+    }
+    subsystem->stop_requested.store(true);
+    subsystem->pending_frame_condition.notify_all();
+    if (subsystem->common.server != nullptr) {
+        (void)SetEvent(subsystem->common.server->StopEvent);
+    }
+}
+
 void capture_loop(MacShadowSubsystem* subsystem) {
     while (!subsystem->stop_requested.load()) {
         auto frame = subsystem->capture->next_frame(std::chrono::milliseconds{250});
         if (frame.has_value()) {
-            if (!copy_frame_to_surface(subsystem, *frame)) {
-                WLog_ERR(TAG, "Could not copy ScreenCaptureKit frame to RDP surface");
-                break;
+            {
+                std::lock_guard lock(subsystem->pending_frame_mutex);
+                if (subsystem->stop_requested.load()) {
+                    break;
+                }
+                // A slow RDP client must never turn capture into an unbounded queue.
+                subsystem->pending_frame = std::move(frame);
             }
+            subsystem->pending_frame_condition.notify_one();
             continue;
         }
 
         const std::string error = subsystem->capture->last_error();
         if (!error.empty() && !subsystem->stop_requested.load()) {
-            WLog_ERR(TAG, "Screen capture stopped: %s", error.c_str());
-            if (subsystem->common.server != nullptr) {
-                (void)SetEvent(subsystem->common.server->StopEvent);
+            request_capture_stop(subsystem, error.c_str());
+            break;
+        }
+    }
+    subsystem->pending_frame_condition.notify_all();
+}
+
+void publish_loop(MacShadowSubsystem* subsystem) {
+    while (true) {
+        std::optional<macrdp::Frame> frame;
+        {
+            std::unique_lock lock(subsystem->pending_frame_mutex);
+            subsystem->pending_frame_condition.wait(lock, [subsystem] {
+                return subsystem->stop_requested.load()
+                    || subsystem->pending_frame.has_value();
+            });
+            if (!subsystem->pending_frame.has_value()) {
+                break;
             }
+            frame = std::move(subsystem->pending_frame);
+            subsystem->pending_frame.reset();
+        }
+
+        if (!copy_frame_to_surface(subsystem, *frame)) {
+            request_capture_stop(subsystem, "Could not copy ScreenCaptureKit frame to RDP surface");
             break;
         }
     }
@@ -595,10 +638,23 @@ int mac_shadow_subsystem_start(rdpShadowSubsystem* base) {
 
     subsystem->stop_requested.store(false);
     subsystem->common.captureFrameRate = options.frame_rate;
+    {
+        std::lock_guard frame_lock(subsystem->pending_frame_mutex);
+        subsystem->pending_frame.reset();
+    }
     try {
+        subsystem->publish_thread = std::thread(publish_loop, subsystem);
         subsystem->capture_thread = std::thread(capture_loop, subsystem);
     } catch (...) {
+        subsystem->stop_requested.store(true);
         subsystem->capture->stop();
+        subsystem->pending_frame_condition.notify_all();
+        if (subsystem->capture_thread.joinable()) {
+            subsystem->capture_thread.join();
+        }
+        if (subsystem->publish_thread.joinable()) {
+            subsystem->publish_thread.join();
+        }
         subsystem->capture.reset();
         return -1;
     }
@@ -616,8 +672,16 @@ int mac_shadow_subsystem_stop(rdpShadowSubsystem* base) {
     if (subsystem->capture != nullptr) {
         subsystem->capture->stop();
     }
+    subsystem->pending_frame_condition.notify_all();
     if (subsystem->capture_thread.joinable()) {
         subsystem->capture_thread.join();
+    }
+    if (subsystem->publish_thread.joinable()) {
+        subsystem->publish_thread.join();
+    }
+    {
+        std::lock_guard frame_lock(subsystem->pending_frame_mutex);
+        subsystem->pending_frame.reset();
     }
     subsystem->capture.reset();
     return 1;

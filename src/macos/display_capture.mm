@@ -166,14 +166,19 @@ std::pair<std::uint32_t, std::uint32_t> display_capture_output_size(
         ? 1.0
         : static_cast<double>(max_height) / static_cast<double>(native_height);
     const double scale = std::min({1.0, width_scale, height_scale});
-    if (scale >= 1.0) {
-        return {native_width, native_height};
-    }
+    const auto even_dimension = [](double value) -> std::uint32_t {
+        const auto rounded_down = static_cast<std::uint64_t>(std::floor(value));
+        if (rounded_down < 2) {
+            return 0;
+        }
+        const auto even = rounded_down & ~std::uint64_t{1};
+        return even > std::numeric_limits<std::uint32_t>::max()
+            ? 0
+            : static_cast<std::uint32_t>(even);
+    };
 
-    const auto scaled_width = static_cast<std::uint32_t>(
-        std::max(1.0, std::floor(static_cast<double>(native_width) * scale)));
-    const auto scaled_height = static_cast<std::uint32_t>(
-        std::max(1.0, std::floor(static_cast<double>(native_height) * scale)));
+    const auto scaled_width = even_dimension(static_cast<double>(native_width) * scale);
+    const auto scaled_height = even_dimension(static_cast<double>(native_height) * scale);
     return {scaled_width, scaled_height};
 }
 
