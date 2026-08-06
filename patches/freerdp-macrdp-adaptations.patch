@@ -194,12 +194,13 @@
  		{
 --- a/libfreerdp/core/transport.c
 +++ b/libfreerdp/core/transport.c
-@@ -64,7 +64,19 @@
+@@ -64,7 +64,20 @@
  #define TAG FREERDP_TAG("core.transport")
  
  #define BUFFER_SIZE 16384
 +#define MACRDP_WRITE_QUEUE_LIMIT (16ULL * 1024ULL * 1024ULL)
 +#define MACRDP_WRITE_CHUNK (16ULL * 1024ULL)
++#define MACRDP_WRITE_BUDGET (256ULL * 1024ULL)
  
 +typedef struct rdp_transport_write_item rdpTransportWriteItem;
 +
@@ -224,7 +225,7 @@
  	UINT64 written;
  	HANDLE rereadEvent;
  	BOOL haveMoreBytesToRead;
-@@ -105,6 +120,131 @@
+@@ -105,6 +120,139 @@
  	void* userContextShadowPtr;
  } rdpTransportLayerInt;
  
@@ -281,11 +282,15 @@
 +static int transport_write_queue_drain(rdpTransport* transport, BOOL wait)
 +{
 +	/* MACRDP_NONBLOCKING_WRITE_QUEUE */
++	size_t budget = wait ? SIZE_MAX : MACRDP_WRITE_BUDGET;
 +	while (transport->writeQueueHead)
 +	{
 +		rdpTransportWriteItem* item = transport->writeQueueHead;
 +		while (item->offset < item->length)
 +		{
++			if (!wait && budget == 0)
++				return 0;
++
 +			if (BIO_write_blocked(transport->frontBio))
 +			{
 +				const long flushStatus = BIO_flush(transport->frontBio);
@@ -317,8 +322,10 @@
 +
 +			ERR_clear_error();
 +			const size_t remaining = item->length - item->offset;
-+			const int towrite =
-+				(remaining > MACRDP_WRITE_CHUNK) ? (int)MACRDP_WRITE_CHUNK : (int)remaining;
++			const size_t chunk =
++				(remaining > MACRDP_WRITE_CHUNK) ? MACRDP_WRITE_CHUNK : remaining;
++			const size_t bounded = (chunk > budget) ? budget : chunk;
++			const int towrite = (int)bounded;
 +			const int status = BIO_write(transport->frontBio,
 +			                             Stream_Buffer(item->stream) + item->offset,
 +			                             towrite);
@@ -328,6 +335,8 @@
 +					return -1;
 +				item->offset += (size_t)status;
 +				transport->writeQueueBytes -= (size_t)status;
++				if (!wait)
++					budget -= (size_t)status;
 +				continue;
 +			}
 +
@@ -356,15 +365,18 @@
  static const char* where2str(int where, char* ibuffer, size_t ilen)
  {
  	if (!ibuffer || (ilen < 2))
-@@ -1228,6 +1368,7 @@
+@@ -1228,6 +1368,10 @@
  		size_t length = Stream_GetPosition(s);
  		size_t writtenlength = length;
  		Stream_ResetPosition(s);
 +		status = 0;
++		const BOOL nonBlockingWrite =
++			!transport->blocking && !context->settings->WaitForOutputBufferFlush;
++		size_t writeBudget = nonBlockingWrite ? MACRDP_WRITE_BUDGET : SIZE_MAX;
  
  		if (length > 0)
  		{
-@@ -1235,10 +1376,69 @@
+@@ -1235,10 +1376,82 @@
  			WLog_Packet(transport->log, WLOG_TRACE, Stream_Buffer(s), length, WLOG_PACKET_OUTBOUND);
  		}
  
@@ -428,10 +440,23 @@
 +
  		while (length > 0)
  		{
++			if (nonBlockingWrite && writeBudget == 0)
++			{
++				if (!transport_write_queue_append(transport, s, writtenlength - length, length))
++				{
++					status = -1;
++					goto out_cleanup;
++				}
++				status = (writtenlength > INT32_MAX) ? INT32_MAX : (int)writtenlength;
++				length = 0;
++				break;
++			}
  			ERR_clear_error();
 -			const int towrite = (length > INT32_MAX) ? INT32_MAX : (int)length;
-+			const int towrite =
-+				(length > MACRDP_WRITE_CHUNK) ? (int)MACRDP_WRITE_CHUNK : (int)length;
++			const size_t chunk =
++				(length > MACRDP_WRITE_CHUNK) ? MACRDP_WRITE_CHUNK : length;
++			const size_t bounded = (chunk > writeBudget) ? writeBudget : chunk;
++			const int towrite = (int)bounded;
  			status = BIO_write(transport->frontBio, Stream_ConstPointer(s), towrite);
  
  			if (status <= 0)
@@ -455,7 +480,7 @@
  				}
  
  				if (BIO_wait_write(transport->frontBio, 100) < 0)
-@@ -1270,6 +1479,16 @@
+@@ -1270,6 +1479,18 @@
  				continue;
  			}
  
@@ -468,6 +493,8 @@
 +
 +			length -= ustatus;
 +			Stream_Seek(s, ustatus);
++			if (nonBlockingWrite)
++				writeBudget -= ustatus;
 +
  			WINPR_ASSERT(context->settings);
  			if (transport->blocking || context->settings->WaitForOutputBufferFlush)
