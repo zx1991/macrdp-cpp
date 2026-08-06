@@ -351,7 +351,9 @@ struct DisplayCapture::Impl {
     }
 
     [[nodiscard]] bool start();
+    [[nodiscard]] bool start_locked();
     [[nodiscard]] std::optional<Frame> next_frame(std::chrono::milliseconds timeout);
+    [[nodiscard]] bool reconfigure(DisplayCaptureOptions next_options);
     void stop() noexcept;
     [[nodiscard]] std::string last_error() const;
 
@@ -394,12 +396,7 @@ void stop_stream(SCStream* stream, MacCaptureOutput* output) {
 
 } // namespace
 
-bool DisplayCapture::Impl::start() {
-    std::lock_guard lifecycle_lock(lifecycle_mutex);
-    if (stream != nil) {
-        return true;
-    }
-
+bool DisplayCapture::Impl::start_locked() {
     {
         std::lock_guard lock(state->mutex);
         state->latest_frame.reset();
@@ -518,6 +515,31 @@ bool DisplayCapture::Impl::start() {
     return true;
 }
 
+bool DisplayCapture::Impl::start() {
+    std::lock_guard lifecycle_lock(lifecycle_mutex);
+    if (stream != nil) {
+        return true;
+    }
+    return start_locked();
+}
+
+bool DisplayCapture::Impl::reconfigure(DisplayCaptureOptions next_options) {
+    std::lock_guard lifecycle_lock(lifecycle_mutex);
+    if (stream != nil) {
+        {
+            std::lock_guard lock(state->mutex);
+            state->accepting_frames = false;
+            state->stopped = true;
+        }
+        state->condition.notify_all();
+        stop_stream(stream, output);
+        stream = nil;
+        output = nil;
+    }
+    options = next_options;
+    return start_locked();
+}
+
 std::optional<Frame> DisplayCapture::Impl::next_frame(
     std::chrono::milliseconds timeout) {
     std::unique_lock lock(state->mutex);
@@ -572,6 +594,10 @@ bool DisplayCapture::start() {
 
 std::optional<Frame> DisplayCapture::next_frame(std::chrono::milliseconds timeout) {
     return impl_->next_frame(timeout);
+}
+
+bool DisplayCapture::reconfigure(DisplayCaptureOptions options) {
+    return impl_->reconfigure(options);
 }
 
 void DisplayCapture::stop() noexcept {

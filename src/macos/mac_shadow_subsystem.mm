@@ -9,7 +9,10 @@
 #include <winpr/synch.h>
 
 #include "macrdp/display_capture.hpp"
+#include "macrdp/input_ownership.hpp"
+#include "macrdp/input_queue.hpp"
 #include "mac_shadow_subsystem.hpp"
+#include "shadow_screen.h"
 
 #include <algorithm>
 #include <atomic>
@@ -25,7 +28,7 @@
 #include <optional>
 #include <string>
 #include <thread>
-#include <unordered_set>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -80,6 +83,7 @@ bool constant_time_equal(const std::string& expected, const char* actual) {
 }
 
 enum class InputEventKind {
+    synchronize,
     keyboard,
     unicode,
     mouse,
@@ -89,8 +93,10 @@ enum class InputEventKind {
 
 struct InputEvent {
     InputEventKind kind = InputEventKind::mouse;
+    macrdp::InputClientId client_id = 0;
     UINT16 flags = 0;
     UINT16 code = 0;
+    UINT32 synchronize_flags = 0;
     UINT16 x = 0;
     UINT16 y = 0;
 };
@@ -109,6 +115,10 @@ struct mac_shadow_subsystem {
     std::deque<InputEvent> input_queue;
     std::thread input_thread;
     std::atomic_bool input_stop_requested{false};
+    macrdp::InputOwnership input_ownership;
+    std::mutex client_ids_mutex;
+    std::unordered_map<const rdpShadowClient*, macrdp::InputClientId> client_ids;
+    macrdp::InputClientId next_client_id = 1;
     std::mutex pending_frame_mutex;
     std::condition_variable pending_frame_condition;
     std::optional<macrdp::Frame> pending_frame;
@@ -121,8 +131,6 @@ struct mac_shadow_subsystem {
     bool other_button_down = false;
     bool x_button_1_down = false;
     bool x_button_2_down = false;
-    std::unordered_set<std::uint16_t> pressed_keys;
-    std::unordered_set<std::uint16_t> pressed_unicode;
     std::int32_t pointer_x = 0;
     std::int32_t pointer_y = 0;
     std::uint32_t last_frame_width = 0;
@@ -130,12 +138,64 @@ struct mac_shadow_subsystem {
     std::uint32_t last_surface_width = 0;
     std::uint32_t last_surface_height = 0;
     std::chrono::steady_clock::time_point last_slow_frame_log{};
+    std::atomic_bool force_full_frame{true};
+    std::atomic<std::uint64_t> captured_frames{0};
+    std::atomic<std::uint64_t> coalesced_frames{0};
+    std::atomic<std::uint64_t> published_frames{0};
+    std::atomic<std::uint64_t> changed_frames{0};
+    std::atomic<std::uint64_t> copied_bytes{0};
+    std::chrono::steady_clock::time_point last_pipeline_log{};
 };
 
 using MacShadowSubsystem = struct mac_shadow_subsystem;
 
 constexpr std::size_t kInputQueueLimit = 4096;
-constexpr std::uint16_t kExtendedKeyIdentityBit = 0x0100;
+constexpr std::uint16_t kExtendedKeyIdentityBit = 0x0100U;
+constexpr std::uint16_t kExtended1KeyIdentityBit = 0x0200U;
+
+macrdp::InputClientId register_input_client(
+    MacShadowSubsystem* subsystem,
+    const rdpShadowClient* client) {
+    if (subsystem == nullptr || client == nullptr) {
+        return 0;
+    }
+
+    std::lock_guard lock(subsystem->client_ids_mutex);
+    const auto existing = subsystem->client_ids.find(client);
+    if (existing != subsystem->client_ids.end()) {
+        return existing->second;
+    }
+
+    auto id = subsystem->next_client_id++;
+    if (id == 0) {
+        id = subsystem->next_client_id++;
+    }
+    subsystem->client_ids.emplace(client, id);
+    return id;
+}
+
+macrdp::InputClientId input_client_id(
+    MacShadowSubsystem* subsystem,
+    const rdpShadowClient* client) {
+    return register_input_client(subsystem, client);
+}
+
+macrdp::InputClientId unregister_input_client(
+    MacShadowSubsystem* subsystem,
+    const rdpShadowClient* client) {
+    if (subsystem == nullptr || client == nullptr) {
+        return 0;
+    }
+
+    std::lock_guard lock(subsystem->client_ids_mutex);
+    const auto existing = subsystem->client_ids.find(client);
+    if (existing == subsystem->client_ids.end()) {
+        return 0;
+    }
+    const auto id = existing->second;
+    subsystem->client_ids.erase(existing);
+    return id;
+}
 
 void free_pointer_position_message(UINT32, SHADOW_MSG_OUT* message) {
     std::free(message);
@@ -143,6 +203,7 @@ void free_pointer_position_message(UINT32, SHADOW_MSG_OUT* message) {
 
 void publish_pointer_position(
     MacShadowSubsystem* subsystem,
+    rdpShadowClient* source_client,
     UINT16 x,
     UINT16 y) {
     if (subsystem == nullptr || subsystem->common.server == nullptr) {
@@ -152,22 +213,38 @@ void publish_pointer_position(
     subsystem->common.pointerX = x;
     subsystem->common.pointerY = y;
 
-    auto* message = static_cast<SHADOW_MSG_OUT_POINTER_POSITION_UPDATE*>(
-        std::calloc(1, sizeof(SHADOW_MSG_OUT_POINTER_POSITION_UPDATE)));
-    if (message == nullptr) {
-        WLog_WARN(TAG, "Unable to allocate RDP pointer position update");
+    auto* server = subsystem->common.server;
+    if (server->clients == nullptr) {
         return;
     }
 
-    message->common.Free = free_pointer_position_message;
-    message->xPos = x;
-    message->yPos = y;
-    (void)shadow_client_boardcast_msg(
-        subsystem->common.server,
-        nullptr,
-        SHADOW_MSG_OUT_POINTER_POSITION_UPDATE_ID,
-        &message->common,
-        nullptr);
+    ArrayList_Lock(server->clients);
+    for (std::size_t index = 0; index < ArrayList_Count(server->clients); ++index) {
+        auto* client = static_cast<rdpShadowClient*>(ArrayList_GetItem(server->clients, index));
+        if (client == nullptr || client == source_client) {
+            continue;
+        }
+
+        auto* message = static_cast<SHADOW_MSG_OUT_POINTER_POSITION_UPDATE*>(
+            std::calloc(1, sizeof(SHADOW_MSG_OUT_POINTER_POSITION_UPDATE)));
+        if (message == nullptr) {
+            WLog_WARN(TAG, "Unable to allocate RDP pointer position update");
+            break;
+        }
+
+        message->common.Free = free_pointer_position_message;
+        message->xPos = x;
+        message->yPos = y;
+        if (!shadow_client_post_msg(
+                client,
+                nullptr,
+                SHADOW_MSG_OUT_POINTER_POSITION_UPDATE_ID,
+                &message->common,
+                nullptr)) {
+            WLog_WARN(TAG, "Unable to post RDP pointer position update");
+        }
+    }
+    ArrayList_Unlock(server->clients);
 }
 
 bool display_dimensions(std::uint32_t& width, std::uint32_t& height) {
@@ -230,6 +307,29 @@ std::pair<std::uint32_t, std::uint32_t> shadow_surface_dimensions(
     return dimensions;
 }
 
+std::optional<macrdp::DisplayCaptureOptions> capture_options_for_surface(
+    const MacShadowSubsystem* subsystem) {
+    if (subsystem == nullptr) {
+        return std::nullopt;
+    }
+
+    const auto [surface_width, surface_height] = shadow_surface_dimensions(subsystem);
+    if (surface_width == 0 || surface_height == 0) {
+        return std::nullopt;
+    }
+
+    macrdp::DisplayCaptureOptions options;
+    options.max_width = subsystem->capture_config.max_width == 0
+        ? surface_width
+        : std::min(subsystem->capture_config.max_width, surface_width);
+    options.max_height = subsystem->capture_config.max_height == 0
+        ? surface_height
+        : std::min(subsystem->capture_config.max_height, surface_height);
+    options.frame_rate = subsystem->capture_config.frame_rate;
+    options.show_cursor = false;
+    return options;
+}
+
 CGPoint display_point(const MacShadowSubsystem* subsystem, UINT16 x, UINT16 y) {
     const CGRect bounds = CGDisplayBounds(CGMainDisplayID());
     const auto [surface_width, surface_height] = shadow_surface_dimensions(subsystem);
@@ -246,12 +346,8 @@ CGPoint display_point(const MacShadowSubsystem* subsystem, UINT16 x, UINT16 y) {
         bounds.origin.y + normalized_y * std::max(0.0, bounds.size.height - 1.0));
 }
 
-bool inject_keyboard_event(MacShadowSubsystem* subsystem, UINT16 flags, UINT8 code) {
-    if (subsystem == nullptr) {
-        return false;
-    }
-
-    bool extended = (flags & KBD_FLAGS_EXTENDED) != 0;
+CGKeyCode mac_key_code(UINT16 flags, UINT8 code) {
+    const bool extended = (flags & KBD_FLAGS_EXTENDED) != 0;
     UINT32 scan_code = code;
     if (extended) {
         scan_code |= KBDEXT;
@@ -261,9 +357,13 @@ bool inject_keyboard_event(MacShadowSubsystem* subsystem, UINT16 flags, UINT8 co
     if (extended) {
         virtual_key |= KBDEXT;
     }
-    const UINT32 key_code = GetKeycodeFromVirtualKeyCode(
+    return static_cast<CGKeyCode>(GetKeycodeFromVirtualKeyCode(
         virtual_key,
-        WINPR_KEYCODE_TYPE_APPLE);
+        WINPR_KEYCODE_TYPE_APPLE));
+}
+
+bool post_keyboard_event(UINT16 flags, UINT8 code) {
+    const CGKeyCode key_code = mac_key_code(flags, code);
 
     CGEventSourceRef source = CGEventSourceCreate(kCGEventSourceStateHIDSystemState);
     if (source == nullptr) {
@@ -285,25 +385,70 @@ bool inject_keyboard_event(MacShadowSubsystem* subsystem, UINT16 flags, UINT8 co
     CGEventPost(kCGHIDEventTap, event);
     CFRelease(event);
     CFRelease(source);
-
-    const auto key_identity = static_cast<std::uint16_t>(code)
-        | ((flags & KBD_FLAGS_EXTENDED) != 0 ? kExtendedKeyIdentityBit : 0);
-    {
-        std::lock_guard lock(subsystem->input_mutex);
-        if (key_down) {
-            subsystem->pressed_keys.insert(key_identity);
-        } else {
-            subsystem->pressed_keys.erase(key_identity);
-        }
-    }
     return true;
 }
 
-bool inject_unicode_event(MacShadowSubsystem* subsystem, UINT16 flags, UINT16 code) {
+bool synchronize_toggle_keys(UINT32 flags) {
+    const CGEventFlags current_flags =
+        CGEventSourceFlagsState(kCGEventSourceStateHIDSystemState);
+    bool success = true;
+
+    const auto synchronize_key = [&success](
+                                    bool desired,
+                                    bool current,
+                                    UINT16 key_flags,
+                                    UINT8 code) {
+        if (desired == current) {
+            return;
+        }
+        if (!post_keyboard_event(key_flags, code)
+            || !post_keyboard_event(key_flags | KBD_FLAGS_RELEASE, code)) {
+            success = false;
+        }
+    };
+
+    synchronize_key(
+        (flags & KBD_SYNC_CAPS_LOCK) != 0,
+        (current_flags & kCGEventFlagMaskAlphaShift) != 0,
+        0,
+        RDP_SCANCODE_CODE(RDP_SCANCODE_CAPSLOCK));
+    synchronize_key(
+        (flags & KBD_SYNC_NUM_LOCK) != 0,
+        (current_flags & kCGEventFlagMaskNumericPad) != 0,
+        0,
+        RDP_SCANCODE_CODE(RDP_SCANCODE_NUMLOCK));
+
+    // CoreGraphics exposes no public Scroll Lock toggle-state bit. Its
+    // CGEventSourceKeyState API reports only whether the key is physically
+    // held, so treating it as a lock state would toggle Scroll Lock again on
+    // every focus synchronization. Normal Scroll Lock key events still pass
+    // through the keyboard path below.
+    return success;
+}
+
+bool inject_keyboard_event(
+    MacShadowSubsystem* subsystem,
+    macrdp::InputClientId client_id,
+    UINT16 flags,
+    UINT8 code) {
     if (subsystem == nullptr) {
         return false;
     }
 
+    const auto key_identity = static_cast<std::uint16_t>(code)
+        | ((flags & KBD_FLAGS_EXTENDED) != 0 ? kExtendedKeyIdentityBit : 0U)
+        | ((flags & KBD_FLAGS_EXTENDED1) != 0 ? kExtended1KeyIdentityBit : 0U);
+    const bool key_down = (flags & KBD_FLAGS_RELEASE) == 0;
+    const bool should_post = key_down
+        ? subsystem->input_ownership.acquire_key(client_id, key_identity)
+        : subsystem->input_ownership.release_key(client_id, key_identity);
+    if (!should_post) {
+        return true;
+    }
+    return post_keyboard_event(flags, code);
+}
+
+bool post_unicode_event(UINT16 flags, UINT16 code) {
     CGEventSourceRef source = CGEventSourceCreate(kCGEventSourceStateHIDSystemState);
     if (source == nullptr) {
         return false;
@@ -321,19 +466,29 @@ bool inject_unicode_event(MacShadowSubsystem* subsystem, UINT16 flags, UINT16 co
     CGEventPost(kCGHIDEventTap, event);
     CFRelease(event);
     CFRelease(source);
-
-    {
-        std::lock_guard lock(subsystem->input_mutex);
-        if (key_down) {
-            subsystem->pressed_unicode.insert(code);
-        } else {
-            subsystem->pressed_unicode.erase(code);
-        }
-    }
     return true;
 }
 
-bool inject_mouse_event(
+bool inject_unicode_event(
+    MacShadowSubsystem* subsystem,
+    macrdp::InputClientId client_id,
+    UINT16 flags,
+    UINT16 code) {
+    if (subsystem == nullptr) {
+        return false;
+    }
+
+    const bool key_down = (flags & KBD_FLAGS_RELEASE) == 0;
+    const bool should_post = key_down
+        ? subsystem->input_ownership.acquire_unicode(client_id, code)
+        : subsystem->input_ownership.release_unicode(client_id, code);
+    if (!should_post) {
+        return true;
+    }
+    return post_unicode_event(flags, code);
+}
+
+bool post_mouse_event(
     MacShadowSubsystem* subsystem,
     UINT16 flags,
     UINT16 x,
@@ -341,8 +496,6 @@ bool inject_mouse_event(
     if (subsystem == nullptr) {
         return false;
     }
-
-    std::lock_guard lock(subsystem->input_mutex);
 
     CGEventSourceRef source = CGEventSourceCreate(kCGEventSourceStateHIDSystemState);
     if (source == nullptr) {
@@ -371,6 +524,7 @@ bool inject_mouse_event(
             CFRelease(source);
             return false;
         }
+        CGEventSetLocation(event, point);
         CGEventPost(kCGHIDEventTap, event);
         CFRelease(event);
         CFRelease(source);
@@ -395,34 +549,32 @@ bool inject_mouse_event(
         if (event != nullptr) {
             CGEventPost(kCGHIDEventTap, event);
             CFRelease(event);
+        } else {
+            CFRelease(source);
+            return false;
         }
     }
 
     CGEventType button_type = kCGEventNull;
     CGMouseButton button = kCGMouseButtonLeft;
-    bool* button_state = nullptr;
     if ((flags & PTR_FLAGS_BUTTON1) != 0) {
         button = kCGMouseButtonLeft;
-        button_state = &subsystem->left_button_down;
         button_type = (flags & PTR_FLAGS_DOWN) != 0
             ? kCGEventLeftMouseDown
             : kCGEventLeftMouseUp;
     } else if ((flags & PTR_FLAGS_BUTTON2) != 0) {
         button = kCGMouseButtonRight;
-        button_state = &subsystem->right_button_down;
         button_type = (flags & PTR_FLAGS_DOWN) != 0
             ? kCGEventRightMouseDown
             : kCGEventRightMouseUp;
     } else if ((flags & PTR_FLAGS_BUTTON3) != 0) {
         button = kCGMouseButtonCenter;
-        button_state = &subsystem->other_button_down;
         button_type = (flags & PTR_FLAGS_DOWN) != 0
             ? kCGEventOtherMouseDown
             : kCGEventOtherMouseUp;
     }
 
-    if (button_state != nullptr) {
-        *button_state = (flags & PTR_FLAGS_DOWN) != 0;
+    if (button_type != kCGEventNull) {
         CGEventRef event = CGEventCreateMouseEvent(source, button_type, point, button);
         if (event == nullptr) {
             CFRelease(source);
@@ -436,8 +588,9 @@ bool inject_mouse_event(
     return true;
 }
 
-bool inject_extended_mouse_event(
+bool inject_mouse_event(
     MacShadowSubsystem* subsystem,
+    macrdp::InputClientId client_id,
     UINT16 flags,
     UINT16 x,
     UINT16 y) {
@@ -445,7 +598,59 @@ bool inject_extended_mouse_event(
         return false;
     }
 
-    std::lock_guard lock(subsystem->input_mutex);
+    bool success = true;
+    if ((flags & (PTR_FLAGS_WHEEL | PTR_FLAGS_HWHEEL)) != 0) {
+        return post_mouse_event(subsystem, flags, x, y);
+    }
+    if ((flags & PTR_FLAGS_MOVE) != 0
+        && !post_mouse_event(subsystem, PTR_FLAGS_MOVE, x, y)) {
+        success = false;
+    }
+
+    macrdp::InputButton button = macrdp::InputButton::left;
+    bool has_button = false;
+    if ((flags & PTR_FLAGS_BUTTON1) != 0) {
+        button = macrdp::InputButton::left;
+        has_button = true;
+    } else if ((flags & PTR_FLAGS_BUTTON2) != 0) {
+        button = macrdp::InputButton::right;
+        has_button = true;
+    } else if ((flags & PTR_FLAGS_BUTTON3) != 0) {
+        button = macrdp::InputButton::other;
+        has_button = true;
+    }
+    if (!has_button) {
+        return success;
+    }
+
+    const bool down = (flags & PTR_FLAGS_DOWN) != 0;
+    const bool should_post = down
+        ? subsystem->input_ownership.acquire_button(client_id, button)
+        : subsystem->input_ownership.release_button(client_id, button);
+    if (should_post) {
+        if (button == macrdp::InputButton::left) {
+            subsystem->left_button_down = down;
+        } else if (button == macrdp::InputButton::right) {
+            subsystem->right_button_down = down;
+        } else {
+            subsystem->other_button_down = down;
+        }
+        const auto button_flags = static_cast<UINT16>(flags & ~PTR_FLAGS_MOVE);
+        if (!post_mouse_event(subsystem, button_flags, x, y)) {
+            success = false;
+        }
+    }
+    return success;
+}
+
+bool post_extended_mouse_event(
+    MacShadowSubsystem* subsystem,
+    UINT16 flags,
+    UINT16 x,
+    UINT16 y) {
+    if (subsystem == nullptr) {
+        return false;
+    }
 
     const CGPoint point = display_point(subsystem, x, y);
     const bool down = (flags & PTR_XFLAGS_DOWN) != 0;
@@ -456,9 +661,6 @@ bool inject_extended_mouse_event(
 
     const bool button_1 = (button_flags & PTR_XFLAGS_BUTTON1) != 0;
     const CGMouseButton button = static_cast<CGMouseButton>(button_1 ? 3 : 4);
-    bool* button_state = button_1
-        ? &subsystem->x_button_1_down
-        : &subsystem->x_button_2_down;
     CGEventSourceRef source = CGEventSourceCreate(kCGEventSourceStateHIDSystemState);
     if (source == nullptr) {
         return false;
@@ -473,10 +675,44 @@ bool inject_extended_mouse_event(
         return false;
     }
     CGEventPost(kCGHIDEventTap, event);
-    *button_state = down;
     CFRelease(event);
     CFRelease(source);
     return true;
+}
+
+bool inject_extended_mouse_event(
+    MacShadowSubsystem* subsystem,
+    macrdp::InputClientId client_id,
+    UINT16 flags,
+    UINT16 x,
+    UINT16 y) {
+    if (subsystem == nullptr) {
+        return false;
+    }
+
+    const UINT16 button_flags = flags & (PTR_XFLAGS_BUTTON1 | PTR_XFLAGS_BUTTON2);
+    if (button_flags == 0) {
+        return true;
+    }
+
+    const bool button_1 = (button_flags & PTR_XFLAGS_BUTTON1) != 0;
+    const auto button = button_1
+        ? macrdp::InputButton::x1
+        : macrdp::InputButton::x2;
+    const bool down = (flags & PTR_XFLAGS_DOWN) != 0;
+    const bool should_post = down
+        ? subsystem->input_ownership.acquire_button(client_id, button)
+        : subsystem->input_ownership.release_button(client_id, button);
+    if (!should_post) {
+        return true;
+    }
+
+    if (button_1) {
+        subsystem->x_button_1_down = down;
+    } else {
+        subsystem->x_button_2_down = down;
+    }
+    return post_extended_mouse_event(subsystem, flags, x, y);
 }
 
 bool is_coalescible_mouse_move(const InputEvent& event) {
@@ -529,24 +765,47 @@ bool enqueue_input_event(MacShadowSubsystem* subsystem, InputEvent event) {
     return true;
 }
 
-bool queue_keyboard_event(MacShadowSubsystem* subsystem, UINT16 flags, UINT8 code) {
+bool queue_keyboard_event(
+    MacShadowSubsystem* subsystem,
+    macrdp::InputClientId client_id,
+    UINT16 flags,
+    UINT8 code) {
     InputEvent event;
     event.kind = InputEventKind::keyboard;
+    event.client_id = client_id;
     event.flags = flags;
     event.code = code;
     return enqueue_input_event(subsystem, event);
 }
 
-bool queue_unicode_event(MacShadowSubsystem* subsystem, UINT16 flags, UINT16 code) {
+bool queue_unicode_event(
+    MacShadowSubsystem* subsystem,
+    macrdp::InputClientId client_id,
+    UINT16 flags,
+    UINT16 code) {
     InputEvent event;
     event.kind = InputEventKind::unicode;
+    event.client_id = client_id;
     event.flags = flags;
     event.code = code;
+    return enqueue_input_event(subsystem, event);
+}
+
+bool queue_synchronize_event(
+    MacShadowSubsystem* subsystem,
+    macrdp::InputClientId client_id,
+    UINT32 flags) {
+    InputEvent event;
+    event.kind = InputEventKind::synchronize;
+    event.client_id = client_id;
+    event.synchronize_flags = flags;
     return enqueue_input_event(subsystem, event);
 }
 
 bool queue_mouse_event(
     MacShadowSubsystem* subsystem,
+    rdpShadowClient* source_client,
+    macrdp::InputClientId client_id,
     UINT16 flags,
     UINT16 x,
     UINT16 y) {
@@ -559,10 +818,11 @@ bool queue_mouse_event(
         subsystem->pointer_x = x;
         subsystem->pointer_y = y;
     }
-    publish_pointer_position(subsystem, x, y);
+    publish_pointer_position(subsystem, source_client, x, y);
 
     InputEvent event;
     event.kind = InputEventKind::mouse;
+    event.client_id = client_id;
     event.flags = flags;
     event.x = x;
     event.y = y;
@@ -571,6 +831,8 @@ bool queue_mouse_event(
 
 bool queue_extended_mouse_event(
     MacShadowSubsystem* subsystem,
+    rdpShadowClient* source_client,
+    macrdp::InputClientId client_id,
     UINT16 flags,
     UINT16 x,
     UINT16 y) {
@@ -583,56 +845,51 @@ bool queue_extended_mouse_event(
         subsystem->pointer_x = x;
         subsystem->pointer_y = y;
     }
-    publish_pointer_position(subsystem, x, y);
+    publish_pointer_position(subsystem, source_client, x, y);
 
     InputEvent event;
     event.kind = InputEventKind::extended_mouse;
+    event.client_id = client_id;
     event.flags = flags;
     event.x = x;
     event.y = y;
     return enqueue_input_event(subsystem, event);
 }
 
-bool queue_input_reset(MacShadowSubsystem* subsystem) {
+bool queue_input_reset(
+    MacShadowSubsystem* subsystem,
+    macrdp::InputClientId client_id) {
+    if (subsystem == nullptr) {
+        return false;
+    }
+
     InputEvent event;
     event.kind = InputEventKind::reset;
-    return enqueue_input_event(subsystem, event);
+    event.client_id = client_id;
+
+    std::unique_lock lock(subsystem->input_queue_mutex);
+    if (subsystem->input_stop_requested.load()) {
+        return false;
+    }
+
+    macrdp::prioritize_client_reset(subsystem->input_queue, client_id, event);
+    lock.unlock();
+    subsystem->input_queue_condition.notify_one();
+    subsystem->input_queue_space_condition.notify_all();
+    return true;
 }
 
-void release_input_state(MacShadowSubsystem* subsystem) {
+void emit_release_state(
+    MacShadowSubsystem* subsystem,
+    const macrdp::InputReleaseState& released) {
     if (subsystem == nullptr) {
         return;
     }
 
-    std::vector<std::uint16_t> pressed_keys;
-    std::vector<std::uint16_t> pressed_unicode;
-    bool left_button_down = false;
-    bool right_button_down = false;
-    bool other_button_down = false;
-    bool x_button_1_down = false;
-    bool x_button_2_down = false;
     UINT16 pointer_x = 0;
     UINT16 pointer_y = 0;
     {
         std::lock_guard lock(subsystem->input_mutex);
-        pressed_keys.assign(
-            subsystem->pressed_keys.begin(),
-            subsystem->pressed_keys.end());
-        pressed_unicode.assign(
-            subsystem->pressed_unicode.begin(),
-            subsystem->pressed_unicode.end());
-        subsystem->pressed_keys.clear();
-        subsystem->pressed_unicode.clear();
-        left_button_down = subsystem->left_button_down;
-        right_button_down = subsystem->right_button_down;
-        other_button_down = subsystem->other_button_down;
-        x_button_1_down = subsystem->x_button_1_down;
-        x_button_2_down = subsystem->x_button_2_down;
-        subsystem->left_button_down = false;
-        subsystem->right_button_down = false;
-        subsystem->other_button_down = false;
-        subsystem->x_button_1_down = false;
-        subsystem->x_button_2_down = false;
         pointer_x = static_cast<UINT16>(std::clamp<std::int32_t>(
             subsystem->pointer_x,
             0,
@@ -643,54 +900,74 @@ void release_input_state(MacShadowSubsystem* subsystem) {
             UINT16_MAX));
     }
 
-    for (const auto key_identity : pressed_keys) {
-        const UINT16 flags = KBD_FLAGS_RELEASE
-            | ((key_identity & kExtendedKeyIdentityBit) != 0
-                   ? KBD_FLAGS_EXTENDED
-                   : 0);
-        (void)inject_keyboard_event(
-            subsystem,
-            flags,
-            static_cast<UINT8>(key_identity & UINT8_MAX));
+    for (const auto key_identity : released.keys) {
+        UINT16 flags = KBD_FLAGS_RELEASE;
+        if ((key_identity & kExtendedKeyIdentityBit) != 0) {
+            flags |= KBD_FLAGS_EXTENDED;
+        }
+        if ((key_identity & kExtended1KeyIdentityBit) != 0) {
+            flags |= KBD_FLAGS_EXTENDED1;
+        }
+        (void)post_keyboard_event(flags, static_cast<UINT8>(key_identity & UINT8_MAX));
     }
-    for (const auto code : pressed_unicode) {
-        (void)inject_unicode_event(subsystem, KBD_FLAGS_RELEASE, code);
+    for (const auto code : released.unicode) {
+        (void)post_unicode_event(KBD_FLAGS_RELEASE, code);
     }
-    if (left_button_down) {
-        (void)inject_mouse_event(
-            subsystem,
-            PTR_FLAGS_BUTTON1,
-            pointer_x,
-            pointer_y);
+    if (released.buttons[static_cast<std::size_t>(macrdp::InputButton::left)]) {
+        (void)post_mouse_event(subsystem, PTR_FLAGS_BUTTON1, pointer_x, pointer_y);
     }
-    if (right_button_down) {
-        (void)inject_mouse_event(
-            subsystem,
-            PTR_FLAGS_BUTTON2,
-            pointer_x,
-            pointer_y);
+    if (released.buttons[static_cast<std::size_t>(macrdp::InputButton::right)]) {
+        (void)post_mouse_event(subsystem, PTR_FLAGS_BUTTON2, pointer_x, pointer_y);
     }
-    if (other_button_down) {
-        (void)inject_mouse_event(
-            subsystem,
-            PTR_FLAGS_BUTTON3,
-            pointer_x,
-            pointer_y);
+    if (released.buttons[static_cast<std::size_t>(macrdp::InputButton::other)]) {
+        (void)post_mouse_event(subsystem, PTR_FLAGS_BUTTON3, pointer_x, pointer_y);
     }
-    if (x_button_1_down) {
-        (void)inject_extended_mouse_event(
-            subsystem,
-            PTR_XFLAGS_BUTTON1,
-            pointer_x,
-            pointer_y);
+    if (released.buttons[static_cast<std::size_t>(macrdp::InputButton::x1)]) {
+        (void)post_extended_mouse_event(
+            subsystem, PTR_XFLAGS_BUTTON1, pointer_x, pointer_y);
     }
-    if (x_button_2_down) {
-        (void)inject_extended_mouse_event(
-            subsystem,
-            PTR_XFLAGS_BUTTON2,
-            pointer_x,
-            pointer_y);
+    if (released.buttons[static_cast<std::size_t>(macrdp::InputButton::x2)]) {
+        (void)post_extended_mouse_event(
+            subsystem, PTR_XFLAGS_BUTTON2, pointer_x, pointer_y);
     }
+}
+
+void release_input_state_for_client(
+    MacShadowSubsystem* subsystem,
+    macrdp::InputClientId client_id) {
+    if (subsystem == nullptr) {
+        return;
+    }
+    const auto released = subsystem->input_ownership.release_client(client_id);
+    if (released.buttons[static_cast<std::size_t>(macrdp::InputButton::left)]) {
+        subsystem->left_button_down = false;
+    }
+    if (released.buttons[static_cast<std::size_t>(macrdp::InputButton::right)]) {
+        subsystem->right_button_down = false;
+    }
+    if (released.buttons[static_cast<std::size_t>(macrdp::InputButton::other)]) {
+        subsystem->other_button_down = false;
+    }
+    if (released.buttons[static_cast<std::size_t>(macrdp::InputButton::x1)]) {
+        subsystem->x_button_1_down = false;
+    }
+    if (released.buttons[static_cast<std::size_t>(macrdp::InputButton::x2)]) {
+        subsystem->x_button_2_down = false;
+    }
+    emit_release_state(subsystem, released);
+}
+
+void release_input_state(MacShadowSubsystem* subsystem) {
+    if (subsystem == nullptr) {
+        return;
+    }
+    const auto released = subsystem->input_ownership.release_all();
+    subsystem->left_button_down = false;
+    subsystem->right_button_down = false;
+    subsystem->other_button_down = false;
+    subsystem->x_button_1_down = false;
+    subsystem->x_button_2_down = false;
+    emit_release_state(subsystem, released);
 }
 
 void input_loop(MacShadowSubsystem* subsystem) {
@@ -715,22 +992,30 @@ void input_loop(MacShadowSubsystem* subsystem) {
 
         bool injected = false;
         switch (event.kind) {
+            case InputEventKind::synchronize:
+                injected = synchronize_toggle_keys(event.synchronize_flags);
+                break;
             case InputEventKind::keyboard:
                 injected = inject_keyboard_event(
-                    subsystem, event.flags, static_cast<UINT8>(event.code));
+                    subsystem,
+                    event.client_id,
+                    event.flags,
+                    static_cast<UINT8>(event.code));
                 break;
             case InputEventKind::unicode:
-                injected = inject_unicode_event(subsystem, event.flags, event.code);
+                injected = inject_unicode_event(
+                    subsystem, event.client_id, event.flags, event.code);
                 break;
             case InputEventKind::mouse:
-                injected = inject_mouse_event(subsystem, event.flags, event.x, event.y);
+                injected = inject_mouse_event(
+                    subsystem, event.client_id, event.flags, event.x, event.y);
                 break;
             case InputEventKind::extended_mouse:
                 injected = inject_extended_mouse_event(
-                    subsystem, event.flags, event.x, event.y);
+                    subsystem, event.client_id, event.flags, event.x, event.y);
                 break;
             case InputEventKind::reset:
-                release_input_state(subsystem);
+                release_input_state_for_client(subsystem, event.client_id);
                 injected = true;
                 break;
         }
@@ -773,9 +1058,11 @@ bool copy_frame_to_surface(MacShadowSubsystem* subsystem, const macrdp::Frame& f
 
     bool changed = false;
     bool copy_succeeded = true;
+    std::uint64_t copied_bytes = 0;
     const bool matching_dimensions = frame.width == surface->width
         && frame.height == surface->height;
-    if (matching_dimensions && !frame.dirty_rects.empty()) {
+    const bool force_full_copy = subsystem->force_full_frame.load(std::memory_order_acquire);
+    if (matching_dimensions && !force_full_copy && !frame.dirty_rects.empty()) {
         // ScreenCaptureKit supplies complete frames but also identifies the
         // portions that changed. Keep the surface copy proportional to that
         // metadata and let the RDP layer carry the exact invalid region.
@@ -799,6 +1086,7 @@ bool copy_frame_to_surface(MacShadowSubsystem* subsystem, const macrdp::Frame& f
                     destination,
                     source,
                     static_cast<std::size_t>(right - left) * 4);
+                copied_bytes += static_cast<std::uint64_t>(right - left) * 4;
             }
 
             RECTANGLE_16 dirty{};
@@ -816,13 +1104,17 @@ bool copy_frame_to_surface(MacShadowSubsystem* subsystem, const macrdp::Frame& f
             changed = true;
         }
     } else if (matching_dimensions) {
-        for (std::uint32_t y = 0; y < surface->height; ++y) {
-            auto* destination = surface->data + y * surface->scanline;
-            const auto* source = frame.bgra.data() + y * frame.stride;
-            if (std::memcmp(destination, source, static_cast<std::size_t>(surface->width) * 4)
-                != 0) {
-                changed = true;
-                break;
+        if (force_full_copy) {
+            changed = true;
+        } else {
+            for (std::uint32_t y = 0; y < surface->height; ++y) {
+                auto* destination = surface->data + y * surface->scanline;
+                const auto* source = frame.bgra.data() + y * frame.stride;
+                if (std::memcmp(destination, source, static_cast<std::size_t>(surface->width) * 4)
+                    != 0) {
+                    changed = true;
+                    break;
+                }
             }
         }
         if (changed) {
@@ -834,11 +1126,13 @@ bool copy_frame_to_surface(MacShadowSubsystem* subsystem, const macrdp::Frame& f
                     source,
                     static_cast<std::size_t>(surface->width) * 4);
             }
+            copied_bytes = static_cast<std::uint64_t>(surface->width) * surface->height * 4;
         }
     } else {
         // ScreenCaptureKit and RDP may use different Retina coordinate spaces.
         // Resample into the framebuffer dimensions instead of rejecting a valid
         // capture when the display mode changes.
+        changed = force_full_copy;
         for (std::uint32_t y = 0; y < surface->height; ++y) {
             const auto source_y = std::min<std::uint32_t>(
                 frame.height - 1,
@@ -857,9 +1151,10 @@ bool copy_frame_to_surface(MacShadowSubsystem* subsystem, const macrdp::Frame& f
                 std::memcpy(pixel, source, 4);
             }
         }
+        copied_bytes = static_cast<std::uint64_t>(surface->width) * surface->height * 4;
     }
 
-    if (changed && (!matching_dimensions || frame.dirty_rects.empty())) {
+    if (changed && (force_full_copy || !matching_dimensions || frame.dirty_rects.empty())) {
         RECTANGLE_16 dirty{};
         dirty.right = static_cast<UINT16>(surface->width);
         dirty.bottom = static_cast<UINT16>(surface->height);
@@ -876,6 +1171,13 @@ bool copy_frame_to_surface(MacShadowSubsystem* subsystem, const macrdp::Frame& f
         surface->macrdpFrameGeneration++;
     }
     LeaveCriticalSection(&surface->lock);
+
+    subsystem->published_frames.fetch_add(1, std::memory_order_relaxed);
+    subsystem->copied_bytes.fetch_add(copied_bytes, std::memory_order_relaxed);
+    if (changed) {
+        subsystem->changed_frames.fetch_add(1, std::memory_order_relaxed);
+    }
+    subsystem->force_full_frame.store(false, std::memory_order_release);
 
     if (!changed) {
         return true;
@@ -917,10 +1219,62 @@ void request_capture_stop(MacShadowSubsystem* subsystem, const char* error) {
     }
 }
 
+bool refresh_display_surface(MacShadowSubsystem* subsystem) {
+    if (subsystem == nullptr || subsystem->common.server == nullptr
+        || subsystem->common.server->screen == nullptr || subsystem->capture == nullptr) {
+        return false;
+    }
+
+    MONITOR_DEF next_monitor{};
+    if (mac_shadow_enum_monitors(&next_monitor, 1) != 1) {
+        return false;
+    }
+
+    const auto& current_monitor = subsystem->common.monitors[0];
+    const bool changed = current_monitor.left != next_monitor.left
+        || current_monitor.top != next_monitor.top
+        || current_monitor.right != next_monitor.right
+        || current_monitor.bottom != next_monitor.bottom
+        || current_monitor.flags != next_monitor.flags;
+    if (!changed) {
+        return true;
+    }
+
+    subsystem->common.monitors[0] = next_monitor;
+    subsystem->common.numMonitors = 1;
+    if (!shadow_screen_resize(subsystem->common.server->screen)) {
+        return false;
+    }
+
+    const auto options = capture_options_for_surface(subsystem);
+    if (!options.has_value()) {
+        return false;
+    }
+    subsystem->force_full_frame.store(true, std::memory_order_release);
+    if (!subsystem->capture->reconfigure(*options)) {
+        WLog_WARN(TAG, "Display capture reconfiguration failed: %s",
+                  subsystem->capture->last_error().c_str());
+    }
+
+    const auto [surface_width, surface_height] = shadow_surface_dimensions(subsystem);
+    WLog_INFO(TAG, "Display mode changed; RDP surface is now %ux%u",
+              surface_width, surface_height);
+    return true;
+}
+
 void capture_loop(MacShadowSubsystem* subsystem) {
+    auto retry_delay = std::chrono::milliseconds{250};
     while (!subsystem->stop_requested.load()) {
+        if (!refresh_display_surface(subsystem)) {
+            request_capture_stop(
+                subsystem,
+                "Unable to resize the RDP surface after a display mode change");
+            break;
+        }
+
         auto frame = subsystem->capture->next_frame(std::chrono::milliseconds{250});
         if (frame.has_value()) {
+            subsystem->captured_frames.fetch_add(1, std::memory_order_relaxed);
             {
                 std::lock_guard lock(subsystem->pending_frame_mutex);
                 if (subsystem->stop_requested.load()) {
@@ -930,6 +1284,7 @@ void capture_loop(MacShadowSubsystem* subsystem) {
                 // queue. Preserve the skipped frame's dirty area before
                 // replacing its pixels with the newest frame.
                 if (subsystem->pending_frame.has_value()) {
+                    subsystem->coalesced_frames.fetch_add(1, std::memory_order_relaxed);
                     macrdp::coalesce_dropped_frame_dirty_regions(
                         *subsystem->pending_frame,
                         *frame);
@@ -937,13 +1292,31 @@ void capture_loop(MacShadowSubsystem* subsystem) {
                 subsystem->pending_frame = std::move(frame);
             }
             subsystem->pending_frame_condition.notify_one();
+            retry_delay = std::chrono::milliseconds{250};
             continue;
         }
 
         const std::string error = subsystem->capture->last_error();
         if (!error.empty() && !subsystem->stop_requested.load()) {
-            request_capture_stop(subsystem, error.c_str());
-            break;
+            WLog_WARN(TAG, "Screen capture stream stopped: %s; attempting restart",
+                      error.c_str());
+            subsystem->capture->stop();
+            if (subsystem->stop_requested.load()) {
+                break;
+            }
+            std::this_thread::sleep_for(retry_delay);
+            if (subsystem->stop_requested.load()) {
+                break;
+            }
+            if (!subsystem->capture->start()) {
+                WLog_WARN(TAG, "Screen capture restart failed: %s",
+                          subsystem->capture->last_error().c_str());
+                retry_delay = std::min(
+                    retry_delay * 2,
+                    std::chrono::milliseconds{2000});
+            } else {
+                retry_delay = std::chrono::milliseconds{250};
+            }
         }
     }
     subsystem->pending_frame_condition.notify_all();
@@ -968,6 +1341,20 @@ void publish_loop(MacShadowSubsystem* subsystem) {
         if (!copy_frame_to_surface(subsystem, *frame)) {
             request_capture_stop(subsystem, "Could not copy ScreenCaptureKit frame to RDP surface");
             break;
+        }
+
+        const auto now = std::chrono::steady_clock::now();
+        if (subsystem->last_pipeline_log.time_since_epoch().count() == 0
+            || now - subsystem->last_pipeline_log >= std::chrono::seconds{5}) {
+            WLog_INFO(TAG,
+                      "Frame pipeline: captured=%" PRIu64 " published=%" PRIu64
+                      " changed=%" PRIu64 " coalesced=%" PRIu64 " copied=%" PRIu64 " bytes",
+                      subsystem->captured_frames.load(std::memory_order_relaxed),
+                      subsystem->published_frames.load(std::memory_order_relaxed),
+                      subsystem->changed_frames.load(std::memory_order_relaxed),
+                      subsystem->coalesced_frames.load(std::memory_order_relaxed),
+                      subsystem->copied_bytes.load(std::memory_order_relaxed));
+            subsystem->last_pipeline_log = now;
         }
     }
 }
@@ -998,24 +1385,11 @@ int mac_shadow_subsystem_start(rdpShadowSubsystem* base) {
         return 1;
     }
 
-    auto options = macrdp::DisplayCaptureOptions{};
-    const auto [surface_width, surface_height] = shadow_surface_dimensions(subsystem);
-    if (surface_width == 0 || surface_height == 0) {
+    const auto options = capture_options_for_surface(subsystem);
+    if (!options.has_value()) {
         return -1;
     }
-    options.max_width = subsystem->capture_config.max_width == 0
-        ? surface_width
-        : std::min(
-              subsystem->capture_config.max_width,
-              surface_width);
-    options.max_height = subsystem->capture_config.max_height == 0
-        ? surface_height
-        : std::min(
-              subsystem->capture_config.max_height,
-              surface_height);
-    options.frame_rate = subsystem->capture_config.frame_rate;
-    options.show_cursor = false;
-    subsystem->capture = std::make_unique<macrdp::DisplayCapture>(options);
+    subsystem->capture = std::make_unique<macrdp::DisplayCapture>(*options);
     if (!subsystem->capture->start()) {
         WLog_ERR(TAG, "Unable to start ScreenCaptureKit: %s",
                  subsystem->capture->last_error().c_str());
@@ -1025,14 +1399,26 @@ int mac_shadow_subsystem_start(rdpShadowSubsystem* base) {
 
     subsystem->stop_requested.store(false);
     subsystem->input_stop_requested.store(false);
-    subsystem->common.captureFrameRate = options.frame_rate;
+    subsystem->common.captureFrameRate = options->frame_rate;
     {
         std::lock_guard frame_lock(subsystem->pending_frame_mutex);
         subsystem->pending_frame.reset();
     }
+    subsystem->force_full_frame.store(true, std::memory_order_release);
+    subsystem->captured_frames.store(0, std::memory_order_relaxed);
+    subsystem->coalesced_frames.store(0, std::memory_order_relaxed);
+    subsystem->published_frames.store(0, std::memory_order_relaxed);
+    subsystem->changed_frames.store(0, std::memory_order_relaxed);
+    subsystem->copied_bytes.store(0, std::memory_order_relaxed);
+    subsystem->last_pipeline_log = {};
     {
         std::lock_guard input_lock(subsystem->input_queue_mutex);
         subsystem->input_queue.clear();
+    }
+    {
+        std::lock_guard client_lock(subsystem->client_ids_mutex);
+        subsystem->client_ids.clear();
+        subsystem->next_client_id = 1;
     }
     try {
         subsystem->input_thread = std::thread(input_loop, subsystem);
@@ -1096,6 +1482,10 @@ int mac_shadow_subsystem_stop(rdpShadowSubsystem* base) {
         std::lock_guard input_lock(subsystem->input_queue_mutex);
         subsystem->input_queue.clear();
     }
+    {
+        std::lock_guard client_lock(subsystem->client_ids_mutex);
+        subsystem->client_ids.clear();
+    }
     subsystem->capture.reset();
     return 1;
 }
@@ -1127,36 +1517,44 @@ rdpShadowSubsystem* mac_shadow_subsystem_new() {
         subsystem->capture_config = g_capture_config;
     }
 
-    subsystem->common.SynchronizeEvent = [](rdpShadowSubsystem*, rdpShadowClient*, UINT32) {
-        return true;
+    subsystem->common.SynchronizeEvent = [](rdpShadowSubsystem* base, rdpShadowClient* client,
+                                            UINT32 flags) {
+        auto* mac = reinterpret_cast<MacShadowSubsystem*>(base);
+        return queue_synchronize_event(mac, input_client_id(mac, client), flags)
+            ? true
+            : false;
     };
-    subsystem->common.KeyboardEvent = [](rdpShadowSubsystem* base, rdpShadowClient*, UINT16 flags,
+    subsystem->common.KeyboardEvent = [](rdpShadowSubsystem* base, rdpShadowClient* client, UINT16 flags,
                                          UINT8 code) {
-        return queue_keyboard_event(reinterpret_cast<MacShadowSubsystem*>(base), flags, code)
+        auto* mac = reinterpret_cast<MacShadowSubsystem*>(base);
+        return queue_keyboard_event(mac, input_client_id(mac, client), flags, code)
             ? true
             : false;
     };
     subsystem->common.UnicodeKeyboardEvent =
-        [](rdpShadowSubsystem* base, rdpShadowClient*, UINT16 flags, UINT16 code) {
-            return queue_unicode_event(reinterpret_cast<MacShadowSubsystem*>(base), flags, code)
+        [](rdpShadowSubsystem* base, rdpShadowClient* client, UINT16 flags, UINT16 code) {
+            auto* mac = reinterpret_cast<MacShadowSubsystem*>(base);
+            return queue_unicode_event(mac, input_client_id(mac, client), flags, code)
                 ? true
                 : false;
         };
     subsystem->common.MouseEvent =
-        [](rdpShadowSubsystem* base, rdpShadowClient*, UINT16 flags, UINT16 x, UINT16 y) {
-            return queue_mouse_event(reinterpret_cast<MacShadowSubsystem*>(base), flags, x, y)
+        [](rdpShadowSubsystem* base, rdpShadowClient* client, UINT16 flags, UINT16 x, UINT16 y) {
+            auto* mac = reinterpret_cast<MacShadowSubsystem*>(base);
+            return queue_mouse_event(mac, client, input_client_id(mac, client), flags, x, y)
             ? true
             : false;
         };
     subsystem->common.ExtendedMouseEvent =
-        [](rdpShadowSubsystem* base, rdpShadowClient*, UINT16 flags, UINT16 x, UINT16 y) {
+        [](rdpShadowSubsystem* base, rdpShadowClient* client, UINT16 flags, UINT16 x, UINT16 y) {
+            auto* mac = reinterpret_cast<MacShadowSubsystem*>(base);
             return queue_extended_mouse_event(
-                       reinterpret_cast<MacShadowSubsystem*>(base), flags, x, y)
+                       mac, client, input_client_id(mac, client), flags, x, y)
                 ? true
                 : false;
         };
     subsystem->common.RelMouseEvent =
-        [](rdpShadowSubsystem* base, rdpShadowClient*, UINT16 flags, INT16 x_delta, INT16 y_delta) {
+        [](rdpShadowSubsystem* base, rdpShadowClient* client, UINT16 flags, INT16 x_delta, INT16 y_delta) {
             auto* mac = reinterpret_cast<MacShadowSubsystem*>(base);
             if (mac == nullptr) {
                 return false;
@@ -1179,7 +1577,15 @@ rdpShadowSubsystem* mac_shadow_subsystem_new() {
                 pointer_y + y_delta,
                 0,
                 static_cast<std::int32_t>(height > 0 ? height - 1 : 0)));
-            return queue_mouse_event(mac, flags | PTR_FLAGS_MOVE, x, y) ? true : false;
+            return queue_mouse_event(
+                       mac,
+                       client,
+                       input_client_id(mac, client),
+                       flags | PTR_FLAGS_MOVE,
+                       x,
+                       y)
+                ? true
+                : false;
         };
     subsystem->common.Authenticate = [](rdpShadowSubsystem* base, rdpShadowClient*, const char* user,
                                         const char* domain, const char* password) {
@@ -1197,11 +1603,16 @@ rdpShadowSubsystem* mac_shadow_subsystem_new() {
         }
         return 1;
     };
-    subsystem->common.ClientConnect = [](rdpShadowSubsystem*, rdpShadowClient*) {
-        return true;
+    subsystem->common.ClientConnect = [](rdpShadowSubsystem* base, rdpShadowClient* client) {
+        auto* mac = reinterpret_cast<MacShadowSubsystem*>(base);
+        return register_input_client(mac, client) != 0;
     };
-    subsystem->common.ClientDisconnect = [](rdpShadowSubsystem* base, rdpShadowClient*) {
-        (void)queue_input_reset(reinterpret_cast<MacShadowSubsystem*>(base));
+    subsystem->common.ClientDisconnect = [](rdpShadowSubsystem* base, rdpShadowClient* client) {
+        auto* mac = reinterpret_cast<MacShadowSubsystem*>(base);
+        const auto client_id = unregister_input_client(mac, client);
+        if (client_id != 0) {
+            (void)queue_input_reset(mac, client_id);
+        }
     };
     subsystem->common.ClientCapabilities = [](rdpShadowSubsystem*, rdpShadowClient*) {
         return true;

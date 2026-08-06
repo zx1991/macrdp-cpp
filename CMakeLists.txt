@@ -1,6 +1,9 @@
 cmake_minimum_required(VERSION 3.25)
 
-set(CMAKE_OSX_DEPLOYMENT_TARGET "14.0" CACHE STRING "Minimum macOS version")
+# The current Homebrew FFmpeg/OpenSSL arm64 binaries used by the package are
+# built for macOS 15. Keep the default honest; a locally built dependency set
+# can still override this cache value for older deployment targets.
+set(CMAKE_OSX_DEPLOYMENT_TARGET "15.0" CACHE STRING "Minimum macOS version")
 
 project(macrdp_cpp
     VERSION 0.1.0
@@ -29,6 +32,20 @@ add_library(macrdp_macos STATIC
     src/macos/display_capture.mm
     src/macos/h264_encoder.mm
     src/macos/videotoolbox_h264.mm
+)
+
+add_library(macrdp_config STATIC
+    src/config_permissions.cpp
+)
+
+target_include_directories(macrdp_config PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+
+target_compile_options(macrdp_config PRIVATE
+    -Wall
+    -Wextra
+    -Wpedantic
 )
 
 target_include_directories(macrdp_macos
@@ -456,7 +473,7 @@ target_include_directories(macrdp-server PRIVATE
     ${freerdp_BINARY_DIR}/winpr/include
 )
 
-target_link_libraries(macrdp-server PRIVATE macrdp_freerdp_shadow)
+target_link_libraries(macrdp-server PRIVATE macrdp_freerdp_shadow macrdp_config)
 
 if(APPLE)
     add_custom_target(macrdp-package
@@ -494,6 +511,32 @@ endif()
 
 add_executable(macrdp-h264-worker-test
     src/rdp_h264_worker_test.cpp
+)
+
+add_executable(macrdp-input-ownership-test
+    src/input_ownership_test.cpp
+)
+
+add_executable(macrdp-config-permissions-test
+    src/config_permissions_test.cpp
+)
+
+target_compile_options(macrdp-config-permissions-test PRIVATE
+    -Wall
+    -Wextra
+    -Wpedantic
+)
+
+target_link_libraries(macrdp-config-permissions-test PRIVATE macrdp_config)
+
+target_compile_options(macrdp-input-ownership-test PRIVATE
+    -Wall
+    -Wextra
+    -Wpedantic
+)
+
+target_include_directories(macrdp-input-ownership-test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
 
 target_compile_options(macrdp-h264-worker-test PRIVATE
@@ -542,3 +585,27 @@ add_test(
     NAME h264_worker
     COMMAND macrdp-h264-worker-test
 )
+
+add_test(
+    NAME input_ownership
+    COMMAND macrdp-input-ownership-test
+)
+
+add_test(
+    NAME config_permissions
+    COMMAND macrdp-config-permissions-test
+)
+
+add_test(
+    NAME server_help
+    COMMAND macrdp-server --help
+)
+
+add_test(
+    NAME server_invalid_bind_address
+    COMMAND macrdp-server
+        --bind-address "127.0.0.1,::1"
+        --user Xian
+        --password test
+)
+set_tests_properties(server_invalid_bind_address PROPERTIES WILL_FAIL TRUE)

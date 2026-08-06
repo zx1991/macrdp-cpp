@@ -62,7 +62,10 @@ void free_stream(RDPGFX_AVC420_BITMAP_STREAM& stream) {
 
 struct macrdp_h264_worker {
     explicit macrdp_h264_worker(rdpShadowEncoder* encoder)
-        : encoder(encoder), done_event(CreateEvent(nullptr, FALSE, FALSE, nullptr)) {
+        // WinPR's macOS event backend does not implement auto-reset events.
+        // Use a manual-reset event and clear it explicitly when a completion
+        // is consumed or a new job is accepted.
+        : encoder(encoder), done_event(CreateEvent(nullptr, TRUE, FALSE, nullptr)) {
         if (done_event != nullptr) {
             thread = std::thread([this] { run(); });
         }
@@ -398,6 +401,9 @@ extern "C" int macrdp_h264_worker_submit(
         if (worker->stopping || worker->busy || worker->job.has_value() || worker->completion) {
             return 0;
         }
+        if (!ResetEvent(worker->done_event)) {
+            return -1;
+        }
         worker->job = std::move(next);
         worker->busy = TRUE;
     }
@@ -439,6 +445,10 @@ extern "C" int macrdp_h264_worker_take(
     *frame = worker->result;
     clear_encoded_frame(worker->result);
     worker->completion = FALSE;
+    if (!ResetEvent(worker->done_event)) {
+        macrdp_h264_worker::free_result(*frame);
+        return -1;
+    }
     if (frame->failed) {
         return -1;
     }

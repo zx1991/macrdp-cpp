@@ -1457,7 +1457,7 @@
  
  #if defined(CHANNEL_RDPGFX_SERVER)
  		HANDLE gfxevent = rdpgfx_server_get_event_handle(client->rdpgfx);
-@@ -2707,13 +3154,40 @@
+@@ -2707,13 +3154,34 @@
  			events[nCount++] = gfxevent;
  #endif
  
@@ -1481,12 +1481,6 @@
 +			}
 +		}
 +
-+		WINPR_ASSERT(peer->CheckFileDescriptor);
-+		if (!peer->CheckFileDescriptor(peer))
-+		{
-+			WLog_ERR(TAG, "Failed to check FreeRDP input before frame update");
-+			goto fail;
-+		}
 +		if (peer->IsWriteBlocked && peer->IsWriteBlocked(peer))
 +			outputBlocked = TRUE;
 +
@@ -1523,7 +1517,7 @@
  			{
  				/* Send screen update or resize to this client */
  
-@@ -2731,41 +3219,45 @@
+@@ -2731,41 +3219,53 @@
  					/* Screen size changed, do resize */
  					if (!shadow_client_send_resize(client, &gfxstatus))
  					{
@@ -1580,6 +1574,14 @@
 +			WLog_ERR(TAG, "Failed to send H.264 worker completion");
  			goto fail;
  		}
++		WINPR_ASSERT(peer->CheckFileDescriptor);
++		if (!peer->CheckFileDescriptor(peer))
++		{
++			WLog_ERR(TAG, "Failed to check FreeRDP input after frame update");
++			goto fail;
++		}
++		if (peer->IsWriteBlocked && peer->IsWriteBlocked(peer))
++			outputBlocked = TRUE;
  
 @@ -2857,6 +3349,8 @@
  			audioVolumeMsg.id = 0;
@@ -1829,10 +1831,23 @@
  		return TRUE;
  	}
  
-@@ -97,8 +100,12 @@
- 		surface->height = height;
- 		surface->scanline = scanline;
- 		surface->data = buffer;
+@@ -97,8 +100,25 @@
+		surface->height = height;
+		surface->scanline = scanline;
+		surface->data = buffer;
++		region16_clear(&(surface->invalidRegion));
++		if ((width > 0) && (height > 0))
++		{
++			RECTANGLE_16 fullRegion = WINPR_C_ARRAY_INIT;
++			fullRegion.right = (UINT16)width;
++			fullRegion.bottom = (UINT16)height;
++			if (!region16_union_rect(&(surface->invalidRegion), &(surface->invalidRegion),
++			                         &fullRegion))
++			{
++				LeaveCriticalSection(&(surface->lock));
++				return FALSE;
++			}
++		}
 +		LeaveCriticalSection(&(surface->lock));
  		return TRUE;
  	}

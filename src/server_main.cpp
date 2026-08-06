@@ -7,10 +7,12 @@
 #include <winpr/ssl.h>
 #include <winpr/synch.h>
 
+#include "macrdp/config_permissions.hpp"
 #include "mac_shadow_subsystem.hpp"
 #include "macrdp/videotoolbox_h264.h"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <charconv>
 #include <chrono>
@@ -26,6 +28,7 @@
 #include <string>
 #include <string_view>
 #include <thread>
+#include <utility>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -39,6 +42,7 @@ enum class SecurityMode {
 
 struct Options {
     std::uint16_t port = 3389;
+    std::string bind_address;
     SecurityMode security = SecurityMode::nla;
     std::string username;
     std::string domain;
@@ -82,6 +86,7 @@ void print_usage(const char* program) {
         << "Usage: " << program << " [options]\n"
         << "\n"
         << "  --port <number>             Listen port (default: 3389)\n"
+        << "  --bind-address <address>    Optional address to bind (default: all)\n"
         << "  --security <nla|tls|rdp>    Security protocol (default: nla)\n"
         << "  --bitrate <value>           H.264 rate, e.g. 16M (default: 16M)\n"
         << "  --fps <number>              Capture/encode rate, 1-60 (default: 30)\n"
@@ -198,6 +203,13 @@ bool parse_options(int argc, char** argv, Options& options) {
             if (!next_value(index, argc, argv, value)
                 || !parse_port(value, options.port)) {
                 std::cerr << "Invalid --port value\n";
+                return false;
+            }
+        } else if (argument == "--bind-address") {
+            if (!next_value(index, argc, argv, options.bind_address)
+                || options.bind_address.empty()
+                || options.bind_address.find(',') != std::string::npos) {
+                std::cerr << "--bind-address requires one non-empty address without commas\n";
                 return false;
             }
         } else if (argument == "--security") {
@@ -393,8 +405,57 @@ bool write_sam_file(const std::filesystem::path& path, const Options& options) {
     if (::close(descriptor) != 0) {
         success = false;
     }
+    if (!success) {
+        (void)::unlink(path.c_str());
+    }
     return success;
 }
+
+void secure_remove_file(const std::filesystem::path& path) noexcept {
+    if (path.empty()) {
+        return;
+    }
+
+    const int descriptor = ::open(path.c_str(), O_WRONLY | O_NOFOLLOW);
+    if (descriptor >= 0) {
+        struct stat file_status {};
+        if (::fstat(descriptor, &file_status) == 0 && S_ISREG(file_status.st_mode)) {
+            std::array<std::uint8_t, 4096> zeros{};
+            off_t remaining = file_status.st_size;
+            while (remaining > 0) {
+                const auto requested = static_cast<std::size_t>(std::min<off_t>(
+                    remaining,
+                    static_cast<off_t>(zeros.size())));
+                const ssize_t written = ::write(descriptor, zeros.data(), requested);
+                if (written <= 0) {
+                    break;
+                }
+                remaining -= written;
+            }
+            (void)::fsync(descriptor);
+            (void)::ftruncate(descriptor, 0);
+        }
+        (void)::close(descriptor);
+    }
+    (void)::unlink(path.c_str());
+}
+
+class GeneratedSamFileCleanup final {
+public:
+    GeneratedSamFileCleanup() = default;
+    explicit GeneratedSamFileCleanup(std::filesystem::path path)
+        : path_(std::move(path)) {}
+
+    ~GeneratedSamFileCleanup() {
+        secure_remove_file(path_);
+    }
+
+    GeneratedSamFileCleanup(const GeneratedSamFileCleanup&) = delete;
+    GeneratedSamFileCleanup& operator=(const GeneratedSamFileCleanup&) = delete;
+
+private:
+    std::filesystem::path path_;
+};
 
 bool set_security(rdpSettings* settings, SecurityMode mode) {
     if (settings == nullptr) {
@@ -416,6 +477,13 @@ bool configure_server(rdpShadowServer* server, const Options& options, const std
     }
 
     server->port = options.port;
+    if (!options.bind_address.empty()) {
+        const std::string bind_configuration = "bind-address," + options.bind_address;
+        server->ipcSocket = ::strdup(bind_configuration.c_str());
+        if (server->ipcSocket == nullptr) {
+            return false;
+        }
+    }
     server->selectedMonitor = 0;
     server->mayView = TRUE;
     server->mayInteract = TRUE;
@@ -494,6 +562,11 @@ int main(int argc, char** argv) {
         clear_secret(options.password);
         return 1;
     }
+    if (!macrdp::restrict_config_paths(options.config_dir)) {
+        std::cerr << "Unable to make config directory private: " << options.config_dir << "\n";
+        clear_secret(options.password);
+        return 1;
+    }
 
     if (!winpr_InitializeSSL(WINPR_SSL_INIT_DEFAULT)) {
         std::cerr << "Unable to initialize FreeRDP TLS/NTLM support\n";
@@ -501,7 +574,7 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    std::string generated_sam_file;
+    std::filesystem::path generated_sam_path;
     if (options.security == SecurityMode::nla && options.sam_file.empty()) {
         const auto generated_path = options.config_dir / "macrdp.sam";
         if (!write_sam_file(generated_path, options)) {
@@ -509,9 +582,12 @@ int main(int argc, char** argv) {
             clear_secret(options.password);
             return 1;
         }
-        generated_sam_file = generated_path.string();
+        generated_sam_path = generated_path;
     }
-    const std::string sam_file = options.sam_file.empty() ? generated_sam_file : options.sam_file;
+    GeneratedSamFileCleanup generated_sam_cleanup(generated_sam_path);
+    const std::string sam_file = options.sam_file.empty()
+        ? generated_sam_path.string()
+        : options.sam_file;
 
     macrdp_shadow_set_credentials(
         options.username.empty() ? nullptr : options.username.c_str(),
@@ -547,6 +623,15 @@ int main(int argc, char** argv) {
     if (shadow_server_init(server) < 0) {
         std::cerr << "Unable to initialize FreeRDP shadow server. Check certificate, SAM, and"
                      " Screen Recording prerequisites.\n";
+        shadow_server_free(server);
+        macrdp_shadow_set_credentials(nullptr, nullptr, nullptr);
+        clear_secret(options.password);
+        return 1;
+    }
+    if (!macrdp::restrict_config_paths(options.config_dir)) {
+        std::cerr << "Unable to make generated FreeRDP configuration private: "
+                  << options.config_dir << "\n";
+        shadow_server_uninit(server);
         shadow_server_free(server);
         macrdp_shadow_set_credentials(nullptr, nullptr, nullptr);
         clear_secret(options.password);

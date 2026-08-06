@@ -19,9 +19,22 @@ VideoToolbox AVC420 H.264 encoder at 16 Mbps, with FreeRDP's FFmpeg encoder as
 a fallback. H.264 encoding runs on a per-client worker. FreeRDP receives input
 on its client thread, then a separate macOS input worker performs CoreGraphics
 injection; pure mouse motion is coalesced while clicks and keyboard events are
-preserved in order. AVC444 remains available for clients that need higher chroma
+preserved in order. Synchronization events keep Caps Lock and Num Lock aligned,
+and wheel events are posted at the remote pointer position. Scroll Lock key
+events are forwarded normally; macOS does not expose a reliable public toggle
+state for focus synchronization. Input state is owned per RDP client, so
+disconnecting one client releases only the keys and buttons still owned by that
+client. Pointer-position updates are sent to the other connected RDP clients,
+so the client that generated the input event does not receive a redundant
+echo. A stopped ScreenCaptureKit stream is restarted with bounded backoff
+while the server is running. AVC444 remains available for clients that need higher chroma
 fidelity; it uses the FFmpeg path because the direct bridge currently accepts
 I420/AVC420 input.
+
+The server keeps its configuration root private and only changes permissions on
+the root, the FreeRDP `shadow` directory, `shadow.crt`, `shadow.key`, and the
+generated `macrdp.sam`. Other files supplied under `--config-dir` are left
+untouched; the known paths are rejected if they are symbolic links.
 
 The server currently does not expose a macOS microphone. FreeRDP's AUDIN input
 channel is disabled, so Windows audio output can still be used without an
@@ -64,6 +77,11 @@ them on Apple Silicon:
 ```bash
 brew install cmake ffmpeg openssl@3
 ```
+
+The default deployment target is macOS 15 because the current Homebrew
+FFmpeg/OpenSSL arm64 binaries require macOS 15. To support an older macOS,
+build compatible FFmpeg and OpenSSL binaries yourself and pass an explicit
+`-DCMAKE_OSX_DEPLOYMENT_TARGET` value.
 
 The pinned FreeRDP archive is hash-verified. macrdp-specific FreeRDP changes
 are kept in `patches/freerdp-macrdp-adaptations.patch` and applied only to the
@@ -118,6 +136,20 @@ Use the same username and password. The server listens on TCP port 3389 by
 default; use `--port 3390` and connect to `host:3390` when another service
 already occupies that port.
 
+The default listener binds all local addresses. Restrict it when the server
+should only be reachable through one interface:
+
+```bash
+printf '%s\n' 'change-this-password' | \
+  ./build/macrdp-server --bind-address 127.0.0.1 --user Xian --password-stdin
+```
+
+For a remote RDP client, replace `127.0.0.1` with the Mac's address on the
+network used by that client. The address must belong to a local interface on
+the Mac; it is not the Windows client's address.
+
+For an IPv6 address, include brackets, for example `--bind-address [::1]`.
+
 If GFX/H.264 updates are slow on a high-latency or bandwidth-limited link,
 try the incremental SurfaceBits path:
 
@@ -167,16 +199,25 @@ other Macs.
 ## Remaining work
 
 The local unit tests cover frame coalescing, display-size calculation, H.264,
-and the asynchronous encoder worker. The remaining validation requires a
-graphical macOS session and a Windows `mstsc` client:
+the asynchronous encoder worker, and multi-client input ownership. The highest
+priority validation still requires a graphical macOS session and a Windows
+`mstsc` client:
 
-1. Verify keyboard, Unicode input, click, drag, wheel, reconnect, resize, NLA,
-   and slow-reader behavior.
-2. Verify Retina coordinate mapping, then add multi-monitor and display-mode
-   change handling.
-3. Add a repeatable protocol smoke-test setup with a FreeRDP client.
-4. Add display-mode change recovery and multi-monitor selection.
-5. Add code signing/notarization automation for distributed installs.
+1. Run a current-build matrix for NLA, keyboard, Unicode input, left/right and
+   side buttons, drag, wheel, reconnect, window resize, and a slow client.
+2. Collect fresh `Slow client frame handling` and `Frame barrier` logs. Logs
+   from before the asynchronous worker and non-blocking output changes are not
+   evidence about the current build.
+3. Verify Retina coordinate mapping and display-mode changes on the hardware
+   used for deployment. The server still captures only the main display and
+   does not offer multi-monitor selection.
+4. Add a repeatable protocol smoke test. No FreeRDP client binary is built by
+   this repository, and `mstsc` remains the compatibility target.
+5. Add a macOS microphone/AUDIN implementation if microphone redirection is
+   required. The current server supports audio output through RDPSND only.
+6. Add Developer ID signing, notarization, and dependency-minimized packaging
+   for distribution. The local package is ad-hoc signed and currently carries
+   the Homebrew runtime dependency graph.
 
 ## Encoder test
 

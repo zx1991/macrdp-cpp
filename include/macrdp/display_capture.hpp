@@ -49,6 +49,10 @@ public:
     [[nodiscard]] std::optional<Frame> next_frame(
         std::chrono::milliseconds timeout = std::chrono::milliseconds{1000});
 
+    // Rebuilds the ScreenCaptureKit stream with new output limits. This is
+    // used when macOS changes the selected display's pixel dimensions.
+    [[nodiscard]] bool reconfigure(DisplayCaptureOptions options);
+
     void stop() noexcept;
 
     [[nodiscard]] std::string last_error() const;

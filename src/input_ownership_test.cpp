@@ -1,0 +1,71 @@
+#include "macrdp/input_ownership.hpp"
+#include "macrdp/input_queue.hpp"
+
+#include <deque>
+#include <iostream>
+
+namespace {
+
+bool expect(bool value, const char* message) {
+    if (!value) {
+        std::cerr << message << '\n';
+        return false;
+    }
+    return true;
+}
+
+} // namespace
+
+namespace {
+
+struct QueuedEvent {
+    macrdp::InputClientId client_id = 0;
+    int sequence = 0;
+    bool reset = false;
+};
+
+bool test_reset_priority() {
+    std::deque<QueuedEvent> queue{
+        {1, 10, false},
+        {2, 20, false},
+        {1, 11, false},
+        {2, 21, false},
+    };
+    macrdp::prioritize_client_reset(queue, 1, QueuedEvent{1, 99, true});
+
+    return expect(queue.size() == 3, "reset did not remove stale client events")
+        && expect(queue.front().client_id == 1 && queue.front().reset,
+                   "reset was not moved to the front")
+        && expect(queue[1].sequence == 20 && queue[2].sequence == 21,
+                   "other client input order changed");
+}
+
+} // namespace
+
+int main() {
+    bool ok = test_reset_priority();
+    macrdp::InputOwnership ownership;
+
+    ok = expect(ownership.acquire_key(1, 30), "first key owner was not announced") && ok;
+    ok = expect(!ownership.acquire_key(1, 30), "duplicate key press changed ownership") && ok;
+    ok = expect(!ownership.acquire_key(2, 30), "second key owner caused a duplicate press") && ok;
+    ok = expect(!ownership.release_key(1, 30), "first key release released a shared key") && ok;
+    ok = expect(ownership.release_key(2, 30), "last key owner was not released") && ok;
+    ok = expect(!ownership.release_key(2, 30), "unknown key release was accepted") && ok;
+
+    ok = expect(ownership.acquire_button(1, macrdp::InputButton::left),
+                "first mouse owner was not announced") && ok;
+    ok = expect(!ownership.acquire_button(2, macrdp::InputButton::left),
+                "second mouse owner caused a duplicate press") && ok;
+    auto released = ownership.release_client(1);
+    ok = expect(!released.buttons[0], "shared mouse button released too early") && ok;
+    released = ownership.release_client(2);
+    ok = expect(released.buttons[0], "last mouse owner was not released") && ok;
+
+    ok = expect(ownership.acquire_unicode(7, 0x4e2d), "unicode owner was not announced") && ok;
+    released = ownership.release_all();
+    ok = expect(released.unicode.size() == 1 && released.unicode.front() == 0x4e2d,
+                "release_all did not return unicode state") && ok;
+
+    return ok ? 0 : 1;
+}
