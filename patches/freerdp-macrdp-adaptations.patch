@@ -122,6 +122,262 @@
 +	client->macrdpFrameDataStride = surface->scanline;
 +	return TRUE;
 +}
+--- a/libfreerdp/core/transport.c
++++ b/libfreerdp/core/transport.c
+@@ -64,7 +64,18 @@
+ #define TAG FREERDP_TAG("core.transport")
+ 
+ #define BUFFER_SIZE 16384
++#define MACRDP_WRITE_QUEUE_LIMIT (16ULL * 1024ULL * 1024ULL)
+ 
++typedef struct rdp_transport_write_item rdpTransportWriteItem;
++
++struct rdp_transport_write_item
++{
++\twStream* stream;
++\tsize_t offset;
++\tsize_t length;
++\trdpTransportWriteItem* next;
++};
++
+ struct rdp_transport
+ {
+ \tTRANSPORT_LAYER layer;
+@@ -89,6 +100,9 @@
+ \tCRITICAL_SECTION ReadLock;
+ \tBOOL haveWriteLock;
+ \tCRITICAL_SECTION WriteLock;
++\trdpTransportWriteItem* writeQueueHead;
++\trdpTransportWriteItem* writeQueueTail;
++\tsize_t writeQueueBytes;
+ \tUINT64 written;
+ \tHANDLE rereadEvent;
+ \tBOOL haveMoreBytesToRead;
+@@ -105,6 +119,115 @@
+ \tvoid* userContextShadowPtr;
+ } rdpTransportLayerInt;
+ 
++static void transport_write_queue_clear(rdpTransport* transport)
++{
++\trdpTransportWriteItem* item = transport->writeQueueHead;
++\twhile (item)
++\t{
++\t\trdpTransportWriteItem* next = item->next;
++\t\tStream_Release(item->stream);
++\t\tfree(item);
++\t\titem = next;
++\t}
++\ttransport->writeQueueHead = nullptr;
++\ttransport->writeQueueTail = nullptr;
++\ttransport->writeQueueBytes = 0;
++}
++
++static BOOL transport_write_queue_append(rdpTransport* transport, wStream* stream, size_t offset,
++                                         size_t length)
++{
++\tif (length == 0)
++\t\treturn TRUE;
++
++\tif (transport->writeQueueBytes > MACRDP_WRITE_QUEUE_LIMIT
++\t    || length > MACRDP_WRITE_QUEUE_LIMIT - transport->writeQueueBytes)
++\t{
++\t\tWLog_WARN(TAG,
++\t\t          "Non-blocking output queue limit reached (queued=%" PRIuz ", new=%" PRIuz ")",
++\t\t          transport->writeQueueBytes, length);
++\t\treturn FALSE;
++\t}
++
++\trdpTransportWriteItem* item = (rdpTransportWriteItem*)calloc(1, sizeof(*item));
++\tif (!item)
++\t\treturn FALSE;
++
++\tStream_AddRef(stream);
++\titem->stream = stream;
++\titem->offset = offset;
++\titem->length = length;
++\tif (transport->writeQueueTail)
++\t\ttransport->writeQueueTail->next = item;
++\telse
++\t\ttransport->writeQueueHead = item;
++\ttransport->writeQueueTail = item;
++\ttransport->writeQueueBytes += length;
++\treturn TRUE;
++}
++
++/* Retry plaintext that could not be accepted by a TLS/BIO layer without
++ * waiting in the session thread. The buffered socket BIO normally absorbs
++ * this work; this queue covers the less common TLS WANT_READ/WANT_WRITE case. */
++static int transport_write_queue_drain(rdpTransport* transport, BOOL wait)
++{
++\t/* MACRDP_NONBLOCKING_WRITE_QUEUE */
++\twhile (transport->writeQueueHead)
++\t{
++\t\trdpTransportWriteItem* item = transport->writeQueueHead;
++\t\twhile (item->offset < item->length)
++\t\t{
++\t\t\tif (BIO_write_blocked(transport->frontBio))
++\t\t\t{
++\t\t\t\tif (BIO_flush(transport->frontBio) < 1)
++\t\t\t\t\treturn -1;
++\t\t\t\tif (BIO_write_blocked(transport->frontBio))
++\t\t\t\t{
++\t\t\t\t\tif (!wait)
++\t\t\t\t\t\treturn 0;
++\t\t\t\t\tif (BIO_wait_write(transport->frontBio, 100) < 0)
++\t\t\t\t\t\treturn -1;
++\t\t\t\t\tcontinue;
++\t\t\t\t}
++\t\t\t}
++
++\t\t\tERR_clear_error();
++\t\t\tconst size_t remaining = item->length - item->offset;
++\t\t\tconst int towrite = (remaining > INT32_MAX) ? INT32_MAX : (int)remaining;
++\t\t\tconst int status = BIO_write(transport->frontBio,
++\t\t\t                             Stream_Buffer(item->stream) + item->offset,
++\t\t\t                             towrite);
++\t\t\tif (status > 0)
++\t\t\t{
++\t\t\t\tif ((size_t)status > remaining)
++\t\t\t\t\treturn -1;
++\t\t\t\titem->offset += (size_t)status;
++\t\t\t\ttransport->writeQueueBytes -= (size_t)status;
++\t\t\t\tcontinue;
++\t\t\t}
++
++\t\t\tif (!BIO_should_retry(transport->frontBio))
++\t\t\t\treturn -1;
++\t\t\tif (!wait)
++\t\t\t\treturn 0;
++
++\t\t\tconst long waitStatus = BIO_should_read(transport->frontBio)
++\t\t\t                              ? BIO_wait_read(transport->frontBio, 100)
++\t\t\t                              : BIO_wait_write(transport->frontBio, 100);
++\t\t\tif (waitStatus < 0)
++\t\t\t\treturn -1;
++\t\t}
++
++\t\ttransport->writeQueueHead = item->next;
++\t\tif (!transport->writeQueueHead)
++\t\t\ttransport->writeQueueTail = nullptr;
++\t\tStream_Release(item->stream);
++\t\tfree(item);
++\t}
++
++\treturn 1;
++}
++
+ static const char* where2str(int where, char* ibuffer, size_t ilen)
+ {
+ \tif (!ibuffer || (ilen < 2))
+@@ -1228,6 +1351,7 @@
+ \t\tsize_t length = Stream_GetPosition(s);
+ \t\tsize_t writtenlength = length;
+ \t\tStream_ResetPosition(s);
++\t\tstatus = 0;
+ 
+ \t\tif (length > 0)
+ \t\t{
+@@ -1235,6 +1359,23 @@
+ \t\t\tWLog_Packet(transport->log, WLOG_TRACE, Stream_Buffer(s), length, WLOG_PACKET_OUTBOUND);
+ \t\t}
+ 
++\t\t/* A TLS layer can return WANT_READ/WANT_WRITE before the buffered BIO
++\t\t * accepts the complete PDU. Finish that PDU before accepting a newer one. */
++\t\tif (transport->writeQueueHead)
++\t\t{
++\t\t\tconst int queueStatus = transport_write_queue_drain(transport, transport->blocking);
++\t\t\tif (queueStatus < 0)
++\t\t\t\tgoto out_cleanup;
++\t\t\tif (transport->writeQueueHead)
++\t\t\t{
++\t\t\t\tif (!transport_write_queue_append(transport, s, 0, length))
++\t\t\t\t\tgoto out_cleanup;
++\t\t\t\tstatus = (length > INT32_MAX) ? INT32_MAX : (int)length;
++\t\t\t\ttransport->written += writtenlength;
++\t\t\t\tgoto out_cleanup;
++\t\t\t}
++\t\t}
++
+ \t\twhile (length > 0)
+ \t\t{
+ \t\t\tERR_clear_error();
+@@ -1256,8 +1397,14 @@
+ \t\t\t\t/* non-blocking can live with blocked IOs */
+ \t\t\t\tif (!transport->blocking)
+ \t\t\t\t{
+-\t\t\t\t\tWLog_ERR_BIO(transport, "BIO_write", transport->frontBio);
+-\t\t\t\t\tgoto out_cleanup;
++\t\t\t\t\tif (!transport_write_queue_append(transport, s, writtenlength - length,
++\t\t\t\t\t                                  length))
++\t\t\t\t\t\tgoto out_cleanup;
++\t\t\t\t\t/* Keep the connection open. The queued plaintext is retried by
++\t\t\t\t\t * transport_drain_output_buffer on the next writable pass. */
++\t\t\t\t\tstatus = (writtenlength > INT32_MAX) ? INT32_MAX : (int)writtenlength;
++\t\t\t\t\tlength = 0;
++\t\t\t\t\tbreak;
+ \t\t\t\t}
+ 
+ \t\t\t\tif (BIO_wait_write(transport->frontBio, 100) < 0)
+@@ -1448,9 +1595,15 @@
+ 
+ BOOL transport_is_write_blocked(rdpTransport* transport)
+ {
++\tBOOL blocked = FALSE;
+ \tWINPR_ASSERT(transport);
+-\tWINPR_ASSERT(transport->frontBio);
+-\treturn BIO_write_blocked(transport->frontBio) != 0;
++\tif (!transport->haveWriteLock)
++\t\treturn FALSE;
++\tEnterCriticalSection(&(transport->WriteLock));
++\tblocked = transport->writeQueueHead != nullptr
++\t       || (transport->frontBio && BIO_write_blocked(transport->frontBio));
++\tLeaveCriticalSection(&(transport->WriteLock));
++\treturn blocked;
+ }
+ 
+ int transport_drain_output_buffer(rdpTransport* transport)
+@@ -1458,16 +1611,27 @@
+ \tBOOL status = FALSE;
+ 
+ \tWINPR_ASSERT(transport);
+-\tWINPR_ASSERT(transport->frontBio);
+-\tif (BIO_write_blocked(transport->frontBio))
+-\t{
+-\t\tif (BIO_flush(transport->frontBio) < 1)
+-\t\t\treturn -1;
++\tif (!transport->haveWriteLock)
++\t\treturn -1;
++\tEnterCriticalSection(&(transport->WriteLock));
++\tif (!transport->frontBio)
++\t\tgoto out;
+ 
+-\t\tconst long rc = BIO_write_blocked(transport->frontBio);
+-\t\tstatus = (rc != 0);
+-\t}
++\tif (BIO_write_blocked(transport->frontBio) && BIO_flush(transport->frontBio) < 1)
++\t\tgoto fail;
++\tif (transport_write_queue_drain(transport, FALSE) < 0)
++\t\tgoto fail;
++\tif (BIO_write_blocked(transport->frontBio) && BIO_flush(transport->frontBio) < 1)
++\t\tgoto fail;
+ 
++\tstatus = transport->writeQueueHead != nullptr || BIO_write_blocked(transport->frontBio);
++\tgoto out;
++
++fail:
++\tstatus = -1;
++out:
++\tLeaveCriticalSection(&(transport->WriteLock));
+ 
+ \treturn status;
+ }
+@@ -1672,6 +1836,7 @@
+ 
+ \tEnterCriticalSection(&(transport->ReadLock));
+ \tEnterCriticalSection(&(transport->WriteLock));
++\ttransport_write_queue_clear(transport);
+ \tif (transport->tls)
+ \t{
 +
  WINPR_ATTR_NODISCARD
 -static BOOL shadow_client_send_surface_update(rdpShadowClient* client, SHADOW_GFX_STATUS* pStatus)
