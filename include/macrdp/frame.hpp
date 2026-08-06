@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <vector>
 
 namespace macrdp {
@@ -18,9 +19,9 @@ struct Frame {
         return width > 0
             && height > 0
             && stride >= static_cast<std::size_t>(width) * 4
+            && height <= std::numeric_limits<std::size_t>::max() / stride
             && bgra.size() >= stride * static_cast<std::size_t>(height);
     }
 };
 
 } // namespace macrdp
-

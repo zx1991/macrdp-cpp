@@ -11,22 +11,34 @@ keeps only the newest BGRA frame, and encodes received frames with
 VideoToolbox H.264. Public interfaces are pure C++; Apple framework adapters
 are implemented in `src/macos/*.mm`.
 
-This is not an RDP server yet.
+The project now includes an experimental RDP shadow server. It reuses the
+FreeRDP 3.30.0 server/shadow core, captures the macOS main display through
+ScreenCaptureKit, and injects keyboard and mouse input through CoreGraphics.
+The default security mode is NLA and the default video path enables FreeRDP's
+FFmpeg-backed H.264 graphics pipeline.
 
 ## Build
 
 ```bash
 cmake -S . -B build -G "Unix Makefiles" \
-  -DCMAKE_BUILD_TYPE=Debug \
+  -DCMAKE_BUILD_TYPE=Release \
   -DCMAKE_OSX_ARCHITECTURES=arm64
-cmake --build build
+cmake --build build --parallel 8
+ctest --test-dir build --output-on-failure
+```
+
+CMake downloads and builds FreeRDP 3.30.0. FFmpeg and OpenSSL are required by
+the selected FreeRDP configuration; Homebrew is the simplest way to provide
+them on Apple Silicon:
+
+```bash
+brew install cmake ffmpeg openssl@3
 ```
 
 ## Run
 
-Run from the macOS graphical session, then inspect `capture.ppm` and the
-generated `capture.h264`. The example collects frames for two seconds, writes
-the newest PPM frame, and encodes every received frame with VideoToolbox:
+The standalone capture example still writes `capture.ppm` and
+`capture.h264`:
 
 ```bash
 ./build/macrdp-cpp
@@ -44,18 +56,43 @@ or executable in System Settings > Privacy & Security > Screen Recording.
 Running from an SSH-only session will generally fail because ScreenCaptureKit
 needs the logged-in graphical session and its TCC authorization.
 
+### RDP server
+
+Start the server from the logged-in macOS graphical session. The password is
+read from standard input so it does not appear in the process list:
+
+```bash
+printf '%s\n' 'change-this-password' | \
+  ./build/macrdp-server --user Xian --password-stdin
+```
+
+Then connect from Windows Remote Desktop (`mstsc`) to the Mac's IP address.
+Use the same username and password. The server listens on TCP port 3389 by
+default; use `--port 3390` and connect to `host:3390` when another service
+already occupies that port.
+
+For an existing FreeRDP NTLM SAM file, use `--sam-file path/to/file.sam`.
+`--security tls` and `--security rdp` are available for compatibility testing,
+but NLA is the default and recommended mode. Empty passwords are rejected.
+
+The first server start requires Screen Recording permission. Grant it to the
+terminal or executable in System Settings > Privacy & Security > Screen
+Recording. ScreenCaptureKit generally cannot capture the desktop from an
+SSH-only session; start the server inside the logged-in graphical session.
+
 ## Layout
 
 - `include/macrdp/`: C++ interfaces and data types; no Objective-C types.
 - `src/`: portable C++ application logic.
 - `src/macos/`: Objective-C++ adapters for Apple frameworks.
-- `CMakeLists.txt`: builds `.cpp` and `.mm` in separate targets.
+- `CMakeLists.txt`: manages C, C++, Objective-C, Objective-C++, FreeRDP, and
+  Apple framework dependencies.
 
 ## Next milestones
 
-1. Add a small loopback transport for testing latency and dropped frames.
-2. Evaluate an existing RDP server library before implementing RDP protocol
-   handling from scratch.
+1. Improve frame pacing and dirty-region tracking to reduce cursor trails.
+2. Add automated protocol smoke tests with a FreeRDP client.
+3. Package the server with its FFmpeg/OpenSSL runtime dependencies.
 
 ## Encoder test
 

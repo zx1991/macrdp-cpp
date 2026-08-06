@@ -112,7 +112,12 @@ bool copy_sample_buffer(CMSampleBufferRef sample_buffer, macrdp::Frame& frame) {
         return false;
     }
 
-    CVPixelBufferLockBaseAddress(pixel_buffer, kCVPixelBufferLock_ReadOnly);
+    const auto lock_status = CVPixelBufferLockBaseAddress(
+        pixel_buffer,
+        kCVPixelBufferLock_ReadOnly);
+    if (lock_status != kCVReturnSuccess) {
+        return false;
+    }
     const auto* base_address = static_cast<const std::uint8_t*>(
         CVPixelBufferGetBaseAddress(pixel_buffer));
     if (base_address == nullptr) {
@@ -220,6 +225,8 @@ std::pair<std::size_t, std::size_t> output_size(
         std::lock_guard lock(state->mutex);
         if (error != nil) {
             state->error = error_description(error);
+        } else if (state->accepting_frames) {
+            state->error = "ScreenCaptureKit stream stopped unexpectedly";
         }
         state->accepting_frames = false;
         state->stopped = true;
