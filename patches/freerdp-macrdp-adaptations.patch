@@ -652,6 +652,36 @@
  
  	if (client->resizeRequested)
  	{
+@@ -1408,8 +1408,11 @@
+ 	regionRect.bottom = (UINT16)cmd->bottom;
++	const ULONGLONG encodeStarted = GetTickCount64();
+ 	rc = avc420_compress(encoder->h264, pSrcData, SrcFormat, nSrcStep, nWidth, nHeight, &regionRect,
+ 	                     &avc420.data, &avc420.length, &avc420.meta);
++	const ULONGLONG encodeElapsed = GetTickCount64() - encodeStarted;
++	/* MACRDP_FRAME_STAGE_DIAGNOSTICS */
+ 	if (rc < 0)
+ 	{
+ 		WLog_ERR(TAG, "avc420_compress failed");
+ 		return FALSE;
+ 	}
+@@ -1417,11 +1417,17 @@
+ 	/* rc > 0 means new data */
+ 	if (rc > 0)
+ 	{
+ 		cmd->codecId = RDPGFX_CODECID_AVC420;
+ 		cmd->extra = (void*)&avc420;
++		const ULONGLONG channelStarted = GetTickCount64();
+ 		IFCALLRET(client->rdpgfx->SurfaceFrameCommand, error, client->rdpgfx, cmd, cmdstart,
+ 		          cmdend);
++		const ULONGLONG channelElapsed = GetTickCount64() - channelStarted;
++		if (encodeElapsed >= 200 || channelElapsed >= 200)
++			WLog_WARN(TAG, "AVC420 frame stages: encode=%llums channel=%llums",
++			          (unsigned long long)encodeElapsed,
++			          (unsigned long long)channelElapsed);
+ 		cmd->extra = nullptr;
+ 	}
+ 	free_h264_metablock(&avc420.meta);
+
 @@ -2205,10 +2216,70 @@
   *
   * @return TRUE on success (or nothing need to be updated)
@@ -1041,6 +1071,26 @@
  
  		if (client->activated &&
  		    WTSVirtualChannelManagerIsChannelJoined(client->vcm, DRDYNVC_SVC_CHANNEL_NAME))
+@@ -2852,2 +3023,4 @@
+-			while (MessageQueue_Peek(MsgQueue, &message, TRUE))
++			size_t messageBudget = 64;
++			/* MACRDP_MESSAGE_BUDGET */
++			while (messageBudget-- > 0 && MessageQueue_Peek(MsgQueue, &message, TRUE))
+ 			{
+
+--- a/libfreerdp/core/server.c
++++ b/libfreerdp/core/server.c
+@@ -631,7 +631,9 @@
+ 		}
+ 
+-	while (MessageQueue_Peek(vcm->queue, &message, TRUE))
++	/* MACRDP_CHANNEL_MESSAGE_BUDGET: keep channel draining from starving input. */
++	size_t messageBudget = 8;
++	while (messageBudget-- > 0 && MessageQueue_Peek(vcm->queue, &message, TRUE))
+ 	{
+ 		BYTE* buffer = nullptr;
+ 		UINT32 length = 0;
+
 --- a/server/shadow/shadow_mcevent.c
 +++ b/server/shadow/shadow_mcevent.c
 @@ -19,6 +19,8 @@
