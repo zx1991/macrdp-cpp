@@ -191,43 +191,63 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(freerdp)
 
-# FreeRDP holds its shared surface lock while each client encodes and writes a
-# frame. On macOS, one slow RDP client can therefore stall capture for every
-# other client. Apply the checked-in patch to the pinned source tree so each
-# client snapshots the frame before doing any slow work. The patch only
-# changes the generated FetchContent tree; it never changes an upstream
-# checkout or installs a dependency.
-set(MACRDP_FREERDP_FRAME_SNAPSHOT_PATCH
-    "${CMAKE_CURRENT_SOURCE_DIR}/patches/freerdp-shadow-frame-snapshot.patch")
+# FreeRDP source adaptations are kept as one checked-in patch against the
+# pinned 3.30.0 tree. CMake only modifies the generated FetchContent copy.
+set(MACRDP_FREERDP_PATCH
+    "${CMAKE_CURRENT_SOURCE_DIR}/patches/freerdp-macrdp-adaptations.patch")
 set(MACRDP_FREERDP_SHADOW_HEADER
     "${freerdp_SOURCE_DIR}/include/freerdp/server/shadow.h")
 set(MACRDP_FREERDP_SHADOW_CLIENT
     "${freerdp_SOURCE_DIR}/server/shadow/shadow_client.c")
-if(NOT EXISTS "${MACRDP_FREERDP_FRAME_SNAPSHOT_PATCH}")
-    message(FATAL_ERROR
-        "Missing checked-in FreeRDP frame snapshot patch")
-endif()
-if(NOT EXISTS "${MACRDP_FREERDP_SHADOW_HEADER}"
-   OR NOT EXISTS "${MACRDP_FREERDP_SHADOW_CLIENT}")
-    message(FATAL_ERROR
-        "Pinned FreeRDP source is missing the shadow client files required by macrdp")
-endif()
+set(MACRDP_FREERDP_H264_SOURCE
+    "${freerdp_SOURCE_DIR}/libfreerdp/codec/h264_ffmpeg.c")
+set(MACRDP_FREERDP_SHADOW_SURFACE_SOURCE
+    "${freerdp_SOURCE_DIR}/server/shadow/shadow_surface.c")
+set(MACRDP_FREERDP_SHADOW_SERVER_SOURCE
+    "${freerdp_SOURCE_DIR}/server/shadow/shadow_server.c")
+
+foreach(MACRDP_REQUIRED_PATCH_FILE IN ITEMS
+    "${MACRDP_FREERDP_PATCH}"
+    "${MACRDP_FREERDP_SHADOW_HEADER}"
+    "${MACRDP_FREERDP_SHADOW_CLIENT}"
+    "${MACRDP_FREERDP_H264_SOURCE}"
+    "${MACRDP_FREERDP_SHADOW_SURFACE_SOURCE}"
+    "${MACRDP_FREERDP_SHADOW_SERVER_SOURCE}")
+    if(NOT EXISTS "${MACRDP_REQUIRED_PATCH_FILE}")
+        message(FATAL_ERROR
+            "Missing FreeRDP source or checked-in macrdp adaptation patch: "
+            "${MACRDP_REQUIRED_PATCH_FILE}")
+    endif()
+endforeach()
 
 file(READ "${MACRDP_FREERDP_SHADOW_HEADER}" MACRDP_SHADOW_HEADER_CONTENT)
 file(READ "${MACRDP_FREERDP_SHADOW_CLIENT}" MACRDP_SHADOW_CLIENT_CONTENT)
+file(READ "${MACRDP_FREERDP_H264_SOURCE}" MACRDP_FREERDP_H264_CONTENT)
+file(READ "${MACRDP_FREERDP_SHADOW_SURFACE_SOURCE}" MACRDP_SHADOW_SURFACE_CONTENT)
+file(READ "${MACRDP_FREERDP_SHADOW_SERVER_SOURCE}" MACRDP_SHADOW_SERVER_CONTENT)
+
 string(FIND "${MACRDP_SHADOW_HEADER_CONTENT}" "MACRDP_CLIENT_FRAME_SNAPSHOT"
     MACRDP_SHADOW_HEADER_PATCH_OFFSET)
 string(FIND "${MACRDP_SHADOW_CLIENT_CONTENT}" "shadow_client_snapshot_surface"
-    MACRDP_SHADOW_CLIENT_PATCH_OFFSET)
-string(FIND "${MACRDP_SHADOW_CLIENT_CONTENT}" "MACRDP_SURFACE_DIMENSIONS_LOCK"
-    MACRDP_SHADOW_SURFACE_DIMENSIONS_LOCK_OFFSET)
+    MACRDP_SHADOW_SNAPSHOT_PATCH_OFFSET)
 string(FIND "${MACRDP_SHADOW_CLIENT_CONTENT}" "MACRDP_RESIZE_DIMENSIONS_LOCK"
-    MACRDP_SHADOW_RESIZE_DIMENSIONS_LOCK_OFFSET)
+    MACRDP_SHADOW_CLIENT_PATCH_OFFSET)
+string(FIND "${MACRDP_FREERDP_H264_CONTENT}" "MACRDP_VIDEOTOOLBOX_BRIDGE_COMPRESS"
+    MACRDP_H264_PATCH_OFFSET)
+string(FIND "${MACRDP_FREERDP_H264_CONTENT}" "MACRDP_GOP_FIX"
+    MACRDP_H264_GOP_PATCH_OFFSET)
+string(FIND "${MACRDP_SHADOW_SURFACE_CONTENT}" "MACRDP_SURFACE_RESIZE_LOCK"
+    MACRDP_SHADOW_SURFACE_PATCH_OFFSET)
+string(FIND "${MACRDP_SHADOW_SERVER_CONTENT}" "MACRDP_SHADOW_STOP_ORDER"
+    MACRDP_SHADOW_SERVER_PATCH_OFFSET)
 
 if(MACRDP_SHADOW_HEADER_PATCH_OFFSET EQUAL -1
+   AND MACRDP_SHADOW_SNAPSHOT_PATCH_OFFSET EQUAL -1
    AND MACRDP_SHADOW_CLIENT_PATCH_OFFSET EQUAL -1
-   AND MACRDP_SHADOW_SURFACE_DIMENSIONS_LOCK_OFFSET EQUAL -1
-   AND MACRDP_SHADOW_RESIZE_DIMENSIONS_LOCK_OFFSET EQUAL -1)
+   AND MACRDP_H264_PATCH_OFFSET EQUAL -1
+   AND MACRDP_H264_GOP_PATCH_OFFSET EQUAL -1
+   AND MACRDP_SHADOW_SURFACE_PATCH_OFFSET EQUAL -1
+   AND MACRDP_SHADOW_SERVER_PATCH_OFFSET EQUAL -1)
     find_program(MACRDP_PATCH_EXECUTABLE patch)
     if(NOT MACRDP_PATCH_EXECUTABLE)
         message(FATAL_ERROR
@@ -236,369 +256,39 @@ if(MACRDP_SHADOW_HEADER_PATCH_OFFSET EQUAL -1
 
     execute_process(
         COMMAND "${MACRDP_PATCH_EXECUTABLE}" -N -t -p1
-            -i "${MACRDP_FREERDP_FRAME_SNAPSHOT_PATCH}"
+            -i "${MACRDP_FREERDP_PATCH}"
         WORKING_DIRECTORY "${freerdp_SOURCE_DIR}"
-        RESULT_VARIABLE MACRDP_FRAME_SNAPSHOT_PATCH_RESULT
-        OUTPUT_VARIABLE MACRDP_FRAME_SNAPSHOT_PATCH_OUTPUT
-        ERROR_VARIABLE MACRDP_FRAME_SNAPSHOT_PATCH_ERROR
+        RESULT_VARIABLE MACRDP_PATCH_RESULT
+        OUTPUT_VARIABLE MACRDP_PATCH_OUTPUT
+        ERROR_VARIABLE MACRDP_PATCH_ERROR
     )
-    if(NOT MACRDP_FRAME_SNAPSHOT_PATCH_RESULT EQUAL 0)
+    if(NOT MACRDP_PATCH_RESULT EQUAL 0)
         message(FATAL_ERROR
-            "Unable to patch pinned FreeRDP for macrdp shadow synchronization.\n"
-            "stdout: ${MACRDP_FRAME_SNAPSHOT_PATCH_OUTPUT}\n"
-            "stderr: ${MACRDP_FRAME_SNAPSHOT_PATCH_ERROR}")
+            "Unable to apply the pinned FreeRDP macrdp adaptation patch.\n"
+            "stdout: ${MACRDP_PATCH_OUTPUT}\n"
+            "stderr: ${MACRDP_PATCH_ERROR}")
     endif()
 elseif(NOT MACRDP_SHADOW_HEADER_PATCH_OFFSET EQUAL -1
+       AND NOT MACRDP_SHADOW_SNAPSHOT_PATCH_OFFSET EQUAL -1
        AND NOT MACRDP_SHADOW_CLIENT_PATCH_OFFSET EQUAL -1
-       AND NOT MACRDP_SHADOW_SURFACE_DIMENSIONS_LOCK_OFFSET EQUAL -1
-       AND NOT MACRDP_SHADOW_RESIZE_DIMENSIONS_LOCK_OFFSET EQUAL -1)
+       AND NOT MACRDP_H264_PATCH_OFFSET EQUAL -1
+       AND NOT MACRDP_H264_GOP_PATCH_OFFSET EQUAL -1
+       AND NOT MACRDP_SHADOW_SURFACE_PATCH_OFFSET EQUAL -1
+       AND NOT MACRDP_SHADOW_SERVER_PATCH_OFFSET EQUAL -1)
     # The generated FetchContent tree already contains the complete patch.
-elseif(MACRDP_SHADOW_HEADER_PATCH_OFFSET EQUAL -1
-       OR MACRDP_SHADOW_CLIENT_PATCH_OFFSET EQUAL -1
-       OR MACRDP_SHADOW_SURFACE_DIMENSIONS_LOCK_OFFSET EQUAL -1
-       OR MACRDP_SHADOW_RESIZE_DIMENSIONS_LOCK_OFFSET EQUAL -1)
+else()
     message(FATAL_ERROR
-        "Pinned FreeRDP has a partial macrdp shadow synchronization patch; "
+        "Pinned FreeRDP has a partial macrdp adaptation patch; "
         "remove the generated FetchContent source and reconfigure")
 endif()
 
-if(MACRDP_USE_VIDEOTOOLBOX_H264_ENCODING)
-    foreach(MACRDP_FREERDP_CODEC_TARGET IN ITEMS freerdp-codecs freerdp)
-        if(TARGET ${MACRDP_FREERDP_CODEC_TARGET})
-            target_include_directories(${MACRDP_FREERDP_CODEC_TARGET} PRIVATE
-                ${CMAKE_CURRENT_SOURCE_DIR}/include
-            )
-        endif()
-    endforeach()
-endif()
-
-# FreeRDP's FFmpeg H.264 wrapper leaves AVCodecContext::gop_size at zero.
-# FFmpeg defines zero as intra-only encoding, which makes every desktop frame
-# an expensive I-frame. Apply the small real-time streaming fix after
-# FetchContent has populated the pinned source tree so clean builds retain it.
-set(MACRDP_FREERDP_H264_SOURCE
-    "${freerdp_SOURCE_DIR}/libfreerdp/codec/h264_ffmpeg.c")
-if(EXISTS "${MACRDP_FREERDP_H264_SOURCE}")
-    file(READ "${MACRDP_FREERDP_H264_SOURCE}" MACRDP_FREERDP_H264_CONTENT)
-    string(FIND "${MACRDP_FREERDP_H264_CONTENT}" "MACRDP_GOP_FIX" MACRDP_GOP_FIX_OFFSET)
-    if(MACRDP_GOP_FIX_OFFSET EQUAL -1)
-        string(REPLACE
-            "\tsys->codecEncoderContext->delay = 0;"
-            "\tsys->codecEncoderContext->delay = 0;\n\t/* MACRDP_GOP_FIX: allow P-frames for interactive desktop streaming. */\n\tsys->codecEncoderContext->gop_size = 60;\n\tsys->codecEncoderContext->max_b_frames = 0;"
-            MACRDP_FREERDP_H264_CONTENT
-            "${MACRDP_FREERDP_H264_CONTENT}")
-        file(WRITE "${MACRDP_FREERDP_H264_SOURCE}" "${MACRDP_FREERDP_H264_CONTENT}")
+foreach(MACRDP_FREERDP_CODEC_TARGET IN ITEMS freerdp-codecs freerdp)
+    if(TARGET ${MACRDP_FREERDP_CODEC_TARGET})
+        target_include_directories(${MACRDP_FREERDP_CODEC_TARGET} PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/include
+        )
     endif()
-
-    if(APPLE AND MACRDP_FREERDP_WITH_FFMPEG AND MACRDP_USE_VIDEOTOOLBOX_H264_ENCODING)
-        string(FIND "${MACRDP_FREERDP_H264_CONTENT}" "#include <winpr/synch.h>"
-            MACRDP_SYNCH_INCLUDE_OFFSET)
-        if(MACRDP_SYNCH_INCLUDE_OFFSET EQUAL -1)
-            string(REPLACE
-                "#include <winpr/wlog.h>"
-                "#include <winpr/wlog.h>\n#include <winpr/synch.h>"
-                MACRDP_FREERDP_H264_CONTENT
-                "${MACRDP_FREERDP_H264_CONTENT}")
-            file(WRITE "${MACRDP_FREERDP_H264_SOURCE}" "${MACRDP_FREERDP_H264_CONTENT}")
-        endif()
-
-        string(FIND "${MACRDP_FREERDP_H264_CONTENT}" "MACRDP_VIDEOTOOLBOX_BRIDGE_INCLUDE"
-            MACRDP_VIDEOTOOLBOX_BRIDGE_INCLUDE_OFFSET)
-        if(MACRDP_VIDEOTOOLBOX_BRIDGE_INCLUDE_OFFSET EQUAL -1)
-            string(REPLACE
-                "#include <winpr/synch.h>"
-                "#include <winpr/synch.h>\n#include <macrdp/videotoolbox_h264.h>\n/* MACRDP_VIDEOTOOLBOX_BRIDGE_INCLUDE */"
-                MACRDP_FREERDP_H264_CONTENT
-                "${MACRDP_FREERDP_H264_CONTENT}")
-
-            string(FIND "${MACRDP_FREERDP_H264_CONTENT}" "MACRDP_VIDEOTOOLBOX_BRIDGE_INCLUDE"
-                MACRDP_VIDEOTOOLBOX_BRIDGE_INCLUDE_OFFSET)
-            if(MACRDP_VIDEOTOOLBOX_BRIDGE_INCLUDE_OFFSET EQUAL -1)
-                message(FATAL_ERROR
-                    "Unable to add the macOS VideoToolbox bridge include")
-            endif()
-            file(WRITE "${MACRDP_FREERDP_H264_SOURCE}" "${MACRDP_FREERDP_H264_CONTENT}")
-        endif()
-
-        string(FIND "${MACRDP_FREERDP_H264_CONTENT}" "MACRDP_VIDEOTOOLBOX_BRIDGE_FIELD"
-            MACRDP_VIDEOTOOLBOX_BRIDGE_FIELD_OFFSET)
-        if(MACRDP_VIDEOTOOLBOX_BRIDGE_FIELD_OFFSET EQUAL -1)
-            string(REPLACE
-                "\tAVPacket* packet;\n"
-                "\tAVPacket* packet;\n#ifdef MACRDP_USE_VIDEOTOOLBOX_H264_ENCODING\n\tmacrdp_vt_h264_encoder* macrdpVideoToolboxEncoder;\n#endif\n/* MACRDP_VIDEOTOOLBOX_BRIDGE_FIELD */\n"
-                MACRDP_FREERDP_H264_CONTENT
-                "${MACRDP_FREERDP_H264_CONTENT}")
-
-            string(FIND "${MACRDP_FREERDP_H264_CONTENT}" "MACRDP_VIDEOTOOLBOX_BRIDGE_FIELD"
-                MACRDP_VIDEOTOOLBOX_BRIDGE_FIELD_OFFSET)
-            if(MACRDP_VIDEOTOOLBOX_BRIDGE_FIELD_OFFSET EQUAL -1)
-                message(FATAL_ERROR
-                    "Unable to add the macOS VideoToolbox bridge state")
-            endif()
-            file(WRITE "${MACRDP_FREERDP_H264_SOURCE}" "${MACRDP_FREERDP_H264_CONTENT}")
-        endif()
-
-        string(FIND "${MACRDP_FREERDP_H264_CONTENT}" "MACRDP_VIDEOTOOLBOX_BRIDGE_DESTROY"
-            MACRDP_VIDEOTOOLBOX_BRIDGE_DESTROY_OFFSET)
-        if(MACRDP_VIDEOTOOLBOX_BRIDGE_DESTROY_OFFSET EQUAL -1)
-            string(REPLACE
-                "\tif (sys->codecEncoderContext)\n\t{\n#if LIBAVCODEC_VERSION_INT >= AV_VERSION_INT(55, 69, 100)"
-                "#ifdef MACRDP_USE_VIDEOTOOLBOX_H264_ENCODING\n\tif (sys->macrdpVideoToolboxEncoder)\n\t{\n\t\tmacrdp_vt_h264_encoder_free(sys->macrdpVideoToolboxEncoder);\n\t\tsys->macrdpVideoToolboxEncoder = nullptr;\n\t}\n#endif\n\t/* MACRDP_VIDEOTOOLBOX_BRIDGE_DESTROY */\n\tif (sys->codecEncoderContext)\n\t{\n#if LIBAVCODEC_VERSION_INT >= AV_VERSION_INT(55, 69, 100)"
-                MACRDP_FREERDP_H264_CONTENT
-                "${MACRDP_FREERDP_H264_CONTENT}")
-
-            string(FIND "${MACRDP_FREERDP_H264_CONTENT}" "MACRDP_VIDEOTOOLBOX_BRIDGE_DESTROY"
-                MACRDP_VIDEOTOOLBOX_BRIDGE_DESTROY_OFFSET)
-            if(MACRDP_VIDEOTOOLBOX_BRIDGE_DESTROY_OFFSET EQUAL -1)
-                message(FATAL_ERROR
-                    "Unable to add the macOS VideoToolbox bridge cleanup")
-            endif()
-            file(WRITE "${MACRDP_FREERDP_H264_SOURCE}" "${MACRDP_FREERDP_H264_CONTENT}")
-        endif()
-
-        string(FIND "${MACRDP_FREERDP_H264_CONTENT}" "MACRDP_VIDEOTOOLBOX_BRIDGE_CREATE"
-            MACRDP_VIDEOTOOLBOX_BRIDGE_CREATE_OFFSET)
-        if(MACRDP_VIDEOTOOLBOX_BRIDGE_CREATE_OFFSET EQUAL -1)
-            string(REPLACE
-                "\tif (!sys || !sys->codecEncoder)\n\t\treturn FALSE;\n"
-                "\tif (!sys || !sys->codecEncoder)\n\t\treturn FALSE;\n\n#ifdef MACRDP_USE_VIDEOTOOLBOX_H264_ENCODING\n\tif (sys->macrdpVideoToolboxEncoder)\n\t\treturn TRUE;\n\n\tif (sys->codecEncoder == avcodec_find_encoder_by_name(\"h264_videotoolbox\"))\n\t{\n\t\t/* MACRDP_VIDEOTOOLBOX_BRIDGE_CREATE */\n\t\tsys->macrdpVideoToolboxEncoder = macrdp_vt_h264_encoder_new(\n\t\t\th264->width, h264->height, h264->BitRate, h264->FrameRate, 60);\n\t\tif (sys->macrdpVideoToolboxEncoder)\n\t\t\treturn TRUE;\n\n\t\tWLog_Print(h264->log, WLOG_WARN,\n\t\t           \"Direct VideoToolbox H264 encoder unavailable, falling back to FFmpeg\");\n\t\tsys->codecEncoder = avcodec_find_encoder(AV_CODEC_ID_H264);\n\t\tif (!sys->codecEncoder)\n\t\t\treturn FALSE;\n\t}\n#endif\n"
-                MACRDP_FREERDP_H264_CONTENT
-                "${MACRDP_FREERDP_H264_CONTENT}")
-
-            string(FIND "${MACRDP_FREERDP_H264_CONTENT}" "MACRDP_VIDEOTOOLBOX_BRIDGE_CREATE"
-                MACRDP_VIDEOTOOLBOX_BRIDGE_CREATE_OFFSET)
-            if(MACRDP_VIDEOTOOLBOX_BRIDGE_CREATE_OFFSET EQUAL -1)
-                message(FATAL_ERROR
-                    "Unable to add the macOS VideoToolbox bridge creation")
-            endif()
-            file(WRITE "${MACRDP_FREERDP_H264_SOURCE}" "${MACRDP_FREERDP_H264_CONTENT}")
-        endif()
-
-        string(FIND "${MACRDP_FREERDP_H264_CONTENT}"
-            "MACRDP_VIDEOTOOLBOX_BRIDGE_ACTIVE_LOG_V2"
-            MACRDP_VIDEOTOOLBOX_BRIDGE_ACTIVE_LOG_V2_OFFSET)
-        if(MACRDP_VIDEOTOOLBOX_BRIDGE_ACTIVE_LOG_V2_OFFSET EQUAL -1)
-            # Migrate the first version, which was intentionally placed after
-            # the encoder fast path and would have logged on every frame.
-            string(REPLACE
-                "\tif (sys->macrdpVideoToolboxEncoder)\n\t{\n\t\tWLog_Print(h264->log, WLOG_INFO,\n\t\t           \"Using direct macOS VideoToolbox H264 bridge (%ux%u @ %u fps)\",\n\t\t           h264->width, h264->height, h264->FrameRate);\n\t\treturn TRUE;\n\t}\n\t/* MACRDP_VIDEOTOOLBOX_BRIDGE_ACTIVE_LOG */"
-                "\tif (sys->macrdpVideoToolboxEncoder)\n\t\treturn TRUE;"
-                MACRDP_FREERDP_H264_CONTENT
-                "${MACRDP_FREERDP_H264_CONTENT}")
-
-            string(REPLACE
-                "\t\tif (sys->macrdpVideoToolboxEncoder)\n\t\t\treturn TRUE;\n\n\t\tWLog_Print(h264->log, WLOG_WARN,"
-                "\t\tif (sys->macrdpVideoToolboxEncoder)\n\t\t{\n\t\t\tWLog_Print(h264->log, WLOG_INFO,\n\t\t\t           \"Using direct macOS VideoToolbox H264 bridge (%ux%u @ %u fps)\",\n\t\t\t           h264->width, h264->height, h264->FrameRate);\n\t\t\t/* MACRDP_VIDEOTOOLBOX_BRIDGE_ACTIVE_LOG_V2 */\n\t\t\treturn TRUE;\n\t\t}\n\n\t\tWLog_Print(h264->log, WLOG_WARN,"
-                MACRDP_FREERDP_H264_CONTENT
-                "${MACRDP_FREERDP_H264_CONTENT}")
-
-            string(FIND "${MACRDP_FREERDP_H264_CONTENT}"
-                "MACRDP_VIDEOTOOLBOX_BRIDGE_ACTIVE_LOG_V2"
-                MACRDP_VIDEOTOOLBOX_BRIDGE_ACTIVE_LOG_V2_OFFSET)
-            if(MACRDP_VIDEOTOOLBOX_BRIDGE_ACTIVE_LOG_V2_OFFSET EQUAL -1)
-                message(FATAL_ERROR
-                    "Unable to add the direct VideoToolbox activation log")
-            endif()
-            file(WRITE "${MACRDP_FREERDP_H264_SOURCE}" "${MACRDP_FREERDP_H264_CONTENT}")
-        endif()
-
-        string(FIND "${MACRDP_FREERDP_H264_CONTENT}" "MACRDP_VIDEOTOOLBOX_BRIDGE_COMPRESS"
-            MACRDP_VIDEOTOOLBOX_BRIDGE_COMPRESS_OFFSET)
-        if(MACRDP_VIDEOTOOLBOX_BRIDGE_COMPRESS_OFFSET EQUAL -1)
-            string(REPLACE
-                "\tif (!libavcodec_create_encoder_context(h264))\n\t\treturn -1;\n"
-                "\tif (!libavcodec_create_encoder_context(h264))\n\t\treturn -1;\n\n#ifdef MACRDP_USE_VIDEOTOOLBOX_H264_ENCODING\n\tif (sys->macrdpVideoToolboxEncoder)\n\t{\n\t\t/* MACRDP_VIDEOTOOLBOX_BRIDGE_COMPRESS */\n\t\t*ppDstData = nullptr;\n\t\t*pDstSize = 0;\n\t\tconst uint64_t frameIndex = sys->videoFrame->pts > 0\n\t\t                                 ? (uint64_t)(sys->videoFrame->pts - 1)\n\t\t                                 : 0;\n\t\tsys->videoFrame->pts++;\n\t\tconst int directStatus = macrdp_vt_h264_encoder_encode(\n\t\t\tsys->macrdpVideoToolboxEncoder, pSrcYuv[0], pSrcYuv[1], pSrcYuv[2],\n\t\t\tpStride, frameIndex, ppDstData, pDstSize);\n\t\tif (directStatus < 0)\n\t\t{\n\t\t\tconst char* error = macrdp_vt_h264_encoder_last_error(\n\t\t\t\tsys->macrdpVideoToolboxEncoder);\n\t\t\tWLog_Print(h264->log, WLOG_ERROR, \"Direct VideoToolbox H264 encode failed: %s\",\n\t\t\t           error ? error : \"unknown error\");\n\t\t}\n\t\treturn directStatus;\n\t}\n#endif\n"
-                MACRDP_FREERDP_H264_CONTENT
-                "${MACRDP_FREERDP_H264_CONTENT}")
-
-            string(FIND "${MACRDP_FREERDP_H264_CONTENT}" "MACRDP_VIDEOTOOLBOX_BRIDGE_COMPRESS"
-                MACRDP_VIDEOTOOLBOX_BRIDGE_COMPRESS_OFFSET)
-            if(MACRDP_VIDEOTOOLBOX_BRIDGE_COMPRESS_OFFSET EQUAL -1)
-                message(FATAL_ERROR
-                    "Unable to add the macOS VideoToolbox bridge compression path")
-            endif()
-            file(WRITE "${MACRDP_FREERDP_H264_SOURCE}" "${MACRDP_FREERDP_H264_CONTENT}")
-        endif()
-
-        string(FIND "${MACRDP_FREERDP_H264_CONTENT}" "MACRDP_VIDEOTOOLBOX_ENCODER"
-            MACRDP_VIDEOTOOLBOX_ENCODER_OFFSET)
-        if(MACRDP_VIDEOTOOLBOX_ENCODER_OFFSET EQUAL -1)
-            string(REPLACE
-                "\t{\n#ifdef WITH_VAAPI_H264_ENCODING"
-                "\t{\n#ifdef MACRDP_USE_VIDEOTOOLBOX_H264_ENCODING\n\t\t/* MACRDP_VIDEOTOOLBOX_ENCODER */\n\t\tsys->codecEncoder = avcodec_find_encoder_by_name(\"h264_videotoolbox\");\n\t\tif (sys->codecEncoder)\n\t\t\tWLog_Print(h264->log, WLOG_INFO, \"Using VideoToolbox H264 encoder\");\n\t\telse\n\t\t\tWLog_Print(h264->log, WLOG_WARN, \"VideoToolbox H264 encoder not found, falling back to software\");\n#endif\n#ifdef WITH_VAAPI_H264_ENCODING"
-                MACRDP_FREERDP_H264_CONTENT
-                "${MACRDP_FREERDP_H264_CONTENT}")
-
-            string(FIND "${MACRDP_FREERDP_H264_CONTENT}" "MACRDP_VIDEOTOOLBOX_ENCODER"
-                MACRDP_VIDEOTOOLBOX_ENCODER_OFFSET)
-            if(MACRDP_VIDEOTOOLBOX_ENCODER_OFFSET EQUAL -1)
-                message(FATAL_ERROR
-                    "Unable to patch FreeRDP's pinned H.264 encoder selection")
-            endif()
-            file(WRITE "${MACRDP_FREERDP_H264_SOURCE}" "${MACRDP_FREERDP_H264_CONTENT}")
-        endif()
-
-        string(FIND "${MACRDP_FREERDP_H264_CONTENT}" "MACRDP_VIDEOTOOLBOX_OPTIONS"
-            MACRDP_VIDEOTOOLBOX_OPTIONS_OFFSET)
-        if(MACRDP_VIDEOTOOLBOX_OPTIONS_OFFSET EQUAL -1)
-            string(REPLACE
-                "av_opt_set(sys->codecEncoderContext, \"tune\", \"zerolatency\", AV_OPT_SEARCH_CHILDREN);"
-                "av_opt_set(sys->codecEncoderContext, \"tune\", \"zerolatency\", AV_OPT_SEARCH_CHILDREN);\n#ifdef MACRDP_USE_VIDEOTOOLBOX_H264_ENCODING\n\t\tif (sys->codecEncoder == avcodec_find_encoder_by_name(\"h264_videotoolbox\"))\n\t\t{\n\t\t\t/* MACRDP_VIDEOTOOLBOX_OPTIONS */\n\t\t\t(void)av_opt_set(sys->codecEncoderContext, \"realtime\", \"1\", AV_OPT_SEARCH_CHILDREN);\n\t\t\t(void)av_opt_set(sys->codecEncoderContext, \"prio_speed\", \"1\", AV_OPT_SEARCH_CHILDREN);\n\t\t\t(void)av_opt_set_int(sys->codecEncoderContext, \"max_ref_frames\", 1, AV_OPT_SEARCH_CHILDREN);\n\t\t}\n#endif"
-                MACRDP_FREERDP_H264_CONTENT
-                "${MACRDP_FREERDP_H264_CONTENT}")
-
-            string(FIND "${MACRDP_FREERDP_H264_CONTENT}" "MACRDP_VIDEOTOOLBOX_OPTIONS"
-                MACRDP_VIDEOTOOLBOX_OPTIONS_OFFSET)
-            if(MACRDP_VIDEOTOOLBOX_OPTIONS_OFFSET EQUAL -1)
-                message(FATAL_ERROR
-                    "Unable to patch FreeRDP's pinned VideoToolbox encoder options")
-            endif()
-            file(WRITE "${MACRDP_FREERDP_H264_SOURCE}" "${MACRDP_FREERDP_H264_CONTENT}")
-        endif()
-
-        # Migrate an older configured build that briefly used the unsupported
-        # max_ref_frames option. Keep reconfiguration idempotent.
-        string(FIND "${MACRDP_FREERDP_H264_CONTENT}" "max_ref_frames"
-            MACRDP_VIDEOTOOLBOX_MAX_REF_OFFSET)
-        if(NOT MACRDP_VIDEOTOOLBOX_MAX_REF_OFFSET EQUAL -1)
-            string(REPLACE
-                "\n\t\t\t(void)av_opt_set_int(sys->codecEncoderContext, \"max_ref_frames\", 1, AV_OPT_SEARCH_CHILDREN);"
-                ""
-                MACRDP_FREERDP_H264_CONTENT
-                "${MACRDP_FREERDP_H264_CONTENT}")
-            file(WRITE "${MACRDP_FREERDP_H264_SOURCE}" "${MACRDP_FREERDP_H264_CONTENT}")
-        endif()
-
-        string(FIND "${MACRDP_FREERDP_H264_CONTENT}" "MACRDP_EAGAIN_FIX"
-            MACRDP_EAGAIN_FIX_OFFSET)
-        if(MACRDP_EAGAIN_FIX_OFFSET EQUAL -1)
-            string(REPLACE
-                "\tstatus = avcodec_receive_packet(sys->codecEncoderContext, sys->packet);\n\n\tif (status < 0)"
-                "\tstatus = avcodec_receive_packet(sys->codecEncoderContext, sys->packet);\n\n\tif (status == AVERROR(EAGAIN))\n\t{\n\t\t/* MACRDP_EAGAIN_FIX: VideoToolbox can emit a packet one input later. */\n\t\t*ppDstData = nullptr;\n\t\t*pDstSize = 0;\n\t\trc = 0;\n\t\tgoto fail;\n\t}\n\n\tif (status < 0)"
-                MACRDP_FREERDP_H264_CONTENT
-                "${MACRDP_FREERDP_H264_CONTENT}")
-
-            string(FIND "${MACRDP_FREERDP_H264_CONTENT}" "MACRDP_EAGAIN_FIX"
-                MACRDP_EAGAIN_FIX_OFFSET)
-            if(MACRDP_EAGAIN_FIX_OFFSET EQUAL -1)
-                message(FATAL_ERROR
-                    "Unable to patch FreeRDP's asynchronous H.264 output handling")
-            endif()
-            file(WRITE "${MACRDP_FREERDP_H264_SOURCE}" "${MACRDP_FREERDP_H264_CONTENT}")
-        endif()
-
-        string(FIND "${MACRDP_FREERDP_H264_CONTENT}" "MACRDP_EAGAIN_POLL"
-            MACRDP_EAGAIN_POLL_OFFSET)
-        if(MACRDP_EAGAIN_POLL_OFFSET EQUAL -1)
-            string(REPLACE
-                "\tif (status == AVERROR(EAGAIN))\n\t{\n\t\t/* MACRDP_EAGAIN_FIX: VideoToolbox can emit a packet one input later. */\n\t\t*ppDstData = nullptr;\n\t\t*pDstSize = 0;\n\t\trc = 0;\n\t\tgoto fail;\n\t}"
-                "\tif (status == AVERROR(EAGAIN))\n\t{\n\t\t/* MACRDP_EAGAIN_POLL: let asynchronous VideoToolbox output settle. */\n\t\tfor (int attempt = 0; attempt < 8 && status == AVERROR(EAGAIN); ++attempt)\n\t\t{\n\t\t\tUSleep(1000);\n\t\t\tstatus = avcodec_receive_packet(sys->codecEncoderContext, sys->packet);\n\t\t}\n\t}\n\n\tif (status == AVERROR(EAGAIN))\n\t{\n\t\t/* MACRDP_EAGAIN_FIX: no packet is ready for this input yet. */\n\t\t*ppDstData = nullptr;\n\t\t*pDstSize = 0;\n\t\trc = 0;\n\t\tgoto fail;\n\t}"
-                MACRDP_FREERDP_H264_CONTENT
-                "${MACRDP_FREERDP_H264_CONTENT}")
-
-            string(FIND "${MACRDP_FREERDP_H264_CONTENT}" "MACRDP_EAGAIN_POLL"
-                MACRDP_EAGAIN_POLL_OFFSET)
-            if(MACRDP_EAGAIN_POLL_OFFSET EQUAL -1)
-                message(FATAL_ERROR
-                    "Unable to add asynchronous FreeRDP H.264 output polling")
-            endif()
-            file(WRITE "${MACRDP_FREERDP_H264_SOURCE}" "${MACRDP_FREERDP_H264_CONTENT}")
-        endif()
-
-        string(FIND "${MACRDP_FREERDP_H264_CONTENT}" "MACRDP_INITIAL_FRAME_POLL"
-            MACRDP_INITIAL_FRAME_POLL_OFFSET)
-        if(MACRDP_INITIAL_FRAME_POLL_OFFSET EQUAL -1)
-            string(REPLACE
-                "\t\tfor (int attempt = 0; attempt < 8 && status == AVERROR(EAGAIN); ++attempt)"
-                "\t\t/* MACRDP_INITIAL_FRAME_POLL: guarantee a visible first frame. */\n\t\tconst int max_attempts = sys->videoFrame->pts <= 1 ? 50 : 8;\n\t\tfor (int attempt = 0; attempt < max_attempts && status == AVERROR(EAGAIN); ++attempt)"
-                MACRDP_FREERDP_H264_CONTENT
-                "${MACRDP_FREERDP_H264_CONTENT}")
-
-            string(FIND "${MACRDP_FREERDP_H264_CONTENT}" "MACRDP_INITIAL_FRAME_POLL"
-                MACRDP_INITIAL_FRAME_POLL_OFFSET)
-            if(MACRDP_INITIAL_FRAME_POLL_OFFSET EQUAL -1)
-                message(FATAL_ERROR
-                    "Unable to configure the FreeRDP first-frame H.264 wait")
-            endif()
-            file(WRITE "${MACRDP_FREERDP_H264_SOURCE}" "${MACRDP_FREERDP_H264_CONTENT}")
-        endif()
-    endif()
-endif()
-
-# The shadow client can resize the primary surface while the macOS capture
-# thread is copying a frame. Upstream's resize helper does not take the
-# surface lock, so patch the pinned source to share the same synchronization.
-set(MACRDP_FREERDP_SHADOW_SURFACE_SOURCE
-    "${freerdp_SOURCE_DIR}/server/shadow/shadow_surface.c")
-if(EXISTS "${MACRDP_FREERDP_SHADOW_SURFACE_SOURCE}")
-    file(READ "${MACRDP_FREERDP_SHADOW_SURFACE_SOURCE}" MACRDP_SHADOW_SURFACE_CONTENT)
-    string(FIND "${MACRDP_SHADOW_SURFACE_CONTENT}" "MACRDP_SURFACE_RESIZE_LOCK"
-        MACRDP_SURFACE_RESIZE_LOCK_OFFSET)
-    if(MACRDP_SURFACE_RESIZE_LOCK_OFFSET EQUAL -1)
-        string(REPLACE
-            "\tif (!surface)\n\t\treturn FALSE;\n\n\tif ((width == surface->width) && (height == surface->height))"
-            "\tif (!surface)\n\t\treturn FALSE;\n\n\tEnterCriticalSection(&(surface->lock));\n\n\tif ((width == surface->width) && (height == surface->height))"
-            MACRDP_SHADOW_SURFACE_CONTENT
-            "${MACRDP_SHADOW_SURFACE_CONTENT}")
-        string(REPLACE
-            "\t\tsurface->y = y;\n\t\treturn TRUE;"
-            "\t\tsurface->y = y;\n\t\tLeaveCriticalSection(&(surface->lock));\n\t\treturn TRUE;"
-            MACRDP_SHADOW_SURFACE_CONTENT
-            "${MACRDP_SHADOW_SURFACE_CONTENT}")
-        string(REPLACE
-            "\t\tsurface->data = buffer;\n\t\treturn TRUE;"
-            "\t\tsurface->data = buffer;\n\t\tLeaveCriticalSection(&(surface->lock));\n\t\treturn TRUE;"
-            MACRDP_SHADOW_SURFACE_CONTENT
-            "${MACRDP_SHADOW_SURFACE_CONTENT}")
-        string(REPLACE
-            "\t}\n\n\treturn FALSE;\n}"
-            "\t}\n\n\tLeaveCriticalSection(&(surface->lock));\n\treturn FALSE;\n}\n\n/* MACRDP_SURFACE_RESIZE_LOCK */"
-            MACRDP_SHADOW_SURFACE_CONTENT
-            "${MACRDP_SHADOW_SURFACE_CONTENT}")
-
-        string(FIND "${MACRDP_SHADOW_SURFACE_CONTENT}" "MACRDP_SURFACE_RESIZE_LOCK"
-            MACRDP_SURFACE_RESIZE_LOCK_OFFSET)
-        if(MACRDP_SURFACE_RESIZE_LOCK_OFFSET EQUAL -1)
-            message(FATAL_ERROR
-                "Unable to add the shadow surface resize lock")
-        endif()
-        file(WRITE "${MACRDP_FREERDP_SHADOW_SURFACE_SOURCE}"
-            "${MACRDP_SHADOW_SURFACE_CONTENT}")
-    endif()
-endif()
-
-# FreeRDP stops the shadow subsystem before notifying clients to quit. A
-# publishing capture thread can be waiting for those clients at the frame
-# barrier, so the server cannot reach the quit broadcast. Notify clients first
-# and only then join the subsystem threads.
-set(MACRDP_FREERDP_SHADOW_SERVER_SOURCE
-    "${freerdp_SOURCE_DIR}/server/shadow/shadow_server.c")
-if(EXISTS "${MACRDP_FREERDP_SHADOW_SERVER_SOURCE}")
-    file(READ "${MACRDP_FREERDP_SHADOW_SERVER_SOURCE}" MACRDP_SHADOW_SERVER_CONTENT)
-    string(FIND "${MACRDP_SHADOW_SERVER_CONTENT}" "MACRDP_SHADOW_STOP_ORDER"
-        MACRDP_SHADOW_STOP_ORDER_OFFSET)
-    if(MACRDP_SHADOW_STOP_ORDER_OFFSET EQUAL -1)
-        string(REPLACE
-            "\tlistener->Close(listener);\n\tshadow_subsystem_stop(server->subsystem);\n\n\t/* Signal to the clients that server is being stopped and wait for them\n\t * to disconnect. */\n\tif (shadow_client_boardcast_quit(server, 0))"
-            "\tlistener->Close(listener);\n\n\t/* Signal to the clients before stopping the subsystem. The publisher may\n\t * be waiting for this client's frame barrier. */\n\tif (shadow_client_boardcast_quit(server, 0))"
-            MACRDP_SHADOW_SERVER_CONTENT
-            "${MACRDP_SHADOW_SERVER_CONTENT}")
-        string(REPLACE
-            "\t\t}\n\t}\n\n\tExitThread(0);"
-            "\t\t}\n\t}\n\n\tshadow_subsystem_stop(server->subsystem);\n\n\t/* MACRDP_SHADOW_STOP_ORDER */\n\tExitThread(0);"
-            MACRDP_SHADOW_SERVER_CONTENT
-            "${MACRDP_SHADOW_SERVER_CONTENT}")
-
-        string(FIND "${MACRDP_SHADOW_SERVER_CONTENT}" "MACRDP_SHADOW_STOP_ORDER"
-            MACRDP_SHADOW_STOP_ORDER_OFFSET)
-        if(MACRDP_SHADOW_STOP_ORDER_OFFSET EQUAL -1)
-            message(FATAL_ERROR
-                "Unable to reorder FreeRDP shadow server shutdown")
-        endif()
-        file(WRITE "${MACRDP_FREERDP_SHADOW_SERVER_SOURCE}"
-            "${MACRDP_SHADOW_SERVER_CONTENT}")
-    endif()
-endif()
+endforeach()
 
 set(MACRDP_FREERDP_SHADOW_SOURCES
     ${freerdp_SOURCE_DIR}/server/shadow/shadow_client.c

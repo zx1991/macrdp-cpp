@@ -42,6 +42,11 @@ them on Apple Silicon:
 brew install cmake ffmpeg openssl@3
 ```
 
+The pinned FreeRDP archive is hash-verified. macrdp-specific FreeRDP changes
+are kept in `patches/freerdp-macrdp-adaptations.patch` and applied only to the
+generated `build/_deps` tree during configuration; no third-party source is
+committed to this repository.
+
 ## Run
 
 The standalone capture example still writes `capture.ppm` and

@@ -1,11 +1,6 @@
---- a/include/freerdp/server/shadow.h	2026-07-16 15:15:05
-+++ b/include/freerdp/server/shadow.h	2026-08-06 14:56:58
-@@ -115,16 +115,22 @@
- 		BOOL inLobby;
- 		BOOL mayView;
- 		BOOL mayInteract;
- 		BOOL suppressOutput;
- 		UINT16 surfaceId;
+--- a/include/freerdp/server/shadow.h
++++ b/include/freerdp/server/shadow.h
+@@ -120,6 +120,12 @@
  		wMessageQueue* MsgQueue;
  		CRITICAL_SECTION lock;
  		REGION16 invalidRegion;
@@ -18,19 +13,9 @@
  		rdpShadowServer* server;
  		rdpShadowEncoder* encoder;
  		rdpShadowSubsystem* subsystem;
- 
- 		UINT32 pointerX;
- 		UINT32 pointerY;
- 
- 		HANDLE vcm;
---- a/server/shadow/shadow_client.c	2026-07-16 15:15:05
-+++ b/server/shadow/shadow_client.c	2026-08-06 14:59:27
-@@ -237,16 +237,19 @@
- 	if (!client)
- 		return;
- 
- 	server = client->server;
- 	if (server && server->clients)
+--- a/server/shadow/shadow_client.c
++++ b/server/shadow/shadow_client.c
+@@ -242,6 +242,9 @@
  		ArrayList_Remove(server->clients, (void*)client);
  
  	shadow_encoder_free(client->encoder);
@@ -40,16 +25,10 @@
  
  	/* Clear queued messages and free resource */
  	MessageQueue_Free(client->MsgQueue);
- 	WTSCloseServer(client->vcm);
- 	region16_uninit(&(client->invalidRegion));
-	DeleteCriticalSection(&(client->lock));
-
-	client->MsgQueue = nullptr;
-@@ -416,11 +416,16 @@
- 	WINPR_ASSERT(server);
+@@ -414,10 +417,15 @@
  	WINPR_ASSERT(server->surface);
  	WINPR_ASSERT(settings);
-
+ 
 -	WINPR_ASSERT(server->surface->width <= UINT16_MAX);
 -	WINPR_ASSERT(server->surface->height <= UINT16_MAX);
 -	viewport.right = (UINT16)server->surface->width;
@@ -63,33 +42,22 @@
 +	WINPR_ASSERT(surfaceHeight <= UINT16_MAX);
 +	viewport.right = (UINT16)surfaceWidth;
 +	viewport.bottom = (UINT16)surfaceHeight;
-
+ 
  	if (server->shareSubRect)
  	{
-@@ -480,12 +480,15 @@
- 	WINPR_ASSERT(client);
-
- 	settings = client->context.settings;
- 	peer = client->context.peer;
- 	WINPR_ASSERT(peer);
+@@ -482,8 +490,11 @@
  	WINPR_ASSERT(client->server);
  	WINPR_ASSERT(client->server->surface);
-
--	const UINT32 resizeWidth = client->server->surface->width;
--	const UINT32 resizeHeight = client->server->surface->height;
+ 
 +	EnterCriticalSection(&(client->server->surface->lock));
-+	const UINT32 resizeWidth = client->server->surface->width;
-+	const UINT32 resizeHeight = client->server->surface->height;
+ 	const UINT32 resizeWidth = client->server->surface->width;
+ 	const UINT32 resizeHeight = client->server->surface->height;
 +	LeaveCriticalSection(&(client->server->surface->lock));
 +	/* MACRDP_RESIZE_DIMENSIONS_LOCK */
-
- 	if (client->resizeRequested)
-@@ -2200,20 +2203,54 @@
- 	return ret;
- }
  
- /**
-  * Function description
+ 	if (client->resizeRequested)
+ 	{
+@@ -2205,10 +2216,44 @@
   *
   * @return TRUE on success (or nothing need to be updated)
   */
@@ -135,17 +103,7 @@
  	INT64 nXSrc = 0;
  	INT64 nYSrc = 0;
  	INT64 nWidth = 0;
- 	INT64 nHeight = 0;
- 	rdpContext* context = (rdpContext*)client;
- 	rdpSettings* settings = nullptr;
- 	rdpShadowServer* server = nullptr;
- 	rdpShadowSurface* surface = nullptr;
-@@ -2222,77 +2259,104 @@
- 	const RECTANGLE_16* extents = nullptr;
- 	BYTE* pSrcData = nullptr;
- 	UINT32 nSrcStep = 0;
- 	UINT32 SrcFormat = 0;
- 	UINT32 numRects = 0;
+@@ -2227,37 +2272,52 @@
  	const RECTANGLE_16* rects = nullptr;
  
  	if (!context || !pStatus)
@@ -207,9 +165,7 @@
  	}
  
  	surfaceRect.left = 0;
- 	surfaceRect.top = 0;
- 	WINPR_ASSERT(surface->width <= UINT16_MAX);
- 	WINPR_ASSERT(surface->height <= UINT16_MAX);
+@@ -2267,27 +2327,39 @@
  	surfaceRect.right = (UINT16)surface->width;
  	surfaceRect.bottom = (UINT16)surface->height;
  	if (!region16_intersect_rect(&invalidRegion, &invalidRegion, &surfaceRect))
@@ -254,17 +210,7 @@
  	SrcFormat = surface->format;
  
  	/* Move to new pSrcData / nXSrc / nYSrc according to sub rect */
- 	if (server->shareSubRect)
- 	{
- 		INT32 subX = 0;
- 		INT32 subY = 0;
- 		subX = server->subRect.left;
-@@ -2301,16 +2365,25 @@
- 		nYSrc -= subY;
- 		WINPR_ASSERT(nXSrc >= 0);
- 		WINPR_ASSERT(nXSrc <= UINT16_MAX);
- 		WINPR_ASSERT(nYSrc >= 0);
- 		WINPR_ASSERT(nYSrc <= UINT16_MAX);
+@@ -2306,6 +2378,15 @@
  		pSrcData = &pSrcData[((UINT16)subY * nSrcStep) + ((UINT16)subX * 4U)];
  	}
  
@@ -280,17 +226,7 @@
  	// WLog_INFO(TAG, "shadow_client_send_surface_update: x: %" PRId64 " y: %" PRId64 " width: %"
  	// PRId64 " height: %" PRId64 " right: %" PRId64 " bottom: %" PRId64, 	nXSrc, nYSrc, nWidth,
  	// nHeight, nXSrc + nWidth, nYSrc + nHeight);
- 
- 	if (freerdp_settings_get_bool(settings, FreeRDP_SupportGraphicsPipeline))
- 	{
- 		if (pStatus->gfxOpened && client->areGfxCapsReady)
- 		{
-@@ -2318,20 +2391,20 @@
- 			nWidth = freerdp_settings_get_uint32(settings, FreeRDP_DesktopWidth);
- 			nHeight = freerdp_settings_get_uint32(settings, FreeRDP_DesktopHeight);
- 
- 			/* Create primary surface if have not */
- 			if (!pStatus->gfxSurfaceCreated)
+@@ -2323,10 +2404,10 @@
  			{
  				/* Only init surface when we have h264 supported */
  				if (!(ret = shadow_client_rdpgfx_reset_graphic(client)))
@@ -303,17 +239,7 @@
  
  				pStatus->gfxSurfaceCreated = TRUE;
  			}
- 
- 			WINPR_ASSERT(nWidth >= 0);
- 			WINPR_ASSERT(nWidth <= UINT16_MAX);
- 			WINPR_ASSERT(nHeight >= 0);
- 			WINPR_ASSERT(nHeight <= UINT16_MAX);
-@@ -2365,19 +2438,16 @@
- 		WINPR_ASSERT(nWidth >= 0);
- 		WINPR_ASSERT(nWidth <= UINT16_MAX);
- 		WINPR_ASSERT(nHeight >= 0);
- 		WINPR_ASSERT(nHeight <= UINT16_MAX);
- 		ret = shadow_client_send_bitmap_update(client, pSrcData, nSrcStep, (UINT16)nXSrc,
+@@ -2370,9 +2451,6 @@
  		                                       (UINT16)nYSrc, (UINT16)nWidth, (UINT16)nHeight);
  	}
  
@@ -323,17 +249,7 @@
  	return ret;
  }
  
- /**
-  * Function description
-  * Notify client for resize. The new desktop width/height
-  * should have already been updated in rdpSettings.
-  *
-@@ -2720,52 +2790,50 @@
- 			 * scanline, invalid region, etc) is not changed until it is reset
- 			 * (at shadow_multiclient_consume). As best practice, subsystem
- 			 * implementation should invoke shadow_subsystem_frame_update which
- 			 * triggers the event and then wait for completion */
- 			if (client->activated && !client->suppressOutput)
+@@ -2725,43 +2803,41 @@
  			{
  				/* Send screen update or resize to this client */
  
@@ -390,17 +306,241 @@
 +					(void)shadow_multiclient_consume(UpdateSubscriber);
  				}
  			}
--
+ 
 -			/*
 -			 * The return value of shadow_multiclient_consume is whether or not
 -			 * the subscriber really consumes the event. It's not cared currently.
 -			 */
 -			(void)shadow_multiclient_consume(UpdateSubscriber);
 -		}
- 
+-
  		WINPR_ASSERT(peer->CheckFileDescriptor);
  		if (!peer->CheckFileDescriptor(peer))
  		{
- 			WLog_ERR(TAG, "Failed to check FreeRDP file descriptor");
- 			goto fail;
+--- a/libfreerdp/codec/h264_ffmpeg.c
++++ b/libfreerdp/codec/h264_ffmpeg.c
+@@ -21,6 +21,9 @@
+ #include <freerdp/config.h>
+ 
+ #include <winpr/wlog.h>
++#include <winpr/synch.h>
++#include <macrdp/videotoolbox_h264.h>
++/* MACRDP_VIDEOTOOLBOX_BRIDGE_INCLUDE */
+ #include <freerdp/log.h>
+ #include <freerdp/codec/h264.h>
+ #include <libavcodec/avcodec.h>
+@@ -106,6 +109,10 @@
+ 	AVPacket bufferpacket;
+ #endif
+ 	AVPacket* packet;
++#ifdef MACRDP_USE_VIDEOTOOLBOX_H264_ENCODING
++	macrdp_vt_h264_encoder* macrdpVideoToolboxEncoder;
++#endif
++/* MACRDP_VIDEOTOOLBOX_BRIDGE_FIELD */
+ #if defined(WITH_VAAPI) || defined(WITH_VAAPI_H264_ENCODING) || defined(WITH_VIDEOTOOLBOX)
+ 	AVBufferRef* hwctx;
+ 	AVFrame* hwVideoFrame;
+@@ -126,6 +133,14 @@
+ 
+ 	sys = (H264_CONTEXT_LIBAVCODEC*)h264->pSystemData;
+ 
++#ifdef MACRDP_USE_VIDEOTOOLBOX_H264_ENCODING
++	if (sys->macrdpVideoToolboxEncoder)
++	{
++		macrdp_vt_h264_encoder_free(sys->macrdpVideoToolboxEncoder);
++		sys->macrdpVideoToolboxEncoder = nullptr;
++	}
++#endif
++	/* MACRDP_VIDEOTOOLBOX_BRIDGE_DESTROY */
+ 	if (sys->codecEncoderContext)
+ 	{
+ #if LIBAVCODEC_VERSION_INT >= AV_VERSION_INT(55, 69, 100)
+@@ -190,7 +205,33 @@
+ 	sys = (H264_CONTEXT_LIBAVCODEC*)h264->pSystemData;
+ 	if (!sys || !sys->codecEncoder)
+ 		return FALSE;
++
++#ifdef MACRDP_USE_VIDEOTOOLBOX_H264_ENCODING
++	if (sys->macrdpVideoToolboxEncoder)
++		return TRUE;
++
++	if (sys->codecEncoder == avcodec_find_encoder_by_name("h264_videotoolbox"))
++	{
++		/* MACRDP_VIDEOTOOLBOX_BRIDGE_CREATE */
++		sys->macrdpVideoToolboxEncoder = macrdp_vt_h264_encoder_new(
++			h264->width, h264->height, h264->BitRate, h264->FrameRate, 60);
++		if (sys->macrdpVideoToolboxEncoder)
++		{
++			WLog_Print(h264->log, WLOG_INFO,
++			           "Using direct macOS VideoToolbox H264 bridge (%ux%u @ %u fps)",
++			           h264->width, h264->height, h264->FrameRate);
++			/* MACRDP_VIDEOTOOLBOX_BRIDGE_ACTIVE_LOG_V2 */
++			return TRUE;
++		}
+ 
++		WLog_Print(h264->log, WLOG_WARN,
++		           "Direct VideoToolbox H264 encoder unavailable, falling back to FFmpeg");
++		sys->codecEncoder = avcodec_find_encoder(AV_CODEC_ID_H264);
++		if (!sys->codecEncoder)
++			return FALSE;
++	}
++#endif
++
+ 	recreate = !sys->codecEncoderContext;
+ 
+ 	if (sys->codecEncoderContext)
+@@ -231,6 +272,9 @@
+ 	sys->codecEncoderContext->width = (int)MIN(INT32_MAX, h264->width);
+ 	sys->codecEncoderContext->height = (int)MIN(INT32_MAX, h264->height);
+ 	sys->codecEncoderContext->delay = 0;
++	/* MACRDP_GOP_FIX: allow P-frames for interactive desktop streaming. */
++	sys->codecEncoderContext->gop_size = 60;
++	sys->codecEncoderContext->max_b_frames = 0;
+ #if LIBAVCODEC_VERSION_INT >= AV_VERSION_INT(56, 13, 100)
+ 	sys->codecEncoderContext->framerate =
+ 	    (AVRational){ WINPR_ASSERTING_INT_CAST(int, h264->FrameRate), 1 };
+@@ -238,6 +282,14 @@
+ 	sys->codecEncoderContext->time_base =
+ 	    (AVRational){ 1, WINPR_ASSERTING_INT_CAST(int, h264->FrameRate) };
+ 	av_opt_set(sys->codecEncoderContext, "tune", "zerolatency", AV_OPT_SEARCH_CHILDREN);
++#ifdef MACRDP_USE_VIDEOTOOLBOX_H264_ENCODING
++		if (sys->codecEncoder == avcodec_find_encoder_by_name("h264_videotoolbox"))
++		{
++			/* MACRDP_VIDEOTOOLBOX_OPTIONS */
++			(void)av_opt_set(sys->codecEncoderContext, "realtime", "1", AV_OPT_SEARCH_CHILDREN);
++			(void)av_opt_set(sys->codecEncoderContext, "prio_speed", "1", AV_OPT_SEARCH_CHILDREN);
++		}
++#endif
+ 
+ 	sys->codecEncoderContext->flags |= AV_CODEC_FLAG_LOOP_FILTER;
+ 
+@@ -424,6 +476,30 @@
+ 	if (!libavcodec_create_encoder_context(h264))
+ 		return -1;
+ 
++#ifdef MACRDP_USE_VIDEOTOOLBOX_H264_ENCODING
++	if (sys->macrdpVideoToolboxEncoder)
++	{
++		/* MACRDP_VIDEOTOOLBOX_BRIDGE_COMPRESS */
++		*ppDstData = nullptr;
++		*pDstSize = 0;
++		const uint64_t frameIndex = sys->videoFrame->pts > 0
++		                                 ? (uint64_t)(sys->videoFrame->pts - 1)
++		                                 : 0;
++		sys->videoFrame->pts++;
++		const int directStatus = macrdp_vt_h264_encoder_encode(
++			sys->macrdpVideoToolboxEncoder, pSrcYuv[0], pSrcYuv[1], pSrcYuv[2],
++			pStride, frameIndex, ppDstData, pDstSize);
++		if (directStatus < 0)
++		{
++			const char* error = macrdp_vt_h264_encoder_last_error(
++				sys->macrdpVideoToolboxEncoder);
++			WLog_Print(h264->log, WLOG_ERROR, "Direct VideoToolbox H264 encode failed: %s",
++			           error ? error : "unknown error");
++		}
++		return directStatus;
++	}
++#endif
++
+ #if LIBAVCODEC_VERSION_INT < AV_VERSION_INT(58, 133, 100)
+ 	sys->packet = &sys->bufferpacket;
+ 	av_packet_unref(sys->packet);
+@@ -506,7 +582,28 @@
+ 	}
+ 
+ 	status = avcodec_receive_packet(sys->codecEncoderContext, sys->packet);
++
++	if (status == AVERROR(EAGAIN))
++	{
++		/* MACRDP_EAGAIN_POLL: let asynchronous VideoToolbox output settle. */
++		/* MACRDP_INITIAL_FRAME_POLL: guarantee a visible first frame. */
++		const int max_attempts = sys->videoFrame->pts <= 1 ? 50 : 8;
++		for (int attempt = 0; attempt < max_attempts && status == AVERROR(EAGAIN); ++attempt)
++		{
++			USleep(1000);
++			status = avcodec_receive_packet(sys->codecEncoderContext, sys->packet);
++		}
++	}
+ 
++	if (status == AVERROR(EAGAIN))
++	{
++		/* MACRDP_EAGAIN_FIX: no packet is ready for this input yet. */
++		*ppDstData = nullptr;
++		*pDstSize = 0;
++		rc = 0;
++		goto fail;
++	}
++
+ 	if (status < 0)
+ 	{
+ 		WLog_Print(h264->log, WLOG_ERROR, "Failed to encode video frame (%s [%d])",
+@@ -803,6 +900,14 @@
+ 	}
+ 	else
+ 	{
++#ifdef MACRDP_USE_VIDEOTOOLBOX_H264_ENCODING
++		/* MACRDP_VIDEOTOOLBOX_ENCODER */
++		sys->codecEncoder = avcodec_find_encoder_by_name("h264_videotoolbox");
++		if (sys->codecEncoder)
++			WLog_Print(h264->log, WLOG_INFO, "Using VideoToolbox H264 encoder");
++		else
++			WLog_Print(h264->log, WLOG_WARN, "VideoToolbox H264 encoder not found, falling back to software");
++#endif
+ #ifdef WITH_VAAPI_H264_ENCODING
+ 		if (h264->hwAccel) /* user requested hw accel */
+ 		{
+--- a/server/shadow/shadow_surface.c
++++ b/server/shadow/shadow_surface.c
+@@ -79,11 +79,14 @@
+ 	if (!surface)
+ 		return FALSE;
+ 
++	EnterCriticalSection(&(surface->lock));
++
+ 	if ((width == surface->width) && (height == surface->height))
+ 	{
+ 		/* We don't need to reset frame buffer, just update left top */
+ 		surface->x = x;
+ 		surface->y = y;
++		LeaveCriticalSection(&(surface->lock));
+ 		return TRUE;
+ 	}
+ 
+@@ -97,8 +100,12 @@
+ 		surface->height = height;
+ 		surface->scanline = scanline;
+ 		surface->data = buffer;
++		LeaveCriticalSection(&(surface->lock));
+ 		return TRUE;
+ 	}
+ 
++	LeaveCriticalSection(&(surface->lock));
+ 	return FALSE;
+ }
++
++/* MACRDP_SURFACE_RESIZE_LOCK */
+--- a/server/shadow/shadow_server.c
++++ b/server/shadow/shadow_server.c
+@@ -709,10 +709,9 @@
+ 	}
+ 
+ 	listener->Close(listener);
+-	shadow_subsystem_stop(server->subsystem);
+ 
+-	/* Signal to the clients that server is being stopped and wait for them
+-	 * to disconnect. */
++	/* Signal to the clients before stopping the subsystem. The publisher may
++	 * be waiting for this client's frame barrier. */
+ 	if (shadow_client_boardcast_quit(server, 0))
+ 	{
+ 		while (ArrayList_Count(server->clients) > 0)
+@@ -721,6 +720,9 @@
  		}
+ 	}
+ 
++	shadow_subsystem_stop(server->subsystem);
++
++	/* MACRDP_SHADOW_STOP_ORDER */
+ 	ExitThread(0);
+ 	return 0;
+ }
