@@ -311,8 +311,12 @@ std::pair<std::size_t, std::size_t> output_size(
             return;
         }
 
-        // Keep only the newest frame. A remote desktop stream must prefer a
-        // current image over a queue of old images waiting to be encoded.
+        // Keep only the newest pixels. If an older pending frame is replaced,
+        // preserve its dirty area so skipped changes cannot remain stale on
+        // the RDP surface.
+        if (state->latest_frame.has_value()) {
+            macrdp::coalesce_dropped_frame_dirty_regions(*state->latest_frame, frame);
+        }
         state->latest_frame = std::move(frame);
     }
     state->condition.notify_one();

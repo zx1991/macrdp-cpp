@@ -613,7 +613,14 @@ void capture_loop(MacShadowSubsystem* subsystem) {
                 if (subsystem->stop_requested.load()) {
                     break;
                 }
-                // A slow RDP client must never turn capture into an unbounded queue.
+                // A slow RDP client must never turn capture into an unbounded
+                // queue. Preserve the skipped frame's dirty area before
+                // replacing its pixels with the newest frame.
+                if (subsystem->pending_frame.has_value()) {
+                    macrdp::coalesce_dropped_frame_dirty_regions(
+                        *subsystem->pending_frame,
+                        *frame);
+                }
                 subsystem->pending_frame = std::move(frame);
             }
             subsystem->pending_frame_condition.notify_one();
@@ -926,4 +933,13 @@ bool macrdp_shadow_preflight_capture(std::string& error) {
 
     capture.stop();
     return true;
+}
+
+bool macrdp_shadow_preflight_input(std::string& error) {
+    if (CGPreflightPostEventAccess()) {
+        return true;
+    }
+
+    error = "Accessibility permission is required to inject keyboard and mouse events";
+    return false;
 }

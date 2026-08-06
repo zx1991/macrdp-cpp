@@ -122,6 +122,10 @@ The first server start requires Screen Recording permission. Grant it to the
 terminal or executable in System Settings > Privacy & Security > Screen
 Recording. ScreenCaptureKit generally cannot capture the desktop from an
 SSH-only session; start the server inside the logged-in graphical session.
+Keyboard and mouse injection also requires Accessibility permission. Grant it
+to the terminal or executable in System Settings > Privacy & Security >
+Accessibility. The server checks both permissions before it opens the RDP
+listener.
 
 ## Layout
 
@@ -133,9 +137,12 @@ SSH-only session; start the server inside the logged-in graphical session.
 
 ## Next milestones
 
-1. Improve frame pacing and dirty-region tracking to reduce cursor trails.
-2. Add automated protocol smoke tests with a FreeRDP client.
-3. Package the server with its FFmpeg/OpenSSL runtime dependencies.
+1. Move H.264 encoding work off the per-client transport/input loop while
+   keeping socket writes on the FreeRDP client thread.
+2. Add automated protocol smoke tests with a FreeRDP client, including input,
+   reconnect, resize, NLA, and slow-reader cases.
+3. Add multi-monitor and display-mode change handling.
+4. Package the server with its FFmpeg/OpenSSL runtime dependencies.
 
 ## Encoder test
 

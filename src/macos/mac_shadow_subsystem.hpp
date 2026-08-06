@@ -31,4 +31,8 @@ void macrdp_shadow_set_capture_options(
 // tiny stream and waits for one complete frame, so TCC and GUI-session errors
 // are reported at startup instead of after the listener is already advertised.
 bool macrdp_shadow_preflight_capture(std::string& error);
+
+// Validate Accessibility permission before accepting a client. CoreGraphics
+// event injection otherwise fails silently when TCC has not granted access.
+bool macrdp_shadow_preflight_input(std::string& error);
 #endif

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <limits>
@@ -38,5 +39,48 @@ struct Frame {
             && bgra.size() >= stride * static_cast<std::size_t>(height);
     }
 };
+
+// When a producer coalesces frames, the newest pixel buffer must carry the
+// dirty regions from every skipped frame. An empty result deliberately means
+// that the metadata is no longer sufficient and the consumer should use a
+// full-frame update.
+inline void coalesce_dropped_frame_dirty_regions(
+    const Frame& previous,
+    Frame& newest) {
+    if (previous.width != newest.width || previous.height != newest.height
+        || previous.dirty_rects.empty() || newest.dirty_rects.empty()) {
+        newest.dirty_rects.clear();
+        return;
+    }
+
+    FrameRect bounds{};
+    bool has_bounds = false;
+    const auto include = [&bounds, &has_bounds](const FrameRect& rect) {
+        if (!rect.valid()) {
+            return;
+        }
+        if (!has_bounds) {
+            bounds = rect;
+            has_bounds = true;
+            return;
+        }
+        bounds.left = std::min(bounds.left, rect.left);
+        bounds.top = std::min(bounds.top, rect.top);
+        bounds.right = std::max(bounds.right, rect.right);
+        bounds.bottom = std::max(bounds.bottom, rect.bottom);
+    };
+
+    for (const auto& rect : previous.dirty_rects) {
+        include(rect);
+    }
+    for (const auto& rect : newest.dirty_rects) {
+        include(rect);
+    }
+
+    newest.dirty_rects.clear();
+    if (has_bounds) {
+        newest.dirty_rects.push_back(bounds);
+    }
+}
 
 } // namespace macrdp

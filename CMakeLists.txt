@@ -88,6 +88,20 @@ target_compile_options(macrdp-display-dimensions-test PRIVATE
 
 target_link_libraries(macrdp-display-dimensions-test PRIVATE macrdp_macos)
 
+add_executable(macrdp-frame-coalescing-test
+    src/frame_coalescing_test.cpp
+)
+
+target_compile_options(macrdp-frame-coalescing-test PRIVATE
+    -Wall
+    -Wextra
+    -Wpedantic
+)
+
+target_include_directories(macrdp-frame-coalescing-test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+
 option(MACRDP_FREERDP_WITH_FFMPEG
     "Build FreeRDP's GFX H.264 path with FFmpeg"
     ON
@@ -467,6 +481,11 @@ add_test(
 add_test(
     NAME display_dimensions
     COMMAND macrdp-display-dimensions-test
+)
+
+add_test(
+    NAME frame_coalescing
+    COMMAND macrdp-frame-coalescing-test
 )
 
 if(MACRDP_FREERDP_WITH_FFMPEG)

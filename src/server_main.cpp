@@ -565,6 +565,18 @@ int main(int argc, char** argv) {
         return 1;
     }
 
+    std::string input_error;
+    if (!macrdp_shadow_preflight_input(input_error)) {
+        std::cerr << "Unable to inject macOS input before starting the RDP listener: "
+                  << input_error << "\n"
+                  << "Grant Accessibility permission to this executable or Terminal.\n";
+        shadow_server_uninit(server);
+        shadow_server_free(server);
+        macrdp_shadow_set_credentials(nullptr, nullptr, nullptr);
+        clear_secret(options.password);
+        return 1;
+    }
+
     if (shadow_server_start(server) < 0) {
         std::cerr << "Unable to start FreeRDP shadow server\n";
         shadow_server_uninit(server);
