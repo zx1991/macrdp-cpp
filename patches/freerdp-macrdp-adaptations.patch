@@ -652,8 +652,61 @@
  
  	if (client->resizeRequested)
  	{
-@@ -1408,8 +1408,11 @@
- 	regionRect.bottom = (UINT16)cmd->bottom;
+@@ -1303,7 +1314,8 @@
+ WINPR_ATTR_NODISCARD
+ static BOOL shadow_client_send_avc444(rdpShadowClient* client, const BYTE* pSrcData,
+                                       UINT32 nSrcStep, UINT32 SrcFormat, UINT16 nWidth,
+-                                      UINT16 nHeight, RDPGFX_SURFACE_COMMAND* cmd,
++                                      UINT16 nHeight, const RECTANGLE_16* encodeRegion,
++                                      RDPGFX_SURFACE_COMMAND* cmd,
+                                       const RDPGFX_START_FRAME_PDU* cmdstart,
+                                       const RDPGFX_END_FRAME_PDU* cmdend)
+ {
+@@ -1324,15 +1336,10 @@
+ 		WLog_ERR(TAG, "Failed to prepare encoder FREERDP_CODEC_AVC444");
+ 		return FALSE;
+ 	}
++	if (!encodeRegion)
++		return FALSE;
+ 
+-	WINPR_ASSERT(cmd->left <= UINT16_MAX);
+-	WINPR_ASSERT(cmd->top <= UINT16_MAX);
+-	WINPR_ASSERT(cmd->right <= UINT16_MAX);
+-	WINPR_ASSERT(cmd->bottom <= UINT16_MAX);
+-	regionRect.left = (UINT16)cmd->left;
+-	regionRect.top = (UINT16)cmd->top;
+-	regionRect.right = (UINT16)cmd->right;
+-	regionRect.bottom = (UINT16)cmd->bottom;
++	regionRect = *encodeRegion;
+ 	rc = avc444_compress(encoder->h264, pSrcData, SrcFormat, nSrcStep, nWidth, nHeight, version,
+ 	                     &regionRect, &avc444.LC, &avc444.bitstream[0].data,
+ 	                     &avc444.bitstream[0].length, &avc444.bitstream[1].data,
+@@ -1367,7 +1374,8 @@
+ WINPR_ATTR_NODISCARD
+ static BOOL shadow_client_send_avc420(rdpShadowClient* client, const BYTE* pSrcData,
+                                       UINT32 nSrcStep, UINT32 SrcFormat, UINT16 nWidth,
+-                                      UINT16 nHeight, RDPGFX_SURFACE_COMMAND* cmd,
++                                      UINT16 nHeight, const RECTANGLE_16* encodeRegion,
++                                      RDPGFX_SURFACE_COMMAND* cmd,
+                                       const RDPGFX_START_FRAME_PDU* cmdstart,
+                                       const RDPGFX_END_FRAME_PDU* cmdend)
+ {
+@@ -1386,17 +1394,15 @@
+ 		WLog_ERR(TAG, "Failed to prepare encoder FREERDP_CODEC_AVC420");
+ 		return FALSE;
+ 	}
++	if (!encodeRegion)
++		return FALSE;
+ 
+-	WINPR_ASSERT(cmd->left <= UINT16_MAX);
+-	WINPR_ASSERT(cmd->top <= UINT16_MAX);
+-	WINPR_ASSERT(cmd->right <= UINT16_MAX);
+-	WINPR_ASSERT(cmd->bottom <= UINT16_MAX);
+-	regionRect.left = (UINT16)cmd->left;
+-	regionRect.top = (UINT16)cmd->top;
+-	regionRect.right = (UINT16)cmd->right;
+-	regionRect.bottom = (UINT16)cmd->bottom;
++	regionRect = *encodeRegion;
 +	const ULONGLONG encodeStarted = GetTickCount64();
  	rc = avc420_compress(encoder->h264, pSrcData, SrcFormat, nSrcStep, nWidth, nHeight, &regionRect,
  	                     &avc420.data, &avc420.length, &avc420.meta);
@@ -662,11 +715,7 @@
  	if (rc < 0)
  	{
  		WLog_ERR(TAG, "avc420_compress failed");
- 		return FALSE;
- 	}
-@@ -1417,11 +1417,17 @@
- 	/* rc > 0 means new data */
- 	if (rc > 0)
+@@ -1408,8 +1414,14 @@
  	{
  		cmd->codecId = RDPGFX_CODECID_AVC420;
  		cmd->extra = (void*)&avc420;
@@ -681,8 +730,106 @@
  		cmd->extra = nullptr;
  	}
  	free_h264_metablock(&avc420.meta);
-
-@@ -2205,10 +2216,70 @@
+@@ -1684,7 +1696,53 @@
+ 		return FALSE;
+ 	return (client->confirmedCaps.flags & RDPGFX_CAPS_FLAG_AVC420_ENABLED) != 0;
+ }
++
++static BOOL shadow_client_normalize_h264_region(const RECTANGLE_16* dirtyRegion, UINT16 width,
++                                                UINT16 height, BOOL fullFrame,
++                                                RECTANGLE_16* encodeRegion)
++{
++	UINT32 left = 0;
++	UINT32 top = 0;
++	UINT32 right = 0;
++	UINT32 bottom = 0;
++
++	if (!dirtyRegion || !encodeRegion || width == 0 || height == 0)
++		return FALSE;
++
++	if (fullFrame)
++	{
++		encodeRegion->left = 0;
++		encodeRegion->top = 0;
++		encodeRegion->right = width;
++		encodeRegion->bottom = height;
++		return TRUE;
++	}
+ 
++	left = MIN((UINT32)dirtyRegion->left, (UINT32)width);
++	top = MIN((UINT32)dirtyRegion->top, (UINT32)height);
++	right = MIN((UINT32)dirtyRegion->right, (UINT32)width);
++	bottom = MIN((UINT32)dirtyRegion->bottom, (UINT32)height);
++	if (left >= right || top >= bottom)
++		return FALSE;
++
++	/* I420 chroma samples cover 2x2 luma pixels. Keep the encoded region
++	 * aligned without changing the desktop surface coordinates. */
++	left &= ~1U;
++	top &= ~1U;
++	if (right < width && (right & 1U) != 0)
++		right++;
++	if (bottom < height && (bottom & 1U) != 0)
++		bottom++;
++	if (right <= left || bottom <= top)
++		return FALSE;
++
++	encodeRegion->left = (UINT16)left;
++	encodeRegion->top = (UINT16)top;
++	encodeRegion->right = (UINT16)right;
++	encodeRegion->bottom = (UINT16)bottom;
++	return TRUE;
++}
++
+ /**
+  * Function description
+  *
+@@ -1693,12 +1751,14 @@
+ WINPR_ATTR_NODISCARD
+ static BOOL shadow_client_send_surface_gfx(rdpShadowClient* client, const BYTE* pSrcData,
+                                            UINT32 nSrcStep, UINT32 SrcFormat, UINT16 nXSrc,
+-                                           UINT16 nYSrc, UINT16 nWidth, UINT16 nHeight)
++                                           UINT16 nYSrc, UINT16 nWidth, UINT16 nHeight,
++                                           const RECTANGLE_16* dirtyRegion)
+ {
+ 	const rdpContext* context = (const rdpContext*)client;
+ 	RDPGFX_SURFACE_COMMAND cmd = WINPR_C_ARRAY_INIT;
+ 	RDPGFX_START_FRAME_PDU cmdstart = WINPR_C_ARRAY_INIT;
+ 	RDPGFX_END_FRAME_PDU cmdend = WINPR_C_ARRAY_INIT;
++	RECTANGLE_16 encodeRegion = WINPR_C_ARRAY_INIT;
+ 	SYSTEMTIME sTime = WINPR_C_ARRAY_INIT;
+ 
+ 	if (!context || !pSrcData)
+@@ -1710,6 +1770,11 @@
+ 	if (!settings || !encoder)
+ 		return FALSE;
+ 
++	const BOOL firstFrame = client->first_frame;
++	if (!shadow_client_normalize_h264_region(dirtyRegion, nWidth, nHeight, firstFrame,
++	                                         &encodeRegion))
++		return FALSE;
++
+ 	if (client->first_frame)
+ 	{
+ 		if (encoder->rfx)
+@@ -1756,14 +1821,14 @@
+ 		{
+ 			cmd.codecId = GfxAVC444v2 ? RDPGFX_CODECID_AVC444v2 : RDPGFX_CODECID_AVC444;
+ 			return shadow_client_send_avc444(client, pSrcData, nSrcStep, SrcFormat, nWidth, nHeight,
+-			                                 &cmd, &cmdstart, &cmdend);
++			                                 &encodeRegion, &cmd, &cmdstart, &cmdend);
+ 		}
+ 	}
+ 
+ 	if (GfxH264 && shadow_avc420_enabled(client))
+ 	{
+ 		return shadow_client_send_avc420(client, pSrcData, nSrcStep, SrcFormat, nWidth, nHeight,
+-		                                 &cmd, &cmdstart, &cmdend);
++		                                 &encodeRegion, &cmd, &cmdstart, &cmdend);
+ 	}
+ 
+ #endif
+@@ -2205,10 +2270,70 @@
   *
   * @return TRUE on success (or nothing need to be updated)
   */
@@ -754,7 +901,15 @@
  	INT64 nXSrc = 0;
  	INT64 nYSrc = 0;
  	INT64 nWidth = 0;
-@@ -2227,37 +2298,53 @@
+@@ -2219,6 +2344,7 @@
+ 	rdpShadowSurface* surface = nullptr;
+ 	REGION16 invalidRegion;
+ 	RECTANGLE_16 surfaceRect;
++	RECTANGLE_16 dirtyRect = WINPR_C_ARRAY_INIT;
+ 	const RECTANGLE_16* extents = nullptr;
+ 	BYTE* pSrcData = nullptr;
+ 	UINT32 nSrcStep = 0;
+@@ -2227,37 +2353,53 @@
  	const RECTANGLE_16* rects = nullptr;
  
  	if (!context || !pStatus)
@@ -779,23 +934,23 @@
 +		(void)shadow_multiclient_consume_nowait(updateSubscriber);
  		return FALSE;
 +	}
- 
--	{
--		EnterCriticalSection(&(client->lock));
--		region16_init(&invalidRegion);
++
 +	region16_init(&invalidRegion);
 +	EnterCriticalSection(&(client->lock));
  
++	const BOOL res = region16_copy(&invalidRegion, &(client->invalidRegion));
++	region16_clear(&(client->invalidRegion));
++	LeaveCriticalSection(&(client->lock));
++	if (!res)
+ 	{
+-		EnterCriticalSection(&(client->lock));
+-		region16_init(&invalidRegion);
+-
 -		const BOOL res = region16_copy(&invalidRegion, &(client->invalidRegion));
 -		region16_clear(&(client->invalidRegion));
 -		LeaveCriticalSection(&(client->lock));
 -		if (!res)
 -			goto out;
-+	const BOOL res = region16_copy(&invalidRegion, &(client->invalidRegion));
-+	region16_clear(&(client->invalidRegion));
-+	LeaveCriticalSection(&(client->lock));
-+	if (!res)
-+	{
 +		region16_uninit(&invalidRegion);
 +		(void)shadow_multiclient_consume_nowait(updateSubscriber);
 +		return FALSE;
@@ -817,7 +972,7 @@
  	}
  
  	surfaceRect.left = 0;
-@@ -2267,27 +2354,39 @@
+@@ -2267,27 +2409,40 @@
  	surfaceRect.right = (UINT16)surface->width;
  	surfaceRect.bottom = (UINT16)surface->height;
  	if (!region16_intersect_rect(&invalidRegion, &invalidRegion, &surfaceRect))
@@ -846,6 +1001,7 @@
 +	has_update = TRUE;
  
  	extents = region16_extents(&invalidRegion);
++	dirtyRect = *extents;
  	nXSrc = extents->left;
  	nYSrc = extents->top;
  	nWidth = extents->right - extents->left;
@@ -862,7 +1018,22 @@
  	SrcFormat = surface->format;
  
  	/* Move to new pSrcData / nXSrc / nYSrc according to sub rect */
-@@ -2306,6 +2405,21 @@
+@@ -2299,6 +2454,14 @@
+ 		subY = server->subRect.top;
+ 		nXSrc -= subX;
+ 		nYSrc -= subY;
++		WINPR_ASSERT(dirtyRect.left >= subX);
++		WINPR_ASSERT(dirtyRect.top >= subY);
++		WINPR_ASSERT(dirtyRect.right >= subX);
++		WINPR_ASSERT(dirtyRect.bottom >= subY);
++		dirtyRect.left = (UINT16)(dirtyRect.left - subX);
++		dirtyRect.top = (UINT16)(dirtyRect.top - subY);
++		dirtyRect.right = (UINT16)(dirtyRect.right - subX);
++		dirtyRect.bottom = (UINT16)(dirtyRect.bottom - subY);
+ 		WINPR_ASSERT(nXSrc >= 0);
+ 		WINPR_ASSERT(nXSrc <= UINT16_MAX);
+ 		WINPR_ASSERT(nYSrc >= 0);
+@@ -2306,6 +2469,21 @@
  		pSrcData = &pSrcData[((UINT16)subY * nSrcStep) + ((UINT16)subX * 4U)];
  	}
  
@@ -884,7 +1055,17 @@
  	// WLog_INFO(TAG, "shadow_client_send_surface_update: x: %" PRId64 " y: %" PRId64 " width: %"
  	// PRId64 " height: %" PRId64 " right: %" PRId64 " bottom: %" PRId64, 	nXSrc, nYSrc, nWidth,
  	// nHeight, nXSrc + nWidth, nYSrc + nHeight);
-@@ -2323,10 +2437,10 @@
+@@ -2314,7 +2492,8 @@
+ 	{
+ 		if (pStatus->gfxOpened && client->areGfxCapsReady)
+ 		{
+-			/* GFX/h264 always full screen encoded */
++			/* Keep the GFX surface full-sized, but let H.264 encode only the
++			 * current dirty region. The metadata still addresses the full surface. */
+ 			nWidth = freerdp_settings_get_uint32(settings, FreeRDP_DesktopWidth);
+ 			nHeight = freerdp_settings_get_uint32(settings, FreeRDP_DesktopHeight);
+ 
+@@ -2323,10 +2502,10 @@
  			{
  				/* Only init surface when we have h264 supported */
  				if (!(ret = shadow_client_rdpgfx_reset_graphic(client)))
@@ -897,7 +1078,16 @@
  
  				pStatus->gfxSurfaceCreated = TRUE;
  			}
-@@ -2370,9 +2484,6 @@
+@@ -2336,7 +2515,7 @@
+ 			WINPR_ASSERT(nHeight >= 0);
+ 			WINPR_ASSERT(nHeight <= UINT16_MAX);
+ 			ret = shadow_client_send_surface_gfx(client, pSrcData, nSrcStep, SrcFormat, 0, 0,
+-			                                     (UINT16)nWidth, (UINT16)nHeight);
++			                                     (UINT16)nWidth, (UINT16)nHeight, &dirtyRect);
+ 		}
+ 		else
+ 		{
+@@ -2370,9 +2549,6 @@
  		                                       (UINT16)nYSrc, (UINT16)nWidth, (UINT16)nHeight);
  	}
  
@@ -907,7 +1097,7 @@
  	return ret;
  }
  
-@@ -2451,17 +2562,23 @@
+@@ -2451,17 +2627,23 @@
   */
  WINPR_ATTR_NODISCARD
  static inline BOOL shadow_client_no_surface_update(rdpShadowClient* client,
@@ -932,20 +1122,21 @@
  	LeaveCriticalSection(&surface->lock);
  	return rc;
  }
-@@ -2652,6 +2769,12 @@
- 	if (!rc)
- 		goto out;
+@@ -2650,7 +2832,13 @@
  
-+	if (!freerdp_settings_set_bool(settings, FreeRDP_WaitForOutputBufferFlush, FALSE))
+ 	rc = peer->Initialize(peer);
+ 	if (!rc)
 +		goto out;
++
++	if (!freerdp_settings_set_bool(settings, FreeRDP_WaitForOutputBufferFlush, FALSE))
+ 		goto out;
 +	/* MACRDP_NONBLOCKING_OUTPUT */
 +	BOOL outputBlocked = FALSE;
 +	BOOL frameDeferred = FALSE;
-+
+ 
  	update = peer->context->update;
  	WINPR_ASSERT(update);
- 
-@@ -2707,13 +2830,40 @@
+@@ -2707,13 +2895,40 @@
  			events[nCount++] = gfxevent;
  #endif
  
@@ -988,7 +1179,7 @@
  			/* The UpdateEvent means to start sending current frame. It is
  			 * triggered from subsystem implementation and it should ensure
  			 * that the screen and primary surface meta data (width, height,
-@@ -2721,8 +2871,22 @@
+@@ -2721,8 +2936,22 @@
  			 * (at shadow_multiclient_consume). As best practice, subsystem
  			 * implementation should invoke shadow_subsystem_frame_update which
  			 * triggers the event and then wait for completion */
@@ -1012,7 +1203,7 @@
  				/* Send screen update or resize to this client */
  
  				/* Check resize */
-@@ -2731,34 +2895,39 @@
+@@ -2731,43 +2960,42 @@
  					/* Screen size changed, do resize */
  					if (!shadow_client_send_resize(client, &gfxstatus))
  					{
@@ -1061,7 +1252,6 @@
 -			(void)shadow_multiclient_consume(UpdateSubscriber);
  		}
  
-@@ -2765,9 +2936,3 @@
 -		WINPR_ASSERT(peer->CheckFileDescriptor);
 -		if (!peer->CheckFileDescriptor(peer))
 -		{
@@ -1071,13 +1261,17 @@
  
  		if (client->activated &&
  		    WTSVirtualChannelManagerIsChannelJoined(client->vcm, DRDYNVC_SVC_CHANNEL_NAME))
-@@ -2852,2 +3023,4 @@
+@@ -2857,7 +3085,9 @@
+ 			audioVolumeMsg.id = 0;
+ 			audioVolumeMsg.Free = nullptr;
+ 
 -			while (MessageQueue_Peek(MsgQueue, &message, TRUE))
 +			size_t messageBudget = 64;
 +			/* MACRDP_MESSAGE_BUDGET */
 +			while (messageBudget-- > 0 && MessageQueue_Peek(MsgQueue, &message, TRUE))
  			{
-
+ 				if (message.id == WMQ_QUIT)
+ 				{
 --- a/libfreerdp/core/server.c
 +++ b/libfreerdp/core/server.c
 @@ -631,7 +631,9 @@
@@ -1329,3 +1523,17 @@
  }
 +
 +/* MACRDP_SURFACE_RESIZE_LOCK */
+--- a/libfreerdp/codec/h264.c
++++ b/libfreerdp/codec/h264.c
+@@ -301,9 +301,10 @@
+ 	else
+ 	{
+-		for (size_t y = regionRect->top; y < regionRect->bottom; y += 64)
++		/* MACRDP_H264_REGION_FIX */
++		for (size_t y = 0; y < regionRect->bottom - regionRect->top; y += 64)
+ 		{
+-			for (size_t x = regionRect->left; x < regionRect->right; x += 64)
++			for (size_t x = 0; x < regionRect->right - regionRect->left; x += 64)
+ 			{
+ 				RECTANGLE_16 rect;
+ 				rect.left = (UINT16)MIN(UINT16_MAX, regionRect->left + x);

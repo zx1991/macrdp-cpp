@@ -64,6 +64,19 @@ void fill_frame(std::vector<std::uint8_t>& frame, std::uint32_t width,
     }
 }
 
+void fill_region(std::vector<std::uint8_t>& frame, std::uint32_t width,
+                 const RECTANGLE_16& region, std::uint32_t frame_index) {
+    for (std::uint32_t y = region.top; y < region.bottom; ++y) {
+        for (std::uint32_t x = region.left; x < region.right; ++x) {
+            auto* pixel = frame.data() + (static_cast<std::size_t>(y) * width + x) * 4;
+            pixel[0] = static_cast<std::uint8_t>((x + frame_index * 3) & 0xFF);
+            pixel[1] = static_cast<std::uint8_t>((y + frame_index * 5) & 0xFF);
+            pixel[2] = static_cast<std::uint8_t>((x + y + frame_index * 7) & 0xFF);
+            pixel[3] = 0xFF;
+        }
+    }
+}
+
 } // namespace
 
 int main() {
@@ -92,7 +105,8 @@ int main() {
         return 1;
     }
 
-    const RECTANGLE_16 region = {0, 0, width, height};
+    const RECTANGLE_16 full_region = {0, 0, width, height};
+    const RECTANGLE_16 dirty_region = {32, 24, 160, 112};
     std::vector<std::uint8_t> frame(static_cast<std::size_t>(stride) * height);
     std::vector<std::uint8_t> decoded(static_cast<std::size_t>(stride) * height);
     bool saw_idr = false;
@@ -101,9 +115,13 @@ int main() {
     std::uint32_t first_output_frame = 8;
 
     for (std::uint32_t frame_index = 0; frame_index < 8; ++frame_index) {
-        // Keep the second input identical to the first to cover the startup
-        // case where the desktop is static immediately after connection.
-        fill_frame(frame, width, height, frame_index < 2 ? 0 : frame_index);
+        if (frame_index == 0) {
+            fill_frame(frame, width, height, 0);
+        } else if (frame_index >= 2) {
+            fill_region(frame, width, dirty_region, frame_index);
+        }
+
+        const RECTANGLE_16& region = frame_index < 2 ? full_region : dirty_region;
 
         BYTE* encoded = nullptr;
         UINT32 encoded_size = 0;
@@ -135,6 +153,19 @@ int main() {
         }
         ++output_count;
         first_output_frame = std::min(first_output_frame, frame_index);
+        if (frame_index >= 2) {
+            for (std::uint32_t rect_index = 0; rect_index < meta.numRegionRects; ++rect_index) {
+                const RECTANGLE_16& rect = meta.regionRects[rect_index];
+                if (rect.left < dirty_region.left || rect.top < dirty_region.top
+                    || rect.right > dirty_region.right || rect.bottom > dirty_region.bottom) {
+                    free_h264_metablock(&meta);
+                    h264_context_free(encoder);
+                    h264_context_free(decoder);
+                    std::fprintf(stderr, "H.264 dirty rectangles escaped the changed region\n");
+                    return 1;
+                }
+            }
+        }
         if (!has_annex_b_start_code(encoded, encoded_size)) {
             free_h264_metablock(&meta);
             h264_context_free(encoder);
