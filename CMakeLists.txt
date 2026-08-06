@@ -76,6 +76,18 @@ target_compile_options(macrdp-cpp-encoder-test PRIVATE
 
 target_link_libraries(macrdp-cpp-encoder-test PRIVATE macrdp_macos)
 
+add_executable(macrdp-display-dimensions-test
+    src/display_dimensions_test.cpp
+)
+
+target_compile_options(macrdp-display-dimensions-test PRIVATE
+    -Wall
+    -Wextra
+    -Wpedantic
+)
+
+target_link_libraries(macrdp-display-dimensions-test PRIVATE macrdp_macos)
+
 option(MACRDP_FREERDP_WITH_FFMPEG
     "Build FreeRDP's GFX H.264 path with FFmpeg"
     ON
@@ -289,6 +301,34 @@ if(EXISTS "${MACRDP_FREERDP_H264_SOURCE}")
             file(WRITE "${MACRDP_FREERDP_H264_SOURCE}" "${MACRDP_FREERDP_H264_CONTENT}")
         endif()
 
+        string(FIND "${MACRDP_FREERDP_H264_CONTENT}"
+            "MACRDP_VIDEOTOOLBOX_BRIDGE_ACTIVE_LOG_V2"
+            MACRDP_VIDEOTOOLBOX_BRIDGE_ACTIVE_LOG_V2_OFFSET)
+        if(MACRDP_VIDEOTOOLBOX_BRIDGE_ACTIVE_LOG_V2_OFFSET EQUAL -1)
+            # Migrate the first version, which was intentionally placed after
+            # the encoder fast path and would have logged on every frame.
+            string(REPLACE
+                "\tif (sys->macrdpVideoToolboxEncoder)\n\t{\n\t\tWLog_Print(h264->log, WLOG_INFO,\n\t\t           \"Using direct macOS VideoToolbox H264 bridge (%ux%u @ %u fps)\",\n\t\t           h264->width, h264->height, h264->FrameRate);\n\t\treturn TRUE;\n\t}\n\t/* MACRDP_VIDEOTOOLBOX_BRIDGE_ACTIVE_LOG */"
+                "\tif (sys->macrdpVideoToolboxEncoder)\n\t\treturn TRUE;"
+                MACRDP_FREERDP_H264_CONTENT
+                "${MACRDP_FREERDP_H264_CONTENT}")
+
+            string(REPLACE
+                "\t\tif (sys->macrdpVideoToolboxEncoder)\n\t\t\treturn TRUE;\n\n\t\tWLog_Print(h264->log, WLOG_WARN,"
+                "\t\tif (sys->macrdpVideoToolboxEncoder)\n\t\t{\n\t\t\tWLog_Print(h264->log, WLOG_INFO,\n\t\t\t           \"Using direct macOS VideoToolbox H264 bridge (%ux%u @ %u fps)\",\n\t\t\t           h264->width, h264->height, h264->FrameRate);\n\t\t\t/* MACRDP_VIDEOTOOLBOX_BRIDGE_ACTIVE_LOG_V2 */\n\t\t\treturn TRUE;\n\t\t}\n\n\t\tWLog_Print(h264->log, WLOG_WARN,"
+                MACRDP_FREERDP_H264_CONTENT
+                "${MACRDP_FREERDP_H264_CONTENT}")
+
+            string(FIND "${MACRDP_FREERDP_H264_CONTENT}"
+                "MACRDP_VIDEOTOOLBOX_BRIDGE_ACTIVE_LOG_V2"
+                MACRDP_VIDEOTOOLBOX_BRIDGE_ACTIVE_LOG_V2_OFFSET)
+            if(MACRDP_VIDEOTOOLBOX_BRIDGE_ACTIVE_LOG_V2_OFFSET EQUAL -1)
+                message(FATAL_ERROR
+                    "Unable to add the direct VideoToolbox activation log")
+            endif()
+            file(WRITE "${MACRDP_FREERDP_H264_SOURCE}" "${MACRDP_FREERDP_H264_CONTENT}")
+        endif()
+
         string(FIND "${MACRDP_FREERDP_H264_CONTENT}" "MACRDP_VIDEOTOOLBOX_BRIDGE_COMPRESS"
             MACRDP_VIDEOTOOLBOX_BRIDGE_COMPRESS_OFFSET)
         if(MACRDP_VIDEOTOOLBOX_BRIDGE_COMPRESS_OFFSET EQUAL -1)
@@ -413,6 +453,48 @@ if(EXISTS "${MACRDP_FREERDP_H264_SOURCE}")
     endif()
 endif()
 
+# The shadow client can resize the primary surface while the macOS capture
+# thread is copying a frame. Upstream's resize helper does not take the
+# surface lock, so patch the pinned source to share the same synchronization.
+set(MACRDP_FREERDP_SHADOW_SURFACE_SOURCE
+    "${freerdp_SOURCE_DIR}/server/shadow/shadow_surface.c")
+if(EXISTS "${MACRDP_FREERDP_SHADOW_SURFACE_SOURCE}")
+    file(READ "${MACRDP_FREERDP_SHADOW_SURFACE_SOURCE}" MACRDP_SHADOW_SURFACE_CONTENT)
+    string(FIND "${MACRDP_SHADOW_SURFACE_CONTENT}" "MACRDP_SURFACE_RESIZE_LOCK"
+        MACRDP_SURFACE_RESIZE_LOCK_OFFSET)
+    if(MACRDP_SURFACE_RESIZE_LOCK_OFFSET EQUAL -1)
+        string(REPLACE
+            "\tif (!surface)\n\t\treturn FALSE;\n\n\tif ((width == surface->width) && (height == surface->height))"
+            "\tif (!surface)\n\t\treturn FALSE;\n\n\tEnterCriticalSection(&(surface->lock));\n\n\tif ((width == surface->width) && (height == surface->height))"
+            MACRDP_SHADOW_SURFACE_CONTENT
+            "${MACRDP_SHADOW_SURFACE_CONTENT}")
+        string(REPLACE
+            "\t\tsurface->y = y;\n\t\treturn TRUE;"
+            "\t\tsurface->y = y;\n\t\tLeaveCriticalSection(&(surface->lock));\n\t\treturn TRUE;"
+            MACRDP_SHADOW_SURFACE_CONTENT
+            "${MACRDP_SHADOW_SURFACE_CONTENT}")
+        string(REPLACE
+            "\t\tsurface->data = buffer;\n\t\treturn TRUE;"
+            "\t\tsurface->data = buffer;\n\t\tLeaveCriticalSection(&(surface->lock));\n\t\treturn TRUE;"
+            MACRDP_SHADOW_SURFACE_CONTENT
+            "${MACRDP_SHADOW_SURFACE_CONTENT}")
+        string(REPLACE
+            "\t}\n\n\treturn FALSE;\n}"
+            "\t}\n\n\tLeaveCriticalSection(&(surface->lock));\n\treturn FALSE;\n}\n\n/* MACRDP_SURFACE_RESIZE_LOCK */"
+            MACRDP_SHADOW_SURFACE_CONTENT
+            "${MACRDP_SHADOW_SURFACE_CONTENT}")
+
+        string(FIND "${MACRDP_SHADOW_SURFACE_CONTENT}" "MACRDP_SURFACE_RESIZE_LOCK"
+            MACRDP_SURFACE_RESIZE_LOCK_OFFSET)
+        if(MACRDP_SURFACE_RESIZE_LOCK_OFFSET EQUAL -1)
+            message(FATAL_ERROR
+                "Unable to add the shadow surface resize lock")
+        endif()
+        file(WRITE "${MACRDP_FREERDP_SHADOW_SURFACE_SOURCE}"
+            "${MACRDP_SHADOW_SURFACE_CONTENT}")
+    endif()
+endif()
+
 set(MACRDP_FREERDP_SHADOW_SOURCES
     ${freerdp_SOURCE_DIR}/server/shadow/shadow_client.c
     ${freerdp_SOURCE_DIR}/server/shadow/shadow_lobby.c
@@ -509,6 +591,11 @@ add_test(
     NAME h264_encoder
     COMMAND macrdp-cpp-encoder-test
         ${CMAKE_CURRENT_BINARY_DIR}/encoder-test.h264
+)
+
+add_test(
+    NAME display_dimensions
+    COMMAND macrdp-display-dimensions-test
 )
 
 if(MACRDP_FREERDP_WITH_FFMPEG)

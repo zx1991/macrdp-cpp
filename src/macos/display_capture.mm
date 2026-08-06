@@ -146,31 +146,58 @@ bool copy_sample_buffer(CMSampleBufferRef sample_buffer, macrdp::Frame& frame) {
     return true;
 }
 
+} // namespace
+
+namespace macrdp {
+
+std::pair<std::uint32_t, std::uint32_t> display_capture_output_size(
+    std::uint32_t native_width,
+    std::uint32_t native_height,
+    std::uint32_t max_width,
+    std::uint32_t max_height) noexcept {
+    if (native_width == 0 || native_height == 0) {
+        return {0, 0};
+    }
+
+    const double width_scale = max_width == 0
+        ? 1.0
+        : static_cast<double>(max_width) / static_cast<double>(native_width);
+    const double height_scale = max_height == 0
+        ? 1.0
+        : static_cast<double>(max_height) / static_cast<double>(native_height);
+    const double scale = std::min({1.0, width_scale, height_scale});
+    if (scale >= 1.0) {
+        return {native_width, native_height};
+    }
+
+    const auto scaled_width = static_cast<std::uint32_t>(
+        std::max(1.0, std::floor(static_cast<double>(native_width) * scale)));
+    const auto scaled_height = static_cast<std::uint32_t>(
+        std::max(1.0, std::floor(static_cast<double>(native_height) * scale)));
+    return {scaled_width, scaled_height};
+}
+
+} // namespace macrdp
+
+namespace {
+
 std::pair<std::size_t, std::size_t> output_size(
     CGDirectDisplayID display_id,
     const macrdp::DisplayCaptureOptions& options) {
     std::size_t width = CGDisplayPixelsWide(display_id);
     std::size_t height = CGDisplayPixelsHigh(display_id);
-    if (width == 0 || height == 0) {
+    if (width == 0 || height == 0
+        || width > std::numeric_limits<std::uint32_t>::max()
+        || height > std::numeric_limits<std::uint32_t>::max()) {
         return {0, 0};
     }
 
-    const double width_scale = options.max_width == 0
-        ? 1.0
-        : static_cast<double>(options.max_width) / static_cast<double>(width);
-    const double height_scale = options.max_height == 0
-        ? 1.0
-        : static_cast<double>(options.max_height) / static_cast<double>(height);
-    const double scale = std::min({1.0, width_scale, height_scale});
-    if (scale >= 1.0) {
-        return {width, height};
-    }
-
-    const auto scaled_width = static_cast<std::size_t>(
-        std::max(1.0, std::floor(static_cast<double>(width) * scale)));
-    const auto scaled_height = static_cast<std::size_t>(
-        std::max(1.0, std::floor(static_cast<double>(height) * scale)));
-    return {scaled_width, scaled_height};
+    const auto dimensions = macrdp::display_capture_output_size(
+        static_cast<std::uint32_t>(width),
+        static_cast<std::uint32_t>(height),
+        options.max_width,
+        options.max_height);
+    return {dimensions.first, dimensions.second};
 }
 
 } // namespace

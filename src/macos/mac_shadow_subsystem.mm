@@ -112,9 +112,23 @@ bool display_dimensions(std::uint32_t& width, std::uint32_t& height) {
 }
 
 UINT32 mac_shadow_enum_monitors(MONITOR_DEF* monitors, UINT32 max_monitors) {
-    std::uint32_t width = 0;
-    std::uint32_t height = 0;
-    if (!display_dimensions(width, height)) {
+    std::uint32_t native_width = 0;
+    std::uint32_t native_height = 0;
+    if (!display_dimensions(native_width, native_height)) {
+        return 0;
+    }
+
+    CaptureConfig capture_config;
+    {
+        std::lock_guard lock(g_capture_config_mutex);
+        capture_config = g_capture_config;
+    }
+    const auto [width, height] = macrdp::display_capture_output_size(
+        native_width,
+        native_height,
+        capture_config.max_width,
+        capture_config.max_height);
+    if (width == 0 || height == 0) {
         return 0;
     }
 
@@ -366,17 +380,17 @@ bool copy_frame_to_surface(MacShadowSubsystem* subsystem, const macrdp::Frame& f
     }
 
     rdpShadowSurface* surface = subsystem->common.server->surface;
-    if (surface->width == 0 || surface->height == 0
-        || surface->width > UINT16_MAX || surface->height > UINT16_MAX
-        || surface->data == nullptr
-        || surface->scanline < static_cast<UINT32>(surface->width) * 4) {
-        return false;
-    }
-
     const auto copy_started = std::chrono::steady_clock::now();
     EnterCriticalSection(&surface->lock);
     const auto surface_width = surface->width;
     const auto surface_height = surface->height;
+    if (surface_width == 0 || surface_height == 0
+        || surface_width > UINT16_MAX || surface_height > UINT16_MAX
+        || surface->data == nullptr
+        || surface->scanline < static_cast<UINT32>(surface_width) * 4) {
+        LeaveCriticalSection(&surface->lock);
+        return false;
+    }
     if (frame.width != subsystem->last_frame_width
         || frame.height != subsystem->last_frame_height
         || surface_width != subsystem->last_surface_width

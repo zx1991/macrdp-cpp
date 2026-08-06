@@ -5,6 +5,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <utility>
 
 #include "macrdp/frame.hpp"
 
@@ -17,6 +18,14 @@ struct DisplayCaptureOptions {
     std::uint32_t frame_rate = 30;
     bool show_cursor = false;
 };
+
+// Return the native display size reduced to fit both optional limits while
+// preserving aspect ratio. A zero limit means that dimension is unbounded.
+[[nodiscard]] std::pair<std::uint32_t, std::uint32_t> display_capture_output_size(
+    std::uint32_t native_width,
+    std::uint32_t native_height,
+    std::uint32_t max_width,
+    std::uint32_t max_height) noexcept;
 
 // C++-only interface for the macOS capture implementation. The implementation
 // uses ScreenCaptureKit, but no Apple framework types cross this boundary.

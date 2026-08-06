@@ -98,6 +98,9 @@ The server logs the captured frame size and RDP surface size once per change.
 They should normally match. A `Slow frame update` warning reports the time
 spent copying a frame and waiting for the RDP client to consume and send it;
 the latter is the useful indicator when the remote image is delayed.
+When the direct encoder is active, the log also contains `Using direct macOS
+VideoToolbox H264 bridge`. If that line is replaced by a fallback warning,
+the session is using software H.264 encoding.
 
 The first server start requires Screen Recording permission. Grant it to the
 terminal or executable in System Settings > Privacy & Security > Screen
