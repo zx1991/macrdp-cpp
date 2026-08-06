@@ -331,6 +331,12 @@ bool H264Encoder::Impl::initialize(const Frame& frame) {
         session,
         kVTCompressionPropertyKey_AllowFrameReordering,
         kCFBooleanFalse);
+    // Keep the synchronous wrapper from waiting on an ever-growing encoder
+    // queue. The RDP path needs output for each submitted frame promptly.
+    (void)set_number_property(
+        session,
+        kVTCompressionPropertyKey_MaxFrameDelayCount,
+        0);
     (void)VTSessionSetProperty(
         session,
         kVTCompressionPropertyKey_ProfileLevel,
@@ -466,12 +472,6 @@ bool H264Encoder::Impl::encode(
 
     if (encode_status != noErr) {
         set_error(status_description(encode_status, "VTCompressionSessionEncodeFrame"));
-        return false;
-    }
-
-    const auto complete_status = VTCompressionSessionCompleteFrames(session, kCMTimeInvalid);
-    if (complete_status != noErr) {
-        set_error(status_description(complete_status, "VTCompressionSessionCompleteFrames"));
         return false;
     }
 

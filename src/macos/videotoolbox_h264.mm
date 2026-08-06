@@ -389,6 +389,12 @@ extern "C" macrdp_vt_h264_encoder* macrdp_vt_h264_encoder_new(
         encoder->session,
         kVTCompressionPropertyKey_AllowFrameReordering,
         kCFBooleanFalse);
+    // The RDP codec API is synchronous. Do not let VideoToolbox build an
+    // unbounded compression window while the client thread is handling input.
+    (void)set_number_property(
+        encoder->session,
+        kVTCompressionPropertyKey_MaxFrameDelayCount,
+        0);
     (void)VTSessionSetProperty(
         encoder->session,
         kVTCompressionPropertyKey_ProfileLevel,
@@ -496,13 +502,6 @@ extern "C" int macrdp_vt_h264_encoder_encode(
         return -1;
     }
 
-    const auto complete_status = VTCompressionSessionCompleteFrames(
-        encoder->session,
-        kCMTimeInvalid);
-    if (complete_status != noErr) {
-        set_error(encoder, status_description(complete_status, "VTCompressionSessionCompleteFrames"));
-        return -1;
-    }
     std::lock_guard lock(encoder->mutex);
     if (!encoder->error.empty()) {
         return -1;
