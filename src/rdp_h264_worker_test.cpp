@@ -48,6 +48,21 @@ bool run_worker_failure_cycle(macrdp_h264_worker* worker, const std::vector<BYTE
     return valid;
 }
 
+bool expect_worker_stats(const macrdp_h264_worker* worker, UINT64 expected_jobs) {
+    macrdp_h264_worker_stats stats{};
+    macrdp_h264_worker_get_stats(worker, &stats);
+    return expect(stats.submitted == expected_jobs,
+                  "worker statistics reported the wrong submission count")
+        && expect(stats.completed == expected_jobs,
+                  "worker statistics reported the wrong completion count")
+        && expect(stats.encodeTimeMsTotal >= stats.lastEncodeTimeMs,
+                  "worker statistics reported an invalid total encode time")
+        && expect(stats.encodeTimeMsMax >= stats.lastEncodeTimeMs,
+                   "worker statistics reported an invalid maximum encode time")
+        && expect(stats.outputBytes == 0,
+                   "failed worker jobs unexpectedly reported encoded output");
+}
+
 } // namespace
 
 int main() {
@@ -64,6 +79,7 @@ int main() {
     const RECTANGLE_16 region{0, 0, 4, 4};
     bool ok = true;
     ok = run_worker_failure_cycle(worker, frame, region) && ok;
+    ok = expect_worker_stats(worker, 1) && ok;
 
     const int invalid_status = macrdp_h264_worker_submit(
         worker,
@@ -78,6 +94,7 @@ int main() {
     ok = expect(invalid_status == -1, "short frame was accepted") && ok;
 
     ok = run_worker_failure_cycle(worker, frame, region) && ok;
+    ok = expect_worker_stats(worker, 2) && ok;
     macrdp_h264_worker_free(worker);
     return ok ? 0 : 1;
 }

@@ -5,6 +5,7 @@
 #include "shadow_encoder.h"
 
 #include <algorithm>
+#include <chrono>
 #include <condition_variable>
 #include <cstdint>
 #include <cstdlib>
@@ -170,6 +171,8 @@ struct macrdp_h264_worker {
             macrdp_h264_encoded_frame encoded{};
             encoded.width = current.width;
             encoded.height = current.height;
+            const auto encode_started = std::chrono::steady_clock::now();
+            UINT64 output_bytes = 0;
 
             if (encoder == nullptr || encoder->h264 == nullptr) {
                 encoded.failed = TRUE;
@@ -193,6 +196,7 @@ struct macrdp_h264_worker {
                 } else if (status > 0) {
                     encoded.hasData = TRUE;
                     encoded.avc420.length = packet_size;
+                    output_bytes = packet_size;
                     if (!copy_packet(packet, packet_size, &encoded.avc420.data)) {
                         encoded.failed = TRUE;
                         encoded.hasData = FALSE;
@@ -232,6 +236,7 @@ struct macrdp_h264_worker {
                         + packet_size;
                     encoded.avc444.bitstream[0].length = packet_size;
                     encoded.avc444.bitstream[1].length = auxiliary_packet_size;
+                    output_bytes = static_cast<UINT64>(packet_size) + auxiliary_packet_size;
                     if ((packet_size > 0
                          && !copy_packet(packet, packet_size, &encoded.avc444.bitstream[0].data))
                         || (auxiliary_packet_size > 0
@@ -246,6 +251,8 @@ struct macrdp_h264_worker {
                 encoded.failed = TRUE;
             }
 
+            const auto encode_elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - encode_started);
             std::lock_guard lock(mutex);
             if (stopping) {
                 free_result(encoded);
@@ -254,6 +261,12 @@ struct macrdp_h264_worker {
             result = encoded;
             completion = TRUE;
             busy = FALSE;
+            const auto encode_time_ms = static_cast<UINT64>(encode_elapsed.count());
+            ++stats.completed;
+            stats.encodeTimeMsTotal += encode_time_ms;
+            stats.encodeTimeMsMax = std::max(stats.encodeTimeMsMax, encode_time_ms);
+            stats.lastEncodeTimeMs = encode_time_ms;
+            stats.outputBytes += output_bytes;
             (void)SetEvent(done_event);
         }
     }
@@ -280,6 +293,7 @@ struct macrdp_h264_worker {
     BOOL completion = FALSE;
     BOOL busy = FALSE;
     BOOL stopping = FALSE;
+    macrdp_h264_worker_stats stats{};
 };
 
 extern "C" macrdp_h264_worker* macrdp_h264_worker_new(rdpShadowEncoder* encoder) {
@@ -319,6 +333,20 @@ extern "C" BOOL macrdp_h264_worker_has_completion(const macrdp_h264_worker* work
     }
     std::lock_guard lock(worker->mutex);
     return worker->completion;
+}
+
+extern "C" void macrdp_h264_worker_get_stats(
+    const macrdp_h264_worker* worker,
+    macrdp_h264_worker_stats* stats) {
+    if (stats == nullptr) {
+        return;
+    }
+    std::memset(stats, 0, sizeof(*stats));
+    if (worker == nullptr) {
+        return;
+    }
+    std::lock_guard lock(worker->mutex);
+    *stats = worker->stats;
 }
 
 extern "C" int macrdp_h264_worker_submit(
@@ -406,6 +434,7 @@ extern "C" int macrdp_h264_worker_submit(
         }
         worker->job = std::move(next);
         worker->busy = TRUE;
+        ++worker->stats.submitted;
     }
     worker->condition.notify_one();
     return 1;

@@ -23,12 +23,25 @@ typedef struct
 	RDPGFX_AVC444_BITMAP_STREAM avc444;
 } macrdp_h264_encoded_frame;
 
+typedef struct
+{
+	UINT64 submitted;
+	UINT64 completed;
+	UINT64 encodeTimeMsTotal;
+	UINT64 encodeTimeMsMax;
+	UINT64 lastEncodeTimeMs;
+	UINT64 outputBytes;
+} macrdp_h264_worker_stats;
+
 macrdp_h264_worker* macrdp_h264_worker_new(rdpShadowEncoder* encoder);
 void macrdp_h264_worker_free(macrdp_h264_worker* worker);
 
 HANDLE macrdp_h264_worker_event(const macrdp_h264_worker* worker);
 BOOL macrdp_h264_worker_busy(const macrdp_h264_worker* worker);
 BOOL macrdp_h264_worker_has_completion(const macrdp_h264_worker* worker);
+void macrdp_h264_worker_get_stats(
+	const macrdp_h264_worker* worker,
+	macrdp_h264_worker_stats* stats);
 
 /* Return 1 when accepted, 0 when a previous frame is still in flight, and
  * -1 for invalid input or an internal worker failure. */

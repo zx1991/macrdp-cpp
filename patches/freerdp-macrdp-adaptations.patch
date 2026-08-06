@@ -1,6 +1,6 @@
 --- a/include/freerdp/server/shadow.h
 +++ b/include/freerdp/server/shadow.h
-@@ -120,6 +120,14 @@
+@@ -120,6 +120,16 @@
  		wMessageQueue* MsgQueue;
  		CRITICAL_SECTION lock;
  		REGION16 invalidRegion;
@@ -11,6 +11,8 @@
 +		UINT32 macrdpFrameDataStride;
 +		void* macrdpH264Worker;
 +		void* macrdpH264Pending;
++		UINT64 macrdpH264DeferredFrames;
++		UINT64 macrdpH264LastDiagnostics;
 +		/* MACRDP_CLIENT_FRAME_SNAPSHOT */
  		rdpShadowServer* server;
  		rdpShadowEncoder* encoder;
@@ -750,7 +752,7 @@
  	if (shadow_encoder_reset(client->encoder) < 0)
  	{
  		WLog_ERR(TAG, "Failed to reset encoder");
-@@ -1299,11 +1344,135 @@
+@@ -1299,11 +1344,137 @@
  	return TRUE;
  }
  #endif
@@ -801,6 +803,7 @@
 +    pending = (MACRDP_H264_PENDING*)client->macrdpH264Pending;
 +    if (pending && macrdp_h264_worker_busy((macrdp_h264_worker*)client->macrdpH264Worker))
 +    {
++        client->macrdpH264DeferredFrames++;
 +        shadow_client_h264_defer(pending, pSrcData, nSrcStep, SrcFormat, nWidth, nHeight,
 +                                 encodeRegion);
 +        return TRUE;
@@ -843,6 +846,7 @@
 +        MACRDP_H264_PENDING* active = (MACRDP_H264_PENDING*)client->macrdpH264Pending;
 +        if (active)
 +        {
++            client->macrdpH264DeferredFrames++;
 +            shadow_client_h264_defer(active, pSrcData, nSrcStep, SrcFormat, nWidth, nHeight,
 +                                     encodeRegion);
 +            free(pending);
@@ -1064,7 +1068,7 @@
  	}
  
  #endif
-@@ -1787,6 +2020,84 @@
+@@ -1787,6 +2020,105 @@
  
  	return shadow_client_send_uncompressed(client, pSrcData, nSrcStep, SrcFormat, &cmd, &cmdstart,
  	                                       &cmdend);
@@ -1083,6 +1087,7 @@
 +    RECTANGLE_16 retryRegion = WINPR_C_ARRAY_INIT;
 +    UINT error = CHANNEL_RC_OK;
 +    int takeStatus = 0;
++    macrdp_h264_worker_stats stats = { 0 };
 +
 +    if (!client || !client->macrdpH264Worker ||
 +        !macrdp_h264_worker_has_completion((macrdp_h264_worker*)client->macrdpH264Worker))
@@ -1091,6 +1096,26 @@
 +    pending = (MACRDP_H264_PENDING*)client->macrdpH264Pending;
 +    takeStatus = macrdp_h264_worker_take(
 +        (macrdp_h264_worker*)client->macrdpH264Worker, &encoded);
++    macrdp_h264_worker_get_stats(
++        (macrdp_h264_worker*)client->macrdpH264Worker, &stats);
++    const ULONGLONG diagnosticsNow = GetTickCount64();
++    if (stats.completed > 0 &&
++        (client->macrdpH264LastDiagnostics == 0 ||
++         diagnosticsNow - client->macrdpH264LastDiagnostics >= 5000))
++    {
++        const UINT64 averageEncodeMs = stats.encodeTimeMsTotal / stats.completed;
++        WLog_INFO(TAG,
++                  "H.264 pipeline: submitted=%llu completed=%llu coalesced=%llu "
++                  "encode_last=%llums encode_avg=%llums encode_max=%llums output=%llu bytes",
++                  (unsigned long long)stats.submitted,
++                  (unsigned long long)stats.completed,
++                  (unsigned long long)client->macrdpH264DeferredFrames,
++                  (unsigned long long)stats.lastEncodeTimeMs,
++                  (unsigned long long)averageEncodeMs,
++                  (unsigned long long)stats.encodeTimeMsMax,
++                  (unsigned long long)stats.outputBytes);
++        client->macrdpH264LastDiagnostics = diagnosticsNow;
++    }
 +    if (takeStatus < 0)
 +    {
 +        WLog_ERR(TAG, "H.264 worker failed to encode a frame");
