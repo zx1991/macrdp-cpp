@@ -1,6 +1,6 @@
 --- a/include/freerdp/server/shadow.h
 +++ b/include/freerdp/server/shadow.h
-@@ -120,6 +120,12 @@
+@@ -120,6 +120,14 @@
  		wMessageQueue* MsgQueue;
  		CRITICAL_SECTION lock;
  		REGION16 invalidRegion;
@@ -9,11 +9,13 @@
 +		UINT32 macrdpFrameDataWidth;
 +		UINT32 macrdpFrameDataHeight;
 +		UINT32 macrdpFrameDataStride;
++		void* macrdpH264Worker;
++		void* macrdpH264Pending;
 +		/* MACRDP_CLIENT_FRAME_SNAPSHOT */
  		rdpShadowServer* server;
  		rdpShadowEncoder* encoder;
  		rdpShadowSubsystem* subsystem;
-@@ -203,6 +209,8 @@
+@@ -203,6 +211,8 @@
  
  		CRITICAL_SECTION lock;
  		REGION16 invalidRegion;
@@ -60,10 +62,11 @@
  	if (sys->codecEncoderContext)
  	{
  #if LIBAVCODEC_VERSION_INT >= AV_VERSION_INT(55, 69, 100)
-@@ -191,6 +206,32 @@
+@@ -190,7 +205,33 @@
+ 	sys = (H264_CONTEXT_LIBAVCODEC*)h264->pSystemData;
  	if (!sys || !sys->codecEncoder)
  		return FALSE;
- 
++
 +#ifdef MACRDP_USE_VIDEOTOOLBOX_H264_ENCODING
 +	if (sys->macrdpVideoToolboxEncoder)
 +		return TRUE;
@@ -81,7 +84,7 @@
 +			/* MACRDP_VIDEOTOOLBOX_BRIDGE_ACTIVE_LOG_V2 */
 +			return TRUE;
 +		}
-+
+ 
 +		WLog_Print(h264->log, WLOG_WARN,
 +		           "Direct VideoToolbox H264 encoder unavailable, falling back to FFmpeg");
 +		sys->codecEncoder = avcodec_find_encoder(AV_CODEC_ID_H264);
@@ -149,10 +152,11 @@
  #if LIBAVCODEC_VERSION_INT < AV_VERSION_INT(58, 133, 100)
  	sys->packet = &sys->bufferpacket;
  	av_packet_unref(sys->packet);
-@@ -507,6 +583,27 @@
+@@ -506,7 +582,28 @@
+ 	}
  
  	status = avcodec_receive_packet(sys->codecEncoderContext, sys->packet);
- 
++
 +	if (status == AVERROR(EAGAIN))
 +	{
 +		/* MACRDP_EAGAIN_POLL: let asynchronous VideoToolbox output settle. */
@@ -164,7 +168,7 @@
 +			status = avcodec_receive_packet(sys->codecEncoderContext, sys->packet);
 +		}
 +	}
-+
+ 
 +	if (status == AVERROR(EAGAIN))
 +	{
 +		/* MACRDP_EAGAIN_FIX: no packet is ready for this input yet. */
@@ -215,7 +219,7 @@
  struct rdp_transport
  {
  	TRANSPORT_LAYER layer;
-@@ -89,6 +101,9 @@
+@@ -89,6 +102,9 @@
  	CRITICAL_SECTION ReadLock;
  	BOOL haveWriteLock;
  	CRITICAL_SECTION WriteLock;
@@ -225,10 +229,11 @@
  	UINT64 written;
  	HANDLE rereadEvent;
  	BOOL haveMoreBytesToRead;
-@@ -105,6 +120,139 @@
+@@ -104,7 +120,140 @@
+ 	rdpTransportLayer pub;
  	void* userContextShadowPtr;
  } rdpTransportLayerInt;
- 
++
 +static void transport_write_queue_clear(rdpTransport* transport)
 +{
 +	rdpTransportWriteItem* item = transport->writeQueueHead;
@@ -319,7 +324,7 @@
 +					continue;
 +				}
 +			}
-+
+ 
 +			ERR_clear_error();
 +			const size_t remaining = item->length - item->offset;
 +			const size_t chunk =
@@ -365,7 +370,7 @@
  static const char* where2str(int where, char* ibuffer, size_t ilen)
  {
  	if (!ibuffer || (ilen < 2))
-@@ -1228,6 +1368,10 @@
+@@ -1228,6 +1377,10 @@
  		size_t length = Stream_GetPosition(s);
  		size_t writtenlength = length;
  		Stream_ResetPosition(s);
@@ -376,7 +381,7 @@
  
  		if (length > 0)
  		{
-@@ -1235,10 +1376,82 @@
+@@ -1235,10 +1388,82 @@
  			WLog_Packet(transport->log, WLOG_TRACE, Stream_Buffer(s), length, WLOG_PACKET_OUTBOUND);
  		}
  
@@ -460,7 +465,7 @@
  			status = BIO_write(transport->frontBio, Stream_ConstPointer(s), towrite);
  
  			if (status <= 0)
-@@ -1256,8 +1456,17 @@
+@@ -1256,8 +1481,17 @@
  				/* non-blocking can live with blocked IOs */
  				if (!transport->blocking)
  				{
@@ -480,7 +485,7 @@
  				}
  
  				if (BIO_wait_write(transport->frontBio, 100) < 0)
-@@ -1270,6 +1479,18 @@
+@@ -1270,6 +1504,18 @@
  				continue;
  			}
  
@@ -499,7 +504,7 @@
  			WINPR_ASSERT(context->settings);
  			if (transport->blocking || context->settings->WaitForOutputBufferFlush)
  			{
-@@ -1290,18 +1509,21 @@
+@@ -1290,18 +1536,21 @@
  					}
  				}
  			}
@@ -529,7 +534,7 @@
  		transport->written += writtenlength;
  	}
  out_cleanup:
-@@ -1448,26 +1670,61 @@
+@@ -1448,26 +1697,61 @@
  
  BOOL transport_is_write_blocked(rdpTransport* transport)
  {
@@ -574,7 +579,7 @@
 +			status = 1;
 +			goto out;
 +		}
- 	}
++	}
 +	if (transport_write_queue_drain(transport, FALSE) < 0)
 +		goto fail;
 +	if (BIO_write_blocked(transport->frontBio))
@@ -587,11 +592,11 @@
 +			status = 1;
 +			goto out;
 +		}
-+	}
- 
+ 	}
++
 +	status = transport->writeQueueHead != nullptr || BIO_write_blocked(transport->frontBio);
 +	goto out;
-+
+ 
 +fail:
 +	status = -1;
 +out:
@@ -600,7 +605,7 @@
  	return status;
  }
  
-@@ -1672,6 +1929,7 @@
+@@ -1672,6 +1956,7 @@
  
  	EnterCriticalSection(&(transport->ReadLock));
  	EnterCriticalSection(&(transport->WriteLock));
@@ -610,9 +615,46 @@
  		freerdp_tls_free(transport->tls);
 --- a/server/shadow/shadow_client.c
 +++ b/server/shadow/shadow_client.c
-@@ -242,6 +242,9 @@
+@@ -35,11 +35,27 @@
+ #include <freerdp/channels/drdynvc.h>
+ 
+ #include "shadow.h"
++#include <macrdp/rdp_h264_worker.h>
+ 
+ #define TAG CLIENT_TAG("shadow")
+ 
+ typedef struct
+ {
++	RDPGFX_SURFACE_COMMAND command;
++	RDPGFX_START_FRAME_PDU start;
++	RDPGFX_END_FRAME_PDU end;
++	RECTANGLE_16 retryRegion;
++	const BYTE* retrySource;
++	UINT32 retryStride;
++	UINT16 retryWidth;
++	UINT16 retryHeight;
++	UINT32 retryFormat;
++	BOOL retry;
++} MACRDP_H264_PENDING;
++
++static BOOL shadow_client_h264_wait_idle(rdpShadowClient* client);
++typedef struct
++{
+ 	BOOL gfxOpened;
+ 	BOOL gfxSurfaceCreated;
+ } SHADOW_GFX_STATUS;
+@@ -241,7 +257,18 @@
+ 	if (server && server->clients)
  		ArrayList_Remove(server->clients, (void*)client);
  
++	if (client->macrdpH264Worker)
++	{
++		(void)shadow_client_h264_wait_idle(client);
++		macrdp_h264_worker_free((macrdp_h264_worker*)client->macrdpH264Worker);
++		client->macrdpH264Worker = nullptr;
++	}
++	free(client->macrdpH264Pending);
++	client->macrdpH264Pending = nullptr;
  	shadow_encoder_free(client->encoder);
 +	free(client->macrdpFrameData);
 +	client->macrdpFrameData = nullptr;
@@ -620,7 +662,18 @@
  
  	/* Clear queued messages and free resource */
  	MessageQueue_Free(client->MsgQueue);
-@@ -414,10 +417,15 @@
+@@ -346,6 +373,10 @@
+ 	if (!(client->encoder = shadow_encoder_new(client)))
+ 		goto fail;
+ 
++	client->macrdpH264Worker = macrdp_h264_worker_new(client->encoder);
++	if (!client->macrdpH264Worker)
++		WLog_WARN(TAG, "H.264 worker unavailable; using client-thread encoding");
++	/* MACRDP_H264_WORKER_CONTEXT */
+ 	if (!ArrayList_Append(server->clients, (void*)client))
+ 		goto fail;
+ 
+@@ -414,10 +445,15 @@
  	WINPR_ASSERT(server->surface);
  	WINPR_ASSERT(settings);
  
@@ -640,7 +693,7 @@
  
  	if (server->shareSubRect)
  	{
-@@ -482,8 +490,11 @@
+@@ -482,8 +518,11 @@
  	WINPR_ASSERT(client->server);
  	WINPR_ASSERT(client->server->surface);
  
@@ -652,7 +705,147 @@
  
  	if (client->resizeRequested)
  	{
-@@ -1303,7 +1314,8 @@
+@@ -730,6 +769,12 @@
+ 	client->activated = TRUE;
+ 	client->inLobby = !(client->mayView);
+ 
++	if (!shadow_client_h264_wait_idle(client))
++	{
++		WLog_ERR(TAG, "Failed to stop H.264 worker before encoder reset");
++		return FALSE;
++	}
++	/* MACRDP_H264_RESET_BARRIER */
+ 	if (shadow_encoder_reset(client->encoder) < 0)
+ 	{
+ 		WLog_ERR(TAG, "Failed to reset encoder");
+@@ -1299,11 +1344,135 @@
+ 	return TRUE;
+ }
+ #endif
++
++static void shadow_client_h264_defer(MACRDP_H264_PENDING* pending, const BYTE* pSrcData,
++                                    UINT32 nSrcStep, UINT32 SrcFormat, UINT16 nWidth,
++                                    UINT16 nHeight, const RECTANGLE_16* encodeRegion)
++{
++    if (!pending || !encodeRegion)
++        return;
+ 
++    if (!pending->retry)
++        pending->retryRegion = *encodeRegion;
++    else
++    {
++        pending->retryRegion.left = MIN(pending->retryRegion.left, encodeRegion->left);
++        pending->retryRegion.top = MIN(pending->retryRegion.top, encodeRegion->top);
++        pending->retryRegion.right = MAX(pending->retryRegion.right, encodeRegion->right);
++        pending->retryRegion.bottom = MAX(pending->retryRegion.bottom, encodeRegion->bottom);
++    }
++
++    pending->retrySource = pSrcData;
++    pending->retryStride = nSrcStep;
++    pending->retryWidth = nWidth;
++    pending->retryHeight = nHeight;
++    pending->retryFormat = SrcFormat;
++    pending->retry = TRUE;
++}
++
++static BOOL shadow_client_queue_h264(rdpShadowClient* client, const BYTE* pSrcData,
++                                     UINT32 nSrcStep, UINT32 SrcFormat, UINT16 nWidth,
++                                     UINT16 nHeight, const RECTANGLE_16* encodeRegion,
++                                     RDPGFX_SURFACE_COMMAND* cmd,
++                                     const RDPGFX_START_FRAME_PDU* cmdstart,
++                                     const RDPGFX_END_FRAME_PDU* cmdend)
++{
++    MACRDP_H264_PENDING* pending = nullptr;
++    UINT32 codec = 0;
++    size_t rowBytes = 0;
++    size_t frameSize = 0;
++    const size_t rows = nHeight > 0 ? (size_t)nHeight - 1 : 0;
++    int submitStatus = 0;
++
++    if (!client || !pSrcData || !encodeRegion || !cmd || !cmdstart || !cmdend ||
++        !client->macrdpH264Worker || nWidth == 0 || nHeight == 0 || nSrcStep == 0)
++        return FALSE;
++
++    pending = (MACRDP_H264_PENDING*)client->macrdpH264Pending;
++    if (pending && macrdp_h264_worker_busy((macrdp_h264_worker*)client->macrdpH264Worker))
++    {
++        shadow_client_h264_defer(pending, pSrcData, nSrcStep, SrcFormat, nWidth, nHeight,
++                                 encodeRegion);
++        return TRUE;
++    }
++
++    if (pending)
++        return FALSE;
++
++    codec = cmd->codecId;
++    if (codec == RDPGFX_CODECID_AVC420)
++    {
++        if (shadow_encoder_prepare(client->encoder, FREERDP_CODEC_AVC420) < 0)
++            return FALSE;
++    }
++    else if (codec == RDPGFX_CODECID_AVC444 || codec == RDPGFX_CODECID_AVC444v2)
++    {
++        if (shadow_encoder_prepare(client->encoder, FREERDP_CODEC_AVC444) < 0)
++            return FALSE;
++    }
++    else
++        return FALSE;
++
++    rowBytes = (size_t)nWidth * 4U;
++    if (rowBytes > nSrcStep || rows > (SIZE_MAX - rowBytes) / nSrcStep)
++        return FALSE;
++    frameSize = rows * nSrcStep + rowBytes;
++
++    pending = (MACRDP_H264_PENDING*)calloc(1, sizeof(MACRDP_H264_PENDING));
++    if (!pending)
++        return FALSE;
++    pending->command = *cmd;
++    pending->start = *cmdstart;
++    pending->end = *cmdend;
++
++    submitStatus = macrdp_h264_worker_submit(
++        (macrdp_h264_worker*)client->macrdpH264Worker, pSrcData, frameSize, nSrcStep, nWidth,
++        nHeight, SrcFormat, codec, encodeRegion);
++    if (submitStatus == 0)
++    {
++        MACRDP_H264_PENDING* active = (MACRDP_H264_PENDING*)client->macrdpH264Pending;
++        if (active)
++        {
++            shadow_client_h264_defer(active, pSrcData, nSrcStep, SrcFormat, nWidth, nHeight,
++                                     encodeRegion);
++            free(pending);
++            return TRUE;
++        }
++    }
++    if (submitStatus < 1)
++    {
++        free(pending);
++        return FALSE;
++    }
++
++    client->macrdpH264Pending = pending;
++    return TRUE;
++}
++
++static BOOL shadow_client_h264_wait_idle(rdpShadowClient* client)
++{
++    macrdp_h264_encoded_frame encoded = { 0 };
++    BOOL waitStatus = TRUE;
++    int takeStatus = 0;
++
++    if (!client || !client->macrdpH264Worker)
++        return TRUE;
++
++    waitStatus = macrdp_h264_worker_wait_idle(
++        (macrdp_h264_worker*)client->macrdpH264Worker);
++    takeStatus = macrdp_h264_worker_take(
++        (macrdp_h264_worker*)client->macrdpH264Worker, &encoded);
++    macrdp_h264_encoded_frame_free(&encoded);
++    free(client->macrdpH264Pending);
++    client->macrdpH264Pending = nullptr;
++    return waitStatus && takeStatus >= 0;
++}
++
  WINPR_ATTR_NODISCARD
  static BOOL shadow_client_send_avc444(rdpShadowClient* client, const BYTE* pSrcData,
                                        UINT32 nSrcStep, UINT32 SrcFormat, UINT16 nWidth,
@@ -662,12 +855,16 @@
                                        const RDPGFX_START_FRAME_PDU* cmdstart,
                                        const RDPGFX_END_FRAME_PDU* cmdend)
  {
-@@ -1324,15 +1336,10 @@
+@@ -1324,15 +1493,14 @@
  		WLog_ERR(TAG, "Failed to prepare encoder FREERDP_CODEC_AVC444");
  		return FALSE;
  	}
 +	if (!encodeRegion)
 +		return FALSE;
++	if (client->macrdpH264Worker)
++		return shadow_client_queue_h264(client, pSrcData, nSrcStep, SrcFormat,
++		                                  nWidth, nHeight, encodeRegion, cmd, cmdstart,
++		                                  cmdend);
  
 -	WINPR_ASSERT(cmd->left <= UINT16_MAX);
 -	WINPR_ASSERT(cmd->top <= UINT16_MAX);
@@ -681,7 +878,7 @@
  	rc = avc444_compress(encoder->h264, pSrcData, SrcFormat, nSrcStep, nWidth, nHeight, version,
  	                     &regionRect, &avc444.LC, &avc444.bitstream[0].data,
  	                     &avc444.bitstream[0].length, &avc444.bitstream[1].data,
-@@ -1367,7 +1374,8 @@
+@@ -1367,7 +1535,8 @@
  WINPR_ATTR_NODISCARD
  static BOOL shadow_client_send_avc420(rdpShadowClient* client, const BYTE* pSrcData,
                                        UINT32 nSrcStep, UINT32 SrcFormat, UINT16 nWidth,
@@ -691,7 +888,7 @@
                                        const RDPGFX_START_FRAME_PDU* cmdstart,
                                        const RDPGFX_END_FRAME_PDU* cmdend)
  {
-@@ -1386,17 +1394,15 @@
+@@ -1386,17 +1555,22 @@
  		WLog_ERR(TAG, "Failed to prepare encoder FREERDP_CODEC_AVC420");
  		return FALSE;
  	}
@@ -706,6 +903,13 @@
 -	regionRect.top = (UINT16)cmd->top;
 -	regionRect.right = (UINT16)cmd->right;
 -	regionRect.bottom = (UINT16)cmd->bottom;
++	if (client->macrdpH264Worker)
++	{
++		cmd->codecId = RDPGFX_CODECID_AVC420;
++		return shadow_client_queue_h264(client, pSrcData, nSrcStep, SrcFormat,
++		                                  nWidth, nHeight, encodeRegion, cmd, cmdstart,
++		                                  cmdend);
++	}
 +	regionRect = *encodeRegion;
 +	const ULONGLONG encodeStarted = GetTickCount64();
  	rc = avc420_compress(encoder->h264, pSrcData, SrcFormat, nSrcStep, nWidth, nHeight, &regionRect,
@@ -715,7 +919,7 @@
  	if (rc < 0)
  	{
  		WLog_ERR(TAG, "avc420_compress failed");
-@@ -1408,8 +1414,14 @@
+@@ -1408,8 +1582,14 @@
  	{
  		cmd->codecId = RDPGFX_CODECID_AVC420;
  		cmd->extra = (void*)&avc420;
@@ -730,11 +934,10 @@
  		cmd->extra = nullptr;
  	}
  	free_h264_metablock(&avc420.meta);
-@@ -1684,7 +1696,53 @@
- 		return FALSE;
+@@ -1685,6 +1865,52 @@
  	return (client->confirmedCaps.flags & RDPGFX_CAPS_FLAG_AVC420_ENABLED) != 0;
  }
-+
+ 
 +static BOOL shadow_client_normalize_h264_region(const RECTANGLE_16* dirtyRegion, UINT16 width,
 +                                                UINT16 height, BOOL fullFrame,
 +                                                RECTANGLE_16* encodeRegion)
@@ -755,7 +958,7 @@
 +		encodeRegion->bottom = height;
 +		return TRUE;
 +	}
- 
++
 +	left = MIN((UINT32)dirtyRegion->left, (UINT32)width);
 +	top = MIN((UINT32)dirtyRegion->top, (UINT32)height);
 +	right = MIN((UINT32)dirtyRegion->right, (UINT32)width);
@@ -784,7 +987,7 @@
  /**
   * Function description
   *
-@@ -1693,12 +1751,14 @@
+@@ -1693,12 +1919,14 @@
  WINPR_ATTR_NODISCARD
  static BOOL shadow_client_send_surface_gfx(rdpShadowClient* client, const BYTE* pSrcData,
                                             UINT32 nSrcStep, UINT32 SrcFormat, UINT16 nXSrc,
@@ -800,7 +1003,7 @@
  	SYSTEMTIME sTime = WINPR_C_ARRAY_INIT;
  
  	if (!context || !pSrcData)
-@@ -1710,6 +1770,11 @@
+@@ -1710,6 +1938,11 @@
  	if (!settings || !encoder)
  		return FALSE;
  
@@ -812,7 +1015,7 @@
  	if (client->first_frame)
  	{
  		if (encoder->rfx)
-@@ -1756,14 +1821,14 @@
+@@ -1756,14 +1989,14 @@
  		{
  			cmd.codecId = GfxAVC444v2 ? RDPGFX_CODECID_AVC444v2 : RDPGFX_CODECID_AVC444;
  			return shadow_client_send_avc444(client, pSrcData, nSrcStep, SrcFormat, nWidth, nHeight,
@@ -829,7 +1032,92 @@
  	}
  
  #endif
-@@ -2205,10 +2270,70 @@
+@@ -1787,6 +2020,84 @@
+ 
+ 	return shadow_client_send_uncompressed(client, pSrcData, nSrcStep, SrcFormat, &cmd, &cmdstart,
+ 	                                       &cmdend);
++}
++
++static BOOL shadow_client_send_h264_completion(rdpShadowClient* client)
++{
++    MACRDP_H264_PENDING* pending = nullptr;
++    macrdp_h264_encoded_frame encoded = { 0 };
++    BOOL retry = FALSE;
++    const BYTE* retrySource = nullptr;
++    UINT32 retryStride = 0;
++    UINT16 retryWidth = 0;
++    UINT16 retryHeight = 0;
++    UINT32 retryFormat = 0;
++    RECTANGLE_16 retryRegion = WINPR_C_ARRAY_INIT;
++    UINT error = CHANNEL_RC_OK;
++    int takeStatus = 0;
++
++    if (!client || !client->macrdpH264Worker ||
++        !macrdp_h264_worker_has_completion((macrdp_h264_worker*)client->macrdpH264Worker))
++        return TRUE;
++
++    pending = (MACRDP_H264_PENDING*)client->macrdpH264Pending;
++    takeStatus = macrdp_h264_worker_take(
++        (macrdp_h264_worker*)client->macrdpH264Worker, &encoded);
++    if (takeStatus < 0)
++    {
++        WLog_ERR(TAG, "H.264 worker failed to encode a frame");
++        macrdp_h264_encoded_frame_free(&encoded);
++        free(pending);
++        client->macrdpH264Pending = nullptr;
++        return FALSE;
++    }
++
++    if (!pending)
++    {
++        macrdp_h264_encoded_frame_free(&encoded);
++        return TRUE;
++    }
++
++    retry = pending->retry;
++    retrySource = pending->retrySource;
++    retryStride = pending->retryStride;
++    retryWidth = pending->retryWidth;
++    retryHeight = pending->retryHeight;
++    retryFormat = pending->retryFormat;
++    retryRegion = pending->retryRegion;
++
++    if (takeStatus > 0)
++    {
++        pending->command.codecId = encoded.codecId;
++        if (encoded.codecId == RDPGFX_CODECID_AVC420)
++            pending->command.extra = (void*)&encoded.avc420;
++        else if (encoded.codecId == RDPGFX_CODECID_AVC444 ||
++                 encoded.codecId == RDPGFX_CODECID_AVC444v2)
++            pending->command.extra = (void*)&encoded.avc444;
++        else
++            error = ERROR_INVALID_DATA;
++
++        if (!error)
++        {
++            IFCALLRET(client->rdpgfx->SurfaceFrameCommand, error, client->rdpgfx,
++                      &pending->command, &pending->start, &pending->end);
++        }
++        pending->command.extra = nullptr;
++    }
++
++    macrdp_h264_encoded_frame_free(&encoded);
++    client->macrdpH264Pending = nullptr;
++    free(pending);
++    if (error)
++    {
++        WLog_ERR(TAG, "SurfaceFrameCommand failed with error %" PRIu32 "", error);
++        return FALSE;
++    }
++
++    if (retry)
++        return shadow_client_send_surface_gfx(client, retrySource, retryStride, retryFormat,
++                                               0, 0, retryWidth, retryHeight, &retryRegion);
++    return TRUE;
+ }
+ 
+ WINPR_ATTR_NODISCARD
+@@ -2205,10 +2516,70 @@
   *
   * @return TRUE on success (or nothing need to be updated)
   */
@@ -901,7 +1189,7 @@
  	INT64 nXSrc = 0;
  	INT64 nYSrc = 0;
  	INT64 nWidth = 0;
-@@ -2219,6 +2344,7 @@
+@@ -2219,6 +2590,7 @@
  	rdpShadowSurface* surface = nullptr;
  	REGION16 invalidRegion;
  	RECTANGLE_16 surfaceRect;
@@ -909,7 +1197,7 @@
  	const RECTANGLE_16* extents = nullptr;
  	BYTE* pSrcData = nullptr;
  	UINT32 nSrcStep = 0;
-@@ -2227,37 +2353,53 @@
+@@ -2227,37 +2599,53 @@
  	const RECTANGLE_16* rects = nullptr;
  
  	if (!context || !pStatus)
@@ -934,23 +1222,23 @@
 +		(void)shadow_multiclient_consume_nowait(updateSubscriber);
  		return FALSE;
 +	}
-+
+ 
+-	{
+-		EnterCriticalSection(&(client->lock));
+-		region16_init(&invalidRegion);
 +	region16_init(&invalidRegion);
 +	EnterCriticalSection(&(client->lock));
  
-+	const BOOL res = region16_copy(&invalidRegion, &(client->invalidRegion));
-+	region16_clear(&(client->invalidRegion));
-+	LeaveCriticalSection(&(client->lock));
-+	if (!res)
- 	{
--		EnterCriticalSection(&(client->lock));
--		region16_init(&invalidRegion);
--
 -		const BOOL res = region16_copy(&invalidRegion, &(client->invalidRegion));
 -		region16_clear(&(client->invalidRegion));
 -		LeaveCriticalSection(&(client->lock));
 -		if (!res)
 -			goto out;
++	const BOOL res = region16_copy(&invalidRegion, &(client->invalidRegion));
++	region16_clear(&(client->invalidRegion));
++	LeaveCriticalSection(&(client->lock));
++	if (!res)
++	{
 +		region16_uninit(&invalidRegion);
 +		(void)shadow_multiclient_consume_nowait(updateSubscriber);
 +		return FALSE;
@@ -972,7 +1260,7 @@
  	}
  
  	surfaceRect.left = 0;
-@@ -2267,27 +2409,40 @@
+@@ -2267,27 +2655,40 @@
  	surfaceRect.right = (UINT16)surface->width;
  	surfaceRect.bottom = (UINT16)surface->height;
  	if (!region16_intersect_rect(&invalidRegion, &invalidRegion, &surfaceRect))
@@ -1018,7 +1306,7 @@
  	SrcFormat = surface->format;
  
  	/* Move to new pSrcData / nXSrc / nYSrc according to sub rect */
-@@ -2299,6 +2454,14 @@
+@@ -2299,6 +2700,14 @@
  		subY = server->subRect.top;
  		nXSrc -= subX;
  		nYSrc -= subY;
@@ -1033,7 +1321,7 @@
  		WINPR_ASSERT(nXSrc >= 0);
  		WINPR_ASSERT(nXSrc <= UINT16_MAX);
  		WINPR_ASSERT(nYSrc >= 0);
-@@ -2306,6 +2469,21 @@
+@@ -2306,6 +2715,21 @@
  		pSrcData = &pSrcData[((UINT16)subY * nSrcStep) + ((UINT16)subX * 4U)];
  	}
  
@@ -1055,7 +1343,7 @@
  	// WLog_INFO(TAG, "shadow_client_send_surface_update: x: %" PRId64 " y: %" PRId64 " width: %"
  	// PRId64 " height: %" PRId64 " right: %" PRId64 " bottom: %" PRId64, 	nXSrc, nYSrc, nWidth,
  	// nHeight, nXSrc + nWidth, nYSrc + nHeight);
-@@ -2314,7 +2492,8 @@
+@@ -2314,7 +2738,8 @@
  	{
  		if (pStatus->gfxOpened && client->areGfxCapsReady)
  		{
@@ -1065,7 +1353,7 @@
  			nWidth = freerdp_settings_get_uint32(settings, FreeRDP_DesktopWidth);
  			nHeight = freerdp_settings_get_uint32(settings, FreeRDP_DesktopHeight);
  
-@@ -2323,10 +2502,10 @@
+@@ -2323,10 +2748,10 @@
  			{
  				/* Only init surface when we have h264 supported */
  				if (!(ret = shadow_client_rdpgfx_reset_graphic(client)))
@@ -1078,7 +1366,7 @@
  
  				pStatus->gfxSurfaceCreated = TRUE;
  			}
-@@ -2336,7 +2515,7 @@
+@@ -2336,7 +2761,7 @@
  			WINPR_ASSERT(nHeight >= 0);
  			WINPR_ASSERT(nHeight <= UINT16_MAX);
  			ret = shadow_client_send_surface_gfx(client, pSrcData, nSrcStep, SrcFormat, 0, 0,
@@ -1087,7 +1375,7 @@
  		}
  		else
  		{
-@@ -2370,9 +2549,6 @@
+@@ -2370,9 +2795,6 @@
  		                                       (UINT16)nYSrc, (UINT16)nWidth, (UINT16)nHeight);
  	}
  
@@ -1097,7 +1385,19 @@
  	return ret;
  }
  
-@@ -2451,17 +2627,23 @@
+@@ -2399,6 +2821,11 @@
+ 	if (!peer || !settings)
+ 		return FALSE;
+ 
++	if (!shadow_client_h264_wait_idle(client))
++	{
++		WLog_ERR(TAG, "Failed to stop H.264 worker before resize");
++		return FALSE;
++	}
+ 	/**
+ 	 * Unset client activated flag to avoid sending update message during
+ 	 * resize. DesktopResize will reactive the client and
+@@ -2451,17 +2878,23 @@
   */
  WINPR_ATTR_NODISCARD
  static inline BOOL shadow_client_no_surface_update(rdpShadowClient* client,
@@ -1122,21 +1422,42 @@
  	LeaveCriticalSection(&surface->lock);
  	return rc;
  }
-@@ -2650,7 +2832,13 @@
- 
- 	rc = peer->Initialize(peer);
+@@ -2614,6 +3047,7 @@
+ 	wMessage pointerAlphaMsg = WINPR_C_ARRAY_INIT;
+ 	wMessage audioVolumeMsg = WINPR_C_ARRAY_INIT;
+ 	HANDLE ChannelEvent = nullptr;
++	HANDLE H264WorkerEvent = nullptr;
+ 	void* UpdateSubscriber = nullptr;
+ 	HANDLE UpdateEvent = nullptr;
+ 	freerdp_peer* peer = nullptr;
+@@ -2652,6 +3086,12 @@
  	if (!rc)
-+		goto out;
-+
-+	if (!freerdp_settings_set_bool(settings, FreeRDP_WaitForOutputBufferFlush, FALSE))
  		goto out;
+ 
++	if (!freerdp_settings_set_bool(settings, FreeRDP_WaitForOutputBufferFlush, FALSE))
++		goto out;
 +	/* MACRDP_NONBLOCKING_OUTPUT */
 +	BOOL outputBlocked = FALSE;
 +	BOOL frameDeferred = FALSE;
- 
++
  	update = peer->context->update;
  	WINPR_ASSERT(update);
-@@ -2707,13 +2895,40 @@
+ 
+@@ -2699,6 +3139,13 @@
+ 		}
+ 		events[nCount++] = ChannelEvent;
+ 		events[nCount++] = MessageQueue_Event(MsgQueue);
++		if (client->macrdpH264Worker)
++		{
++			H264WorkerEvent = macrdp_h264_worker_event(
++				(macrdp_h264_worker*)client->macrdpH264Worker);
++			if (H264WorkerEvent)
++				events[nCount++] = H264WorkerEvent;
++		}
+ 
+ #if defined(CHANNEL_RDPGFX_SERVER)
+ 		HANDLE gfxevent = rdpgfx_server_get_event_handle(client->rdpgfx);
+@@ -2707,13 +3154,40 @@
  			events[nCount++] = gfxevent;
  #endif
  
@@ -1179,13 +1500,13 @@
  			/* The UpdateEvent means to start sending current frame. It is
  			 * triggered from subsystem implementation and it should ensure
  			 * that the screen and primary surface meta data (width, height,
-@@ -2721,8 +2936,22 @@
+@@ -2721,7 +3195,21 @@
  			 * (at shadow_multiclient_consume). As best practice, subsystem
  			 * implementation should invoke shadow_subsystem_frame_update which
  			 * triggers the event and then wait for completion */
 -			if (client->activated && !client->suppressOutput)
 +			if (outputBlocked && updatePending)
- 			{
++			{
 +				/* MACRDP_SKIP_BLOCKED_FRAME */
 +				/* Preserve the dirty region without doing another expensive encode
 +				 * while the non-blocking transport is backed up. Input is still
@@ -1199,11 +1520,10 @@
 +					frameDeferred = TRUE;
 +			}
 +			else if (client->activated && !client->suppressOutput)
-+			{
+ 			{
  				/* Send screen update or resize to this client */
  
- 				/* Check resize */
-@@ -2731,43 +2960,42 @@
+@@ -2731,41 +3219,45 @@
  					/* Screen size changed, do resize */
  					if (!shadow_client_send_resize(client, &gfxstatus))
  					{
@@ -1254,14 +1574,14 @@
  
 -		WINPR_ASSERT(peer->CheckFileDescriptor);
 -		if (!peer->CheckFileDescriptor(peer))
--		{
++		if (!shadow_client_send_h264_completion(client))
+ 		{
 -			WLog_ERR(TAG, "Failed to check FreeRDP file descriptor");
--			goto fail;
--		}
++			WLog_ERR(TAG, "Failed to send H.264 worker completion");
+ 			goto fail;
+ 		}
  
- 		if (client->activated &&
- 		    WTSVirtualChannelManagerIsChannelJoined(client->vcm, DRDYNVC_SVC_CHANNEL_NAME))
-@@ -2857,7 +3085,9 @@
+@@ -2857,6 +3349,8 @@
  			audioVolumeMsg.id = 0;
  			audioVolumeMsg.Free = nullptr;
  
@@ -1274,8 +1594,9 @@
  				{
 --- a/libfreerdp/core/server.c
 +++ b/libfreerdp/core/server.c
-@@ -631,7 +631,9 @@
- 		}
+@@ -628,7 +628,9 @@
+ 			return FALSE;
+ 	}
  
 -	while (MessageQueue_Peek(vcm->queue, &message, TRUE))
 +	/* MACRDP_CHANNEL_MESSAGE_BUDGET: keep channel draining from starving input. */
@@ -1284,7 +1605,6 @@
  	{
  		BYTE* buffer = nullptr;
  		UINT32 length = 0;
-
 --- a/server/shadow/shadow_mcevent.c
 +++ b/server/shadow/shadow_mcevent.c
 @@ -19,6 +19,8 @@
@@ -1380,11 +1700,10 @@
  	LeaveCriticalSection(&(event->lock));
  
  	free(subscriber);
-@@ -338,4 +361,66 @@
- 		return (HANDLE) nullptr;
+@@ -339,3 +362,65 @@
  
  	return ((struct rdp_shadow_multiclient_subscriber*)subscriber)->ref->event;
-+}
+ }
 +
 +static void PublishPending(rdpShadowMultiClientEvent* event)
 +{
@@ -1446,7 +1765,7 @@
 +	LeaveCriticalSection(&(event->lock));
 +
 +	return pending;
- }
++}
 --- a/server/shadow/shadow_mcevent.h
 +++ b/server/shadow/shadow_mcevent.h
 @@ -48,6 +48,8 @@
@@ -1526,6 +1845,7 @@
 --- a/libfreerdp/codec/h264.c
 +++ b/libfreerdp/codec/h264.c
 @@ -301,9 +301,10 @@
+ 	}
  	else
  	{
 -		for (size_t y = regionRect->top; y < regionRect->bottom; y += 64)

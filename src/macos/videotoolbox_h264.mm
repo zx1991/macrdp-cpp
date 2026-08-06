@@ -7,10 +7,12 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <deque>
+#include <condition_variable>
 #include <limits>
 #include <mutex>
 #include <string>
@@ -203,18 +205,23 @@ struct macrdp_vt_h264_encoder {
     std::uint32_t frame_rate = 30;
     std::uint32_t key_frame_interval = 60;
     mutable std::mutex mutex;
+    std::condition_variable output_condition;
     std::deque<std::vector<std::uint8_t>> pending_packets;
     std::vector<std::uint8_t> output_packet;
     std::string error;
+    std::uint64_t completed_callbacks = 0;
 };
 
 namespace {
 
 void set_error(macrdp_vt_h264_encoder* encoder, std::string message) {
-    std::lock_guard lock(encoder->mutex);
-    if (encoder->error.empty()) {
-        encoder->error = std::move(message);
+    {
+        std::lock_guard lock(encoder->mutex);
+        if (encoder->error.empty()) {
+            encoder->error = std::move(message);
+        }
     }
+    encoder->output_condition.notify_all();
 }
 
 void compression_output_callback(
@@ -226,19 +233,26 @@ void compression_output_callback(
     (void)source_frame_ref_con;
     (void)info_flags;
     auto* encoder = static_cast<macrdp_vt_h264_encoder*>(output_callback_ref_con);
-    if (status != noErr) {
-        set_error(encoder, status_description(status, "VideoToolbox callback"));
-        return;
-    }
-
     std::vector<std::uint8_t> packet;
-    if (sample_buffer == nullptr || !sample_to_annex_b(sample_buffer, packet)) {
-        set_error(encoder, "Unable to convert VideoToolbox H.264 output to Annex B");
-        return;
+    std::string callback_error;
+    if (status != noErr) {
+        callback_error = status_description(status, "VideoToolbox callback");
+    } else if (sample_buffer == nullptr || !sample_to_annex_b(sample_buffer, packet)) {
+        callback_error = "Unable to convert VideoToolbox H.264 output to Annex B";
     }
 
-    std::lock_guard lock(encoder->mutex);
-    encoder->pending_packets.push_back(std::move(packet));
+    {
+        std::lock_guard lock(encoder->mutex);
+        ++encoder->completed_callbacks;
+        if (!callback_error.empty()) {
+            if (encoder->error.empty()) {
+                encoder->error = std::move(callback_error);
+            }
+        } else {
+            encoder->pending_packets.push_back(std::move(packet));
+        }
+    }
+    encoder->output_condition.notify_all();
 }
 
 bool create_pixel_buffer(
@@ -480,6 +494,15 @@ extern "C" int macrdp_vt_h264_encoder_encode(
     if (frame_index == 0 || frame_index % encoder->key_frame_interval == 0) {
         frame_properties = force_key_frame_properties();
     }
+    std::uint64_t callback_count = 0;
+    {
+        std::lock_guard lock(encoder->mutex);
+        if (!encoder->error.empty()) {
+            return -1;
+        }
+        callback_count = encoder->completed_callbacks;
+    }
+
     VTEncodeInfoFlags info_flags = 0;
     const auto encode_status = VTCompressionSessionEncodeFrame(
         encoder->session,
@@ -502,7 +525,20 @@ extern "C" int macrdp_vt_h264_encoder_encode(
         return -1;
     }
 
-    std::lock_guard lock(encoder->mutex);
+    // VideoToolbox may invoke the callback asynchronously even when the
+    // session is configured for real-time, zero-reordering output. Wait for
+    // this submission's callback before exposing its packet to FreeRDP; the
+    // RDP codec API has no frame identity to repair a late result later.
+    std::unique_lock lock(encoder->mutex);
+    constexpr auto callback_timeout = std::chrono::seconds{5};
+    if (!encoder->output_condition.wait_for(lock, callback_timeout, [&] {
+            return encoder->completed_callbacks > callback_count || !encoder->error.empty();
+        })) {
+        if (encoder->error.empty()) {
+            encoder->error = "VideoToolbox H.264 output callback timed out";
+        }
+        return -1;
+    }
     if (!encoder->error.empty()) {
         return -1;
     }

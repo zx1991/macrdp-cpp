@@ -278,6 +278,8 @@ string(FIND "${MACRDP_SHADOW_CLIENT_CONTENT}" "MACRDP_FRAME_STAGE_DIAGNOSTICS"
     MACRDP_FRAME_STAGE_DIAGNOSTICS_OFFSET)
 string(FIND "${MACRDP_SHADOW_CLIENT_CONTENT}" "MACRDP_MESSAGE_BUDGET"
     MACRDP_MESSAGE_BUDGET_OFFSET)
+string(FIND "${MACRDP_SHADOW_CLIENT_CONTENT}" "MACRDP_H264_WORKER_CONTEXT"
+    MACRDP_H264_WORKER_CONTEXT_OFFSET)
 string(FIND "${MACRDP_FREERDP_H264_CONTENT}" "MACRDP_VIDEOTOOLBOX_BRIDGE_COMPRESS"
     MACRDP_H264_PATCH_OFFSET)
 string(FIND "${MACRDP_FREERDP_H264_CONTENT}" "MACRDP_GOP_FIX"
@@ -312,6 +314,7 @@ if(MACRDP_SHADOW_HEADER_PATCH_OFFSET EQUAL -1
    AND MACRDP_SHADOW_CLIENT_PATCH_OFFSET EQUAL -1
    AND MACRDP_FRAME_STAGE_DIAGNOSTICS_OFFSET EQUAL -1
    AND MACRDP_MESSAGE_BUDGET_OFFSET EQUAL -1
+   AND MACRDP_H264_WORKER_CONTEXT_OFFSET EQUAL -1
    AND MACRDP_H264_PATCH_OFFSET EQUAL -1
    AND MACRDP_H264_GOP_PATCH_OFFSET EQUAL -1
    AND MACRDP_H264_REGION_PATCH_OFFSET EQUAL -1
@@ -353,6 +356,7 @@ elseif(NOT MACRDP_SHADOW_HEADER_PATCH_OFFSET EQUAL -1
        AND NOT MACRDP_SHADOW_CLIENT_PATCH_OFFSET EQUAL -1
        AND NOT MACRDP_FRAME_STAGE_DIAGNOSTICS_OFFSET EQUAL -1
        AND NOT MACRDP_MESSAGE_BUDGET_OFFSET EQUAL -1
+       AND NOT MACRDP_H264_WORKER_CONTEXT_OFFSET EQUAL -1
        AND NOT MACRDP_H264_PATCH_OFFSET EQUAL -1
        AND NOT MACRDP_H264_GOP_PATCH_OFFSET EQUAL -1
        AND NOT MACRDP_H264_REGION_PATCH_OFFSET EQUAL -1
@@ -401,6 +405,10 @@ set(MACRDP_FREERDP_SHADOW_SOURCES
 )
 
 add_library(macrdp_freerdp_shadow STATIC ${MACRDP_FREERDP_SHADOW_SOURCES})
+
+target_sources(macrdp_freerdp_shadow PRIVATE
+    src/macos/rdp_h264_worker.cpp
+)
 
 target_include_directories(macrdp_freerdp_shadow
     PRIVATE
@@ -472,6 +480,29 @@ if(MACRDP_FREERDP_WITH_FFMPEG)
     )
 endif()
 
+add_executable(macrdp-h264-worker-test
+    src/rdp_h264_worker_test.cpp
+)
+
+target_compile_options(macrdp-h264-worker-test PRIVATE
+    -Wall
+    -Wextra
+    -Wpedantic
+)
+
+target_include_directories(macrdp-h264-worker-test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${freerdp_SOURCE_DIR}/server/shadow
+    ${freerdp_SOURCE_DIR}/include
+    ${freerdp_SOURCE_DIR}/winpr/include
+    ${freerdp_BINARY_DIR}/include
+    ${freerdp_BINARY_DIR}/winpr/include
+)
+
+target_link_libraries(macrdp-h264-worker-test PRIVATE
+    macrdp_freerdp_shadow
+)
+
 add_test(
     NAME h264_encoder
     COMMAND macrdp-cpp-encoder-test
@@ -494,3 +525,8 @@ if(MACRDP_FREERDP_WITH_FFMPEG)
         COMMAND macrdp-freerdp-h264-test
     )
 endif()
+
+add_test(
+    NAME h264_worker
+    COMMAND macrdp-h264-worker-test
+)

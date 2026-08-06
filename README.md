@@ -16,9 +16,10 @@ FreeRDP 3.30.0 server/shadow core, captures the macOS main display through
 ScreenCaptureKit, and injects keyboard and mouse input through CoreGraphics.
 The default security mode is NLA and the default video path uses a direct
 VideoToolbox AVC420 H.264 encoder at 16 Mbps, with FreeRDP's FFmpeg encoder as
-a fallback. AVC444 remains available for clients that need higher chroma
-fidelity; it uses the FFmpeg path because the direct bridge currently accepts
-I420/AVC420 input.
+a fallback. H.264 encoding runs on a per-client worker while FreeRDP keeps
+socket writes and input dispatch on its client thread. AVC444 remains available
+for clients that need higher chroma fidelity; it uses the FFmpeg path because
+the direct bridge currently accepts I420/AVC420 input.
 
 The server currently does not expose a macOS microphone. FreeRDP's AUDIN input
 channel is disabled, so Windows audio output can still be used without an
@@ -111,9 +112,10 @@ For an existing FreeRDP NTLM SAM file, use `--sam-file path/to/file.sam`.
 but NLA is the default and recommended mode. Empty passwords are rejected.
 
 The server logs the captured frame size and RDP surface size once per change.
-They should normally match. A `Slow frame update` warning reports the time
-spent copying a frame and waiting for the RDP client to consume and send it;
-the latter is the useful indicator when the remote image is delayed.
+They should normally match; a difference means the captured image is being
+scaled to the RDP surface. A `Slow frame update` warning reports capture-copy
+and frame-publish time. `Slow client frame handling` reports time spent in the
+FreeRDP client loop, including protocol output and completion delivery.
 When the direct encoder is active, the log also contains `Using direct macOS
 VideoToolbox H264 bridge`. If that line is replaced by a fallback warning,
 the session is using software H.264 encoding.
@@ -135,14 +137,14 @@ listener.
 - `CMakeLists.txt`: manages C, C++, Objective-C, Objective-C++, FreeRDP, and
   Apple framework dependencies.
 
-## Next milestones
+## Remaining milestones
 
-1. Move H.264 encoding work off the per-client transport/input loop while
-   keeping socket writes on the FreeRDP client thread.
-2. Add automated protocol smoke tests with a FreeRDP client, including input,
+1. Add automated protocol smoke tests with a FreeRDP client, including input,
    reconnect, resize, NLA, and slow-reader cases.
-3. Add multi-monitor and display-mode change handling.
-4. Package the server with its FFmpeg/OpenSSL runtime dependencies.
+2. Verify input coordinates and display scaling across Retina and multi-monitor
+   layouts, then add multi-monitor and display-mode change handling.
+3. Package the server with its FFmpeg/OpenSSL runtime dependencies and document
+   code-signing and TCC permission requirements.
 
 ## Encoder test
 
