@@ -571,13 +571,6 @@ bool copy_frame_to_surface(MacShadowSubsystem* subsystem, const macrdp::Frame& f
     shadow_subsystem_frame_update(&subsystem->common);
     const auto update_finished = std::chrono::steady_clock::now();
 
-    // All clients have copied the frame snapshot at this point. The next
-    // frame should contribute a fresh dirty region instead of inheriting old
-    // rectangles forever.
-    EnterCriticalSection(&surface->lock);
-    region16_clear(&surface->invalidRegion);
-    LeaveCriticalSection(&surface->lock);
-
     const auto copy_time = std::chrono::duration_cast<std::chrono::milliseconds>(
         copy_finished - copy_started);
     const auto publish_wait = std::chrono::duration_cast<std::chrono::milliseconds>(

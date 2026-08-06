@@ -133,7 +133,7 @@
  
  	if (!context || !pStatus)
 +	{
-+		(void)shadow_multiclient_consume(updateSubscriber);
++		(void)shadow_multiclient_consume_nowait(updateSubscriber);
  		return FALSE;
 +	}
  
@@ -142,7 +142,7 @@
  
  	if (!settings || !server)
 +	{
-+		(void)shadow_multiclient_consume(updateSubscriber);
++		(void)shadow_multiclient_consume_nowait(updateSubscriber);
  		return FALSE;
 +	}
  
@@ -150,7 +150,7 @@
  
  	if (!surface)
 +	{
-+		(void)shadow_multiclient_consume(updateSubscriber);
++		(void)shadow_multiclient_consume_nowait(updateSubscriber);
  		return FALSE;
 +	}
  
@@ -171,7 +171,7 @@
 +	if (!res)
 +	{
 +		region16_uninit(&invalidRegion);
-+		(void)shadow_multiclient_consume(updateSubscriber);
++		(void)shadow_multiclient_consume_nowait(updateSubscriber);
 +		return FALSE;
  	}
  
@@ -235,16 +235,21 @@
  	SrcFormat = surface->format;
  
  	/* Move to new pSrcData / nXSrc / nYSrc according to sub rect */
-@@ -2306,6 +2378,15 @@
+@@ -2306,6 +2378,20 @@
  		pSrcData = &pSrcData[((UINT16)subY * nSrcStep) + ((UINT16)subX * 4U)];
  	}
  
 +release_surface:
 +	if (surface_locked)
++	{
++		if (shadow_multiclient_consume_nowait(updateSubscriber))
++			region16_clear(&(surface->invalidRegion));
 +		LeaveCriticalSection(&surface->lock);
++	}
++	else
++		(void)shadow_multiclient_consume_nowait(updateSubscriber);
 +	region16_uninit(&invalidRegion);
-+	/* The snapshot is complete. Let the publisher advance before encoding or writing. */
-+	(void)shadow_multiclient_consume(updateSubscriber);
++	/* The snapshot is complete before encoding or writing. */
 +	if (!ret || !has_update)
 +		return ret;
 +
@@ -274,6 +279,18 @@
  	return ret;
  }
  
+@@ -2715,9 +2715,10 @@
+-		if (WaitForSingleObject(UpdateEvent, 0) == WAIT_OBJECT_0)
++		if (WaitForSingleObject(UpdateEvent, 0) == WAIT_OBJECT_0 &&
++		    shadow_multiclient_subscriber_pending(UpdateSubscriber))
+ 		{
+ 			/* The UpdateEvent means to start sending current frame. It is
+ 			 * triggered from subsystem implementation and it should ensure
+ 			 * that the screen and primary surface meta data (width, height,
+ 			 * scanline, invalid region, etc) is not changed until it is reset
+ 			 * (at shadow_multiclient_consume). As best practice, subsystem
+ 			 * implementation should invoke shadow_subsystem_frame_update which
+ 			 * triggers the event and then wait for completion */
 @@ -2725,43 +2803,48 @@
  			{
  				/* Send screen update or resize to this client */
@@ -291,11 +308,11 @@
 +						/* Screen size changed, do resize */
 +						if (!shadow_client_send_resize(client, &gfxstatus))
 +						{
-+							(void)shadow_multiclient_consume(UpdateSubscriber);
++							(void)shadow_multiclient_consume_nowait(UpdateSubscriber);
 +							WLog_ERR(TAG, "Failed to send resize message");
 +							break;
 +						}
-+						(void)shadow_multiclient_consume(UpdateSubscriber);
++						(void)shadow_multiclient_consume_nowait(UpdateSubscriber);
  					}
 +					else
 +					{
@@ -322,7 +339,7 @@
 +					if (!shadow_client_no_surface_update(client, &gfxstatus))
  					{
 -						WLog_ERR(TAG, "Failed to send surface update");
-+						(void)shadow_multiclient_consume(UpdateSubscriber);
++						(void)shadow_multiclient_consume_nowait(UpdateSubscriber);
 +						WLog_ERR(TAG, "Failed to handle surface update");
  						break;
  					}
@@ -335,7 +352,7 @@
 -				{
 -					WLog_ERR(TAG, "Failed to handle surface update");
 -					break;
-+					(void)shadow_multiclient_consume(UpdateSubscriber);
++					(void)shadow_multiclient_consume_nowait(UpdateSubscriber);
  				}
  			}
  
@@ -586,7 +603,16 @@
 +#include <inttypes.h>
  #include <freerdp/log.h>
  #include "shadow.h"
-@@ -136,11 +138,18 @@
+@@ -116,3 +116,7 @@
+-	WINPR_ASSERT(event->consuming == 0);
++	/* A slow client may still be consuming the current event. Its surface
++	 * snapshot will include all changes made before it releases the surface
++	 * lock, so coalesce newer notifications instead of blocking the publisher. */
++	if (event->consuming > 0)
++		return;
+ 
+ 	/* Count subscribing clients */
+@@ -136,11 +142,18 @@
  static void WaitForSubscribers(rdpShadowMultiClientEvent* event)
  {
  	if (event->consuming > 0)
@@ -605,3 +631,84 @@
 +			          event->eventid, (uint64_t)waitElapsed, expectedConsumers);
 +		/* MACRDP_FRAME_BARRIER_DIAGNOSTICS */
  	}
+@@ -335,7 +335,59 @@
+ HANDLE shadow_multiclient_getevent(void* subscriber)
+ {
+ 	if (!subscriber)
+ 		return (HANDLE) nullptr;
+ 
+ 	return ((struct rdp_shadow_multiclient_subscriber*)subscriber)->ref->event;
+ }
++
++BOOL shadow_multiclient_consume_nowait(void* subscriber)
++{
++	struct rdp_shadow_multiclient_subscriber* s = nullptr;
++	rdpShadowMultiClientEvent* event = nullptr;
++	BOOL last = FALSE;
++
++	if (!subscriber)
++		return last;
++
++	s = (struct rdp_shadow_multiclient_subscriber*)subscriber;
++	event = s->ref;
++
++	EnterCriticalSection(&(event->lock));
++	if (WaitForSingleObject(event->event, 0) == WAIT_OBJECT_0 && s->pleaseHandle)
++	{
++		event->consuming--;
++		s->pleaseHandle = FALSE;
++		if (event->consuming == 0)
++		{
++			(void)ResetEvent(event->event);
++			if (event->waiting > 0)
++				(void)SetEvent(event->barrierEvent);
++			else
++				(void)SetEvent(event->doneEvent);
++			last = TRUE;
++		}
++	}
++	WINPR_ASSERT(event->consuming >= 0);
++	LeaveCriticalSection(&(event->lock));
++
++	return last;
++}
++
++BOOL shadow_multiclient_subscriber_pending(void* subscriber)
++{
++	struct rdp_shadow_multiclient_subscriber* s = nullptr;
++	rdpShadowMultiClientEvent* event = nullptr;
++	BOOL pending = FALSE;
++
++	if (!subscriber)
++		return pending;
++
++	s = (struct rdp_shadow_multiclient_subscriber*)subscriber;
++	event = s->ref;
++
++	EnterCriticalSection(&(event->lock));
++	pending = (WaitForSingleObject(event->event, 0) == WAIT_OBJECT_0 && s->pleaseHandle);
++	LeaveCriticalSection(&(event->lock));
++
++	return pending;
++}
+--- a/server/shadow/shadow_mcevent.h
++++ b/server/shadow/shadow_mcevent.h
+@@ -45,7 +45,9 @@
+ 	void shadow_multiclient_publish(rdpShadowMultiClientEvent* event);
+ 	void shadow_multiclient_wait(rdpShadowMultiClientEvent* event);
+ 	void shadow_multiclient_publish_and_wait(rdpShadowMultiClientEvent* event);
+ 	WINPR_ATTR_NODISCARD void* shadow_multiclient_get_subscriber(rdpShadowMultiClientEvent* event);
+ 	void shadow_multiclient_release_subscriber(void* subscriber);
+ 	BOOL shadow_multiclient_consume(void* subscriber);
++	BOOL shadow_multiclient_consume_nowait(void* subscriber);
++	BOOL shadow_multiclient_subscriber_pending(void* subscriber);
+ 	WINPR_ATTR_NODISCARD HANDLE shadow_multiclient_getevent(void* subscriber);
+--- a/server/shadow/shadow_subsystem.c
++++ b/server/shadow/shadow_subsystem.c
+@@ -293,4 +293,5 @@
+ void shadow_subsystem_frame_update(rdpShadowSubsystem* subsystem)
+ {
+-	shadow_multiclient_publish_and_wait(subsystem->updateEvent);
++	/* MACRDP_NONBLOCKING_FRAME_UPDATE */
++	shadow_multiclient_publish(subsystem->updateEvent);
+ }
