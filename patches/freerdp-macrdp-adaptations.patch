@@ -982,7 +982,7 @@
  				/* Send screen update or resize to this client */
  
  				/* Check resize */
-@@ -2731,35 +2895,40 @@
+@@ -2731,34 +2895,39 @@
  					/* Screen size changed, do resize */
  					if (!shadow_client_send_resize(client, &gfxstatus))
  					{
@@ -1031,13 +1031,13 @@
 -			(void)shadow_multiclient_consume(UpdateSubscriber);
  		}
  
- 		WINPR_ASSERT(peer->CheckFileDescriptor);
-@@ -2768,6 +2937,8 @@
- 			WLog_ERR(TAG, "Failed to check FreeRDP file descriptor");
- 			goto fail;
- 		}
-+		if (peer->IsWriteBlocked && peer->IsWriteBlocked(peer))
-+			outputBlocked = TRUE;
+@@ -2765,9 +2936,3 @@
+-		WINPR_ASSERT(peer->CheckFileDescriptor);
+-		if (!peer->CheckFileDescriptor(peer))
+-		{
+-			WLog_ERR(TAG, "Failed to check FreeRDP file descriptor");
+-			goto fail;
+-		}
  
  		if (client->activated &&
  		    WTSVirtualChannelManagerIsChannelJoined(client->vcm, DRDYNVC_SVC_CHANNEL_NAME))
