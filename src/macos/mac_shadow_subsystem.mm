@@ -19,12 +19,15 @@
 #include <cstdint>
 #include <cstring>
 #include <cstdlib>
+#include <deque>
 #include <memory>
 #include <mutex>
 #include <optional>
 #include <string>
 #include <thread>
+#include <unordered_set>
 #include <utility>
+#include <vector>
 
 #define TAG SERVER_TAG("macrdp")
 
@@ -76,6 +79,22 @@ bool constant_time_equal(const std::string& expected, const char* actual) {
     return difference == 0;
 }
 
+enum class InputEventKind {
+    keyboard,
+    unicode,
+    mouse,
+    extended_mouse,
+    reset,
+};
+
+struct InputEvent {
+    InputEventKind kind = InputEventKind::mouse;
+    UINT16 flags = 0;
+    UINT16 code = 0;
+    UINT16 x = 0;
+    UINT16 y = 0;
+};
+
 struct mac_shadow_subsystem {
     rdpShadowSubsystem common{};
     std::unique_ptr<macrdp::DisplayCapture> capture;
@@ -84,6 +103,12 @@ struct mac_shadow_subsystem {
     std::atomic_bool stop_requested{false};
     std::mutex lifecycle_mutex;
     std::mutex input_mutex;
+    std::mutex input_queue_mutex;
+    std::condition_variable input_queue_condition;
+    std::condition_variable input_queue_space_condition;
+    std::deque<InputEvent> input_queue;
+    std::thread input_thread;
+    std::atomic_bool input_stop_requested{false};
     std::mutex pending_frame_mutex;
     std::condition_variable pending_frame_condition;
     std::optional<macrdp::Frame> pending_frame;
@@ -94,6 +119,10 @@ struct mac_shadow_subsystem {
     bool left_button_down = false;
     bool right_button_down = false;
     bool other_button_down = false;
+    bool x_button_1_down = false;
+    bool x_button_2_down = false;
+    std::unordered_set<std::uint16_t> pressed_keys;
+    std::unordered_set<std::uint16_t> pressed_unicode;
     std::int32_t pointer_x = 0;
     std::int32_t pointer_y = 0;
     std::uint32_t last_frame_width = 0;
@@ -104,6 +133,9 @@ struct mac_shadow_subsystem {
 };
 
 using MacShadowSubsystem = struct mac_shadow_subsystem;
+
+constexpr std::size_t kInputQueueLimit = 4096;
+constexpr std::uint16_t kExtendedKeyIdentityBit = 0x0100;
 
 void free_pointer_position_message(UINT32, SHADOW_MSG_OUT* message) {
     std::free(message);
@@ -214,7 +246,7 @@ CGPoint display_point(const MacShadowSubsystem* subsystem, UINT16 x, UINT16 y) {
         bounds.origin.y + normalized_y * std::max(0.0, bounds.size.height - 1.0));
 }
 
-bool post_keyboard_event(MacShadowSubsystem* subsystem, UINT16 flags, UINT8 code) {
+bool inject_keyboard_event(MacShadowSubsystem* subsystem, UINT16 flags, UINT8 code) {
     if (subsystem == nullptr) {
         return false;
     }
@@ -253,10 +285,21 @@ bool post_keyboard_event(MacShadowSubsystem* subsystem, UINT16 flags, UINT8 code
     CGEventPost(kCGHIDEventTap, event);
     CFRelease(event);
     CFRelease(source);
+
+    const auto key_identity = static_cast<std::uint16_t>(code)
+        | ((flags & KBD_FLAGS_EXTENDED) != 0 ? kExtendedKeyIdentityBit : 0);
+    {
+        std::lock_guard lock(subsystem->input_mutex);
+        if (key_down) {
+            subsystem->pressed_keys.insert(key_identity);
+        } else {
+            subsystem->pressed_keys.erase(key_identity);
+        }
+    }
     return true;
 }
 
-bool post_unicode_event(MacShadowSubsystem* subsystem, UINT16 flags, UINT16 code) {
+bool inject_unicode_event(MacShadowSubsystem* subsystem, UINT16 flags, UINT16 code) {
     if (subsystem == nullptr) {
         return false;
     }
@@ -278,10 +321,19 @@ bool post_unicode_event(MacShadowSubsystem* subsystem, UINT16 flags, UINT16 code
     CGEventPost(kCGHIDEventTap, event);
     CFRelease(event);
     CFRelease(source);
+
+    {
+        std::lock_guard lock(subsystem->input_mutex);
+        if (key_down) {
+            subsystem->pressed_unicode.insert(code);
+        } else {
+            subsystem->pressed_unicode.erase(code);
+        }
+    }
     return true;
 }
 
-bool post_mouse_event(
+bool inject_mouse_event(
     MacShadowSubsystem* subsystem,
     UINT16 flags,
     UINT16 x,
@@ -291,9 +343,6 @@ bool post_mouse_event(
     }
 
     std::lock_guard lock(subsystem->input_mutex);
-    subsystem->pointer_x = x;
-    subsystem->pointer_y = y;
-    publish_pointer_position(subsystem, x, y);
 
     CGEventSourceRef source = CGEventSourceCreate(kCGEventSourceStateHIDSystemState);
     if (source == nullptr) {
@@ -387,7 +436,7 @@ bool post_mouse_event(
     return true;
 }
 
-bool post_extended_mouse_event(
+bool inject_extended_mouse_event(
     MacShadowSubsystem* subsystem,
     UINT16 flags,
     UINT16 x,
@@ -397,9 +446,7 @@ bool post_extended_mouse_event(
     }
 
     std::lock_guard lock(subsystem->input_mutex);
-    subsystem->pointer_x = x;
-    subsystem->pointer_y = y;
-    publish_pointer_position(subsystem, x, y);
+
     const CGPoint point = display_point(subsystem, x, y);
     const bool down = (flags & PTR_XFLAGS_DOWN) != 0;
     const UINT16 button_flags = flags & (PTR_XFLAGS_BUTTON1 | PTR_XFLAGS_BUTTON2);
@@ -407,8 +454,11 @@ bool post_extended_mouse_event(
         return true;
     }
 
-    const CGMouseButton button = static_cast<CGMouseButton>(
-        (button_flags & PTR_XFLAGS_BUTTON1) != 0 ? 3 : 4);
+    const bool button_1 = (button_flags & PTR_XFLAGS_BUTTON1) != 0;
+    const CGMouseButton button = static_cast<CGMouseButton>(button_1 ? 3 : 4);
+    bool* button_state = button_1
+        ? &subsystem->x_button_1_down
+        : &subsystem->x_button_2_down;
     CGEventSourceRef source = CGEventSourceCreate(kCGEventSourceStateHIDSystemState);
     if (source == nullptr) {
         return false;
@@ -423,9 +473,272 @@ bool post_extended_mouse_event(
         return false;
     }
     CGEventPost(kCGHIDEventTap, event);
+    *button_state = down;
     CFRelease(event);
     CFRelease(source);
     return true;
+}
+
+bool is_coalescible_mouse_move(const InputEvent& event) {
+    constexpr UINT16 non_move_flags = PTR_FLAGS_BUTTON1 | PTR_FLAGS_BUTTON2
+        | PTR_FLAGS_BUTTON3 | PTR_FLAGS_WHEEL | PTR_FLAGS_HWHEEL;
+    return event.kind == InputEventKind::mouse
+        && (event.flags & PTR_FLAGS_MOVE) != 0
+        && (event.flags & non_move_flags) == 0;
+}
+
+bool enqueue_input_event(MacShadowSubsystem* subsystem, InputEvent event) {
+    if (subsystem == nullptr) {
+        return false;
+    }
+
+    std::unique_lock lock(subsystem->input_queue_mutex);
+    if (subsystem->input_stop_requested.load()) {
+        return false;
+    }
+
+    // Mouse motion is the only input that is safe to discard. Replace a
+    // pending motion with the newest point instead of letting it build
+    // latency behind clicks and keystrokes.
+    if (is_coalescible_mouse_move(event)) {
+        if (!subsystem->input_queue.empty()
+            && is_coalescible_mouse_move(subsystem->input_queue.back())) {
+            subsystem->input_queue.back() = event;
+            lock.unlock();
+            subsystem->input_queue_condition.notify_one();
+            return true;
+        }
+        if (subsystem->input_queue.size() >= kInputQueueLimit) {
+            return true;
+        }
+    } else {
+        // Preserve clicks, button transitions, wheel events, and keyboard
+        // input. Under pathological input pressure, briefly apply backpressure
+        // to the protocol callback instead of silently losing a user action.
+        subsystem->input_queue_space_condition.wait(lock, [subsystem] {
+            return subsystem->input_stop_requested.load()
+                || subsystem->input_queue.size() < kInputQueueLimit;
+        });
+        if (subsystem->input_stop_requested.load()) {
+            return false;
+        }
+    }
+    subsystem->input_queue.push_back(event);
+    lock.unlock();
+    subsystem->input_queue_condition.notify_one();
+    return true;
+}
+
+bool queue_keyboard_event(MacShadowSubsystem* subsystem, UINT16 flags, UINT8 code) {
+    InputEvent event;
+    event.kind = InputEventKind::keyboard;
+    event.flags = flags;
+    event.code = code;
+    return enqueue_input_event(subsystem, event);
+}
+
+bool queue_unicode_event(MacShadowSubsystem* subsystem, UINT16 flags, UINT16 code) {
+    InputEvent event;
+    event.kind = InputEventKind::unicode;
+    event.flags = flags;
+    event.code = code;
+    return enqueue_input_event(subsystem, event);
+}
+
+bool queue_mouse_event(
+    MacShadowSubsystem* subsystem,
+    UINT16 flags,
+    UINT16 x,
+    UINT16 y) {
+    if (subsystem == nullptr) {
+        return false;
+    }
+
+    {
+        std::lock_guard lock(subsystem->input_mutex);
+        subsystem->pointer_x = x;
+        subsystem->pointer_y = y;
+    }
+    publish_pointer_position(subsystem, x, y);
+
+    InputEvent event;
+    event.kind = InputEventKind::mouse;
+    event.flags = flags;
+    event.x = x;
+    event.y = y;
+    return enqueue_input_event(subsystem, event);
+}
+
+bool queue_extended_mouse_event(
+    MacShadowSubsystem* subsystem,
+    UINT16 flags,
+    UINT16 x,
+    UINT16 y) {
+    if (subsystem == nullptr) {
+        return false;
+    }
+
+    {
+        std::lock_guard lock(subsystem->input_mutex);
+        subsystem->pointer_x = x;
+        subsystem->pointer_y = y;
+    }
+    publish_pointer_position(subsystem, x, y);
+
+    InputEvent event;
+    event.kind = InputEventKind::extended_mouse;
+    event.flags = flags;
+    event.x = x;
+    event.y = y;
+    return enqueue_input_event(subsystem, event);
+}
+
+bool queue_input_reset(MacShadowSubsystem* subsystem) {
+    InputEvent event;
+    event.kind = InputEventKind::reset;
+    return enqueue_input_event(subsystem, event);
+}
+
+void release_input_state(MacShadowSubsystem* subsystem) {
+    if (subsystem == nullptr) {
+        return;
+    }
+
+    std::vector<std::uint16_t> pressed_keys;
+    std::vector<std::uint16_t> pressed_unicode;
+    bool left_button_down = false;
+    bool right_button_down = false;
+    bool other_button_down = false;
+    bool x_button_1_down = false;
+    bool x_button_2_down = false;
+    UINT16 pointer_x = 0;
+    UINT16 pointer_y = 0;
+    {
+        std::lock_guard lock(subsystem->input_mutex);
+        pressed_keys.assign(
+            subsystem->pressed_keys.begin(),
+            subsystem->pressed_keys.end());
+        pressed_unicode.assign(
+            subsystem->pressed_unicode.begin(),
+            subsystem->pressed_unicode.end());
+        subsystem->pressed_keys.clear();
+        subsystem->pressed_unicode.clear();
+        left_button_down = subsystem->left_button_down;
+        right_button_down = subsystem->right_button_down;
+        other_button_down = subsystem->other_button_down;
+        x_button_1_down = subsystem->x_button_1_down;
+        x_button_2_down = subsystem->x_button_2_down;
+        subsystem->left_button_down = false;
+        subsystem->right_button_down = false;
+        subsystem->other_button_down = false;
+        subsystem->x_button_1_down = false;
+        subsystem->x_button_2_down = false;
+        pointer_x = static_cast<UINT16>(std::clamp<std::int32_t>(
+            subsystem->pointer_x,
+            0,
+            UINT16_MAX));
+        pointer_y = static_cast<UINT16>(std::clamp<std::int32_t>(
+            subsystem->pointer_y,
+            0,
+            UINT16_MAX));
+    }
+
+    for (const auto key_identity : pressed_keys) {
+        const UINT16 flags = KBD_FLAGS_RELEASE
+            | ((key_identity & kExtendedKeyIdentityBit) != 0
+                   ? KBD_FLAGS_EXTENDED
+                   : 0);
+        (void)inject_keyboard_event(
+            subsystem,
+            flags,
+            static_cast<UINT8>(key_identity & UINT8_MAX));
+    }
+    for (const auto code : pressed_unicode) {
+        (void)inject_unicode_event(subsystem, KBD_FLAGS_RELEASE, code);
+    }
+    if (left_button_down) {
+        (void)inject_mouse_event(
+            subsystem,
+            PTR_FLAGS_BUTTON1,
+            pointer_x,
+            pointer_y);
+    }
+    if (right_button_down) {
+        (void)inject_mouse_event(
+            subsystem,
+            PTR_FLAGS_BUTTON2,
+            pointer_x,
+            pointer_y);
+    }
+    if (other_button_down) {
+        (void)inject_mouse_event(
+            subsystem,
+            PTR_FLAGS_BUTTON3,
+            pointer_x,
+            pointer_y);
+    }
+    if (x_button_1_down) {
+        (void)inject_extended_mouse_event(
+            subsystem,
+            PTR_XFLAGS_BUTTON1,
+            pointer_x,
+            pointer_y);
+    }
+    if (x_button_2_down) {
+        (void)inject_extended_mouse_event(
+            subsystem,
+            PTR_XFLAGS_BUTTON2,
+            pointer_x,
+            pointer_y);
+    }
+}
+
+void input_loop(MacShadowSubsystem* subsystem) {
+    while (true) {
+        InputEvent event;
+        {
+            std::unique_lock lock(subsystem->input_queue_mutex);
+            subsystem->input_queue_condition.wait(lock, [subsystem] {
+                return subsystem->input_stop_requested.load()
+                    || !subsystem->input_queue.empty();
+            });
+            if (subsystem->input_queue.empty()) {
+                if (subsystem->input_stop_requested.load()) {
+                    break;
+                }
+                continue;
+            }
+            event = subsystem->input_queue.front();
+            subsystem->input_queue.pop_front();
+        }
+        subsystem->input_queue_space_condition.notify_one();
+
+        bool injected = false;
+        switch (event.kind) {
+            case InputEventKind::keyboard:
+                injected = inject_keyboard_event(
+                    subsystem, event.flags, static_cast<UINT8>(event.code));
+                break;
+            case InputEventKind::unicode:
+                injected = inject_unicode_event(subsystem, event.flags, event.code);
+                break;
+            case InputEventKind::mouse:
+                injected = inject_mouse_event(subsystem, event.flags, event.x, event.y);
+                break;
+            case InputEventKind::extended_mouse:
+                injected = inject_extended_mouse_event(
+                    subsystem, event.flags, event.x, event.y);
+                break;
+            case InputEventKind::reset:
+                release_input_state(subsystem);
+                injected = true;
+                break;
+        }
+        if (!injected) {
+            WLog_WARN(TAG, "Failed to inject queued macOS input event");
+        }
+    }
+    release_input_state(subsystem);
 }
 
 bool copy_frame_to_surface(MacShadowSubsystem* subsystem, const macrdp::Frame& frame) {
@@ -711,23 +1024,39 @@ int mac_shadow_subsystem_start(rdpShadowSubsystem* base) {
     }
 
     subsystem->stop_requested.store(false);
+    subsystem->input_stop_requested.store(false);
     subsystem->common.captureFrameRate = options.frame_rate;
     {
         std::lock_guard frame_lock(subsystem->pending_frame_mutex);
         subsystem->pending_frame.reset();
     }
+    {
+        std::lock_guard input_lock(subsystem->input_queue_mutex);
+        subsystem->input_queue.clear();
+    }
     try {
+        subsystem->input_thread = std::thread(input_loop, subsystem);
         subsystem->publish_thread = std::thread(publish_loop, subsystem);
         subsystem->capture_thread = std::thread(capture_loop, subsystem);
     } catch (...) {
         subsystem->stop_requested.store(true);
+        subsystem->input_stop_requested.store(true);
         subsystem->capture->stop();
         subsystem->pending_frame_condition.notify_all();
+        subsystem->input_queue_condition.notify_all();
+        subsystem->input_queue_space_condition.notify_all();
         if (subsystem->capture_thread.joinable()) {
             subsystem->capture_thread.join();
         }
         if (subsystem->publish_thread.joinable()) {
             subsystem->publish_thread.join();
+        }
+        if (subsystem->input_thread.joinable()) {
+            subsystem->input_thread.join();
+        }
+        {
+            std::lock_guard input_lock(subsystem->input_queue_mutex);
+            subsystem->input_queue.clear();
         }
         subsystem->capture.reset();
         return -1;
@@ -743,6 +1072,9 @@ int mac_shadow_subsystem_stop(rdpShadowSubsystem* base) {
 
     std::lock_guard lock(subsystem->lifecycle_mutex);
     subsystem->stop_requested.store(true);
+    subsystem->input_stop_requested.store(true);
+    subsystem->input_queue_condition.notify_all();
+    subsystem->input_queue_space_condition.notify_all();
     if (subsystem->capture != nullptr) {
         subsystem->capture->stop();
     }
@@ -753,9 +1085,16 @@ int mac_shadow_subsystem_stop(rdpShadowSubsystem* base) {
     if (subsystem->publish_thread.joinable()) {
         subsystem->publish_thread.join();
     }
+    if (subsystem->input_thread.joinable()) {
+        subsystem->input_thread.join();
+    }
     {
         std::lock_guard frame_lock(subsystem->pending_frame_mutex);
         subsystem->pending_frame.reset();
+    }
+    {
+        std::lock_guard input_lock(subsystem->input_queue_mutex);
+        subsystem->input_queue.clear();
     }
     subsystem->capture.reset();
     return 1;
@@ -793,25 +1132,25 @@ rdpShadowSubsystem* mac_shadow_subsystem_new() {
     };
     subsystem->common.KeyboardEvent = [](rdpShadowSubsystem* base, rdpShadowClient*, UINT16 flags,
                                          UINT8 code) {
-        return post_keyboard_event(reinterpret_cast<MacShadowSubsystem*>(base), flags, code)
+        return queue_keyboard_event(reinterpret_cast<MacShadowSubsystem*>(base), flags, code)
             ? true
             : false;
     };
     subsystem->common.UnicodeKeyboardEvent =
         [](rdpShadowSubsystem* base, rdpShadowClient*, UINT16 flags, UINT16 code) {
-            return post_unicode_event(reinterpret_cast<MacShadowSubsystem*>(base), flags, code)
+            return queue_unicode_event(reinterpret_cast<MacShadowSubsystem*>(base), flags, code)
                 ? true
                 : false;
         };
     subsystem->common.MouseEvent =
         [](rdpShadowSubsystem* base, rdpShadowClient*, UINT16 flags, UINT16 x, UINT16 y) {
-            return post_mouse_event(reinterpret_cast<MacShadowSubsystem*>(base), flags, x, y)
+            return queue_mouse_event(reinterpret_cast<MacShadowSubsystem*>(base), flags, x, y)
             ? true
             : false;
         };
     subsystem->common.ExtendedMouseEvent =
         [](rdpShadowSubsystem* base, rdpShadowClient*, UINT16 flags, UINT16 x, UINT16 y) {
-            return post_extended_mouse_event(
+            return queue_extended_mouse_event(
                        reinterpret_cast<MacShadowSubsystem*>(base), flags, x, y)
                 ? true
                 : false;
@@ -840,7 +1179,7 @@ rdpShadowSubsystem* mac_shadow_subsystem_new() {
                 pointer_y + y_delta,
                 0,
                 static_cast<std::int32_t>(height > 0 ? height - 1 : 0)));
-            return post_mouse_event(mac, flags | PTR_FLAGS_MOVE, x, y) ? true : false;
+            return queue_mouse_event(mac, flags | PTR_FLAGS_MOVE, x, y) ? true : false;
         };
     subsystem->common.Authenticate = [](rdpShadowSubsystem* base, rdpShadowClient*, const char* user,
                                         const char* domain, const char* password) {
@@ -861,7 +1200,9 @@ rdpShadowSubsystem* mac_shadow_subsystem_new() {
     subsystem->common.ClientConnect = [](rdpShadowSubsystem*, rdpShadowClient*) {
         return true;
     };
-    subsystem->common.ClientDisconnect = [](rdpShadowSubsystem*, rdpShadowClient*) {};
+    subsystem->common.ClientDisconnect = [](rdpShadowSubsystem* base, rdpShadowClient*) {
+        (void)queue_input_reset(reinterpret_cast<MacShadowSubsystem*>(base));
+    };
     subsystem->common.ClientCapabilities = [](rdpShadowSubsystem*, rdpShadowClient*) {
         return true;
     };

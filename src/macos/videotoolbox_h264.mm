@@ -495,12 +495,18 @@ extern "C" int macrdp_vt_h264_encoder_encode(
         frame_properties = force_key_frame_properties();
     }
     std::uint64_t callback_count = 0;
+    bool encoder_ready = true;
     {
         std::lock_guard lock(encoder->mutex);
-        if (!encoder->error.empty()) {
-            return -1;
-        }
+        encoder_ready = encoder->error.empty();
         callback_count = encoder->completed_callbacks;
+    }
+    if (!encoder_ready) {
+        if (frame_properties != nullptr) {
+            CFRelease(frame_properties);
+        }
+        CVPixelBufferRelease(pixel_buffer);
+        return -1;
     }
 
     VTEncodeInfoFlags info_flags = 0;

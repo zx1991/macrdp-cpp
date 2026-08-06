@@ -16,10 +16,12 @@ FreeRDP 3.30.0 server/shadow core, captures the macOS main display through
 ScreenCaptureKit, and injects keyboard and mouse input through CoreGraphics.
 The default security mode is NLA and the default video path uses a direct
 VideoToolbox AVC420 H.264 encoder at 16 Mbps, with FreeRDP's FFmpeg encoder as
-a fallback. H.264 encoding runs on a per-client worker while FreeRDP keeps
-socket writes and input dispatch on its client thread. AVC444 remains available
-for clients that need higher chroma fidelity; it uses the FFmpeg path because
-the direct bridge currently accepts I420/AVC420 input.
+a fallback. H.264 encoding runs on a per-client worker. FreeRDP receives input
+on its client thread, then a separate macOS input worker performs CoreGraphics
+injection; pure mouse motion is coalesced while clicks and keyboard events are
+preserved in order. AVC444 remains available for clients that need higher chroma
+fidelity; it uses the FFmpeg path because the direct bridge currently accepts
+I420/AVC420 input.
 
 The server currently does not expose a macOS microphone. FreeRDP's AUDIN input
 channel is disabled, so Windows audio output can still be used without an
@@ -34,6 +36,26 @@ cmake -S . -B build -G "Unix Makefiles" \
 cmake --build build --parallel 8
 ctest --test-dir build --output-on-failure
 ```
+
+To create a relocatable package containing the server and its Homebrew
+FFmpeg/OpenSSL/cJSON runtime libraries:
+
+```bash
+cmake --build build --target macrdp-package
+```
+
+Run the installed binary from the logged-in graphical macOS session:
+
+```bash
+read -r -s macrdp_password
+printf '\n'
+printf '%s\n' "$macrdp_password" | \
+  ./build/macrdp-dist/bin/macrdp-server --user Xian --password-stdin
+unset macrdp_password
+```
+
+The backslash must be the final character on a continued shell line. A
+single-line command is equivalent and avoids shell continuation mistakes.
 
 CMake downloads and builds FreeRDP 3.30.0. FFmpeg and OpenSSL are required by
 the selected FreeRDP configuration; Homebrew is the simplest way to provide
@@ -129,6 +151,11 @@ to the terminal or executable in System Settings > Privacy & Security >
 Accessibility. The server checks both permissions before it opens the RDP
 listener.
 
+For an installed binary, grant TCC permissions to the exact executable at
+`build/macrdp-dist/bin/macrdp-server` (or to the terminal used to launch it). Code signing
+and notarization are still deployment tasks for distributing the install to
+other Macs.
+
 ## Layout
 
 - `include/macrdp/`: C++ interfaces and data types; no Objective-C types.
@@ -137,14 +164,19 @@ listener.
 - `CMakeLists.txt`: manages C, C++, Objective-C, Objective-C++, FreeRDP, and
   Apple framework dependencies.
 
-## Remaining milestones
+## Remaining work
 
-1. Add automated protocol smoke tests with a FreeRDP client, including input,
-   reconnect, resize, NLA, and slow-reader cases.
-2. Verify input coordinates and display scaling across Retina and multi-monitor
-   layouts, then add multi-monitor and display-mode change handling.
-3. Package the server with its FFmpeg/OpenSSL runtime dependencies and document
-   code-signing and TCC permission requirements.
+The local unit tests cover frame coalescing, display-size calculation, H.264,
+and the asynchronous encoder worker. The remaining validation requires a
+graphical macOS session and a Windows `mstsc` client:
+
+1. Verify keyboard, Unicode input, click, drag, wheel, reconnect, resize, NLA,
+   and slow-reader behavior.
+2. Verify Retina coordinate mapping, then add multi-monitor and display-mode
+   change handling.
+3. Add a repeatable protocol smoke-test setup with a FreeRDP client.
+4. Add display-mode change recovery and multi-monitor selection.
+5. Add code signing/notarization automation for distributed installs.
 
 ## Encoder test
 

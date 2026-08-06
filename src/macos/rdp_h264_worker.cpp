@@ -27,6 +27,7 @@ struct EncodeJob {
     UINT32 format = 0;
     UINT32 codec_id = 0;
     RECTANGLE_16 region{};
+    bool full_frame = false;
 };
 
 void clear_encoded_frame(macrdp_h264_encoded_frame& frame) {
@@ -95,6 +96,74 @@ struct macrdp_h264_worker {
                 job.reset();
             }
 
+            const size_t full_row_bytes = static_cast<size_t>(current.width) * 4U;
+            const size_t full_size =
+                (static_cast<size_t>(current.height) - 1U) * current.stride + full_row_bytes;
+            if (current.full_frame) {
+                if (current.frame.size() < full_size) {
+                    macrdp_h264_encoded_frame encoded{};
+                    encoded.width = current.width;
+                    encoded.height = current.height;
+                    encoded.failed = TRUE;
+                    std::lock_guard lock(mutex);
+                    if (stopping) {
+                        free_result(encoded);
+                        return;
+                    }
+                    result = encoded;
+                    completion = TRUE;
+                    busy = FALSE;
+                    (void)SetEvent(done_event);
+                    continue;
+                }
+                assembled_frame = std::move(current.frame);
+                assembled_stride = current.stride;
+            } else {
+                const auto region_width = static_cast<size_t>(
+                    current.region.right - current.region.left);
+                const auto region_height = static_cast<size_t>(
+                    current.region.bottom - current.region.top);
+                const auto patch_row_bytes = region_width * 4U;
+                const auto assembled_size =
+                    (static_cast<size_t>(current.height) - 1U) * assembled_stride
+                    + full_row_bytes;
+                if (assembled_frame.size() < assembled_size
+                    || assembled_width != current.width
+                    || assembled_height != current.height
+                    || assembled_stride < full_row_bytes
+                    || current.frame.size() < patch_row_bytes * region_height
+                    || current.stride < patch_row_bytes) {
+                    macrdp_h264_encoded_frame encoded{};
+                    encoded.width = current.width;
+                    encoded.height = current.height;
+                    encoded.failed = TRUE;
+                    std::lock_guard lock(mutex);
+                    if (stopping) {
+                        free_result(encoded);
+                        return;
+                    }
+                    result = encoded;
+                    completion = TRUE;
+                    busy = FALSE;
+                    (void)SetEvent(done_event);
+                    continue;
+                }
+                for (size_t row = 0; row < region_height; ++row) {
+                    auto* destination = assembled_frame.data()
+                        + (static_cast<size_t>(current.region.top) + row) * assembled_stride
+                        + static_cast<size_t>(current.region.left) * 4U;
+                    const auto* source = current.frame.data() + row * current.stride;
+                    std::memcpy(destination, source, patch_row_bytes);
+                }
+            }
+
+            {
+                std::lock_guard lock(mutex);
+                assembled_width = current.width;
+                assembled_height = current.height;
+                frame_initialized = TRUE;
+            }
+
             macrdp_h264_encoded_frame encoded{};
             encoded.width = current.width;
             encoded.height = current.height;
@@ -107,9 +176,9 @@ struct macrdp_h264_worker {
                 UINT32 packet_size = 0;
                 const auto status = avc420_compress(
                     encoder->h264,
-                    current.frame.data(),
+                    assembled_frame.data(),
                     current.format,
-                    current.stride,
+                    assembled_stride,
                     current.width,
                     current.height,
                     &current.region,
@@ -137,9 +206,9 @@ struct macrdp_h264_worker {
                 const BYTE version = current.codec_id == RDPGFX_CODECID_AVC444v2 ? 2 : 1;
                 const auto status = avc444_compress(
                     encoder->h264,
-                    current.frame.data(),
+                    assembled_frame.data(),
                     current.format,
-                    current.stride,
+                    assembled_stride,
                     current.width,
                     current.height,
                     version,
@@ -200,6 +269,11 @@ struct macrdp_h264_worker {
     std::condition_variable condition;
     std::optional<EncodeJob> job;
     macrdp_h264_encoded_frame result{};
+    std::vector<BYTE> assembled_frame;
+    UINT32 assembled_stride = 0;
+    UINT32 assembled_width = 0;
+    UINT32 assembled_height = 0;
+    BOOL frame_initialized = FALSE;
     BOOL completion = FALSE;
     BOOL busy = FALSE;
     BOOL stopping = FALSE;
@@ -272,20 +346,47 @@ extern "C" int macrdp_h264_worker_submit(
         return -1;
     }
 
+    if (region->left >= region->right || region->top >= region->bottom
+        || region->right > width || region->bottom > height) {
+        return -1;
+    }
+
+    bool full_frame = false;
     {
         std::lock_guard lock(worker->mutex);
         if (worker->stopping || worker->busy || worker->job.has_value() || worker->completion) {
             return 0;
         }
+        full_frame = !worker->frame_initialized
+            || worker->assembled_width != width
+            || worker->assembled_height != height
+            || worker->assembled_stride != stride;
     }
 
     EncodeJob next;
     try {
-        next.frame.assign(frame, frame + frame_size);
+        next.full_frame = full_frame;
+        if (full_frame) {
+            const size_t required_size =
+                (static_cast<size_t>(height) - 1U) * stride + row_bytes;
+            next.frame.assign(frame, frame + required_size);
+            next.stride = stride;
+        } else {
+            const auto region_width = static_cast<size_t>(region->right - region->left);
+            const auto region_height = static_cast<size_t>(region->bottom - region->top);
+            const auto patch_stride = region_width * 4U;
+            next.frame.resize(patch_stride * region_height);
+            for (size_t row = 0; row < region_height; ++row) {
+                const auto* source = frame
+                    + (static_cast<size_t>(region->top) + row) * stride
+                    + static_cast<size_t>(region->left) * 4U;
+                std::memcpy(next.frame.data() + row * patch_stride, source, patch_stride);
+            }
+            next.stride = static_cast<UINT32>(patch_stride);
+        }
     } catch (...) {
         return -1;
     }
-    next.stride = stride;
     next.width = width;
     next.height = height;
     next.format = format;

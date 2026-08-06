@@ -8,6 +8,7 @@ project(macrdp_cpp
 )
 
 include(FetchContent)
+include(GNUInstallDirs)
 
 enable_testing()
 
@@ -456,6 +457,17 @@ target_include_directories(macrdp-server PRIVATE
 )
 
 target_link_libraries(macrdp-server PRIVATE macrdp_freerdp_shadow)
+
+if(APPLE)
+    add_custom_target(macrdp-package
+        COMMAND ${CMAKE_COMMAND} -E env bash
+            "${CMAKE_CURRENT_SOURCE_DIR}/scripts/package_macos.sh"
+            "$<TARGET_FILE:macrdp-server>"
+            "${CMAKE_CURRENT_BINARY_DIR}/macrdp-dist"
+        DEPENDS macrdp-server
+        USES_TERMINAL
+    )
+endif()
 
 if(MACRDP_FREERDP_WITH_FFMPEG)
     add_executable(macrdp-freerdp-h264-test
