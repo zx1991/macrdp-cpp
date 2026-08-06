@@ -16,6 +16,7 @@
 #include <atomic>
 #include <charconv>
 #include <chrono>
+#include <cerrno>
 #include <csignal>
 #include <cstdint>
 #include <cstdlib>
@@ -56,6 +57,7 @@ struct Options {
     bool avc444 = false;
     bool no_gfx = false;
     bool password_from_stdin = false;
+    std::string password_file;
     std::string log_level = "INFO";
 };
 
@@ -98,6 +100,7 @@ void print_usage(const char* program) {
         << "  --domain <name>             Optional login domain\n"
         << "  --password <value>          Login password (visible in process list)\n"
         << "  --password-stdin            Read one login password line from stdin\n"
+        << "  --password-file <path>      Read one password line from an owner-only file\n"
         << "  --sam-file <path>           Existing FreeRDP NTLM SAM file for NLA\n"
         << "  --config-dir <path>         Certificate and generated SAM directory\n"
         << "  --log-level <level>         FreeRDP log level (default: INFO)\n"
@@ -191,6 +194,73 @@ bool next_value(int& index, int argc, char** argv, std::string& value) {
     return !value.empty();
 }
 
+bool read_password_file(const std::filesystem::path& path, std::string& password) {
+    password.clear();
+    const int descriptor = ::open(path.c_str(), O_RDONLY | O_NOFOLLOW);
+    if (descriptor < 0) {
+        std::cerr << "Unable to open password file " << path << ": "
+                  << std::strerror(errno) << "\n";
+        return false;
+    }
+
+    struct stat file_status {};
+    const bool metadata_ok = ::fstat(descriptor, &file_status) == 0
+        && S_ISREG(file_status.st_mode)
+        && file_status.st_uid == ::geteuid()
+        && (file_status.st_mode & (S_IRWXG | S_IRWXO)) == 0;
+    if (!metadata_ok) {
+        std::cerr << "Password file must be a regular owner-only file owned by the current user: "
+                  << path << "\n";
+        (void)::close(descriptor);
+        return false;
+    }
+
+    std::array<char, 1024> buffer{};
+    bool success = true;
+    while (true) {
+        const ssize_t count = ::read(descriptor, buffer.data(), buffer.size());
+        if (count == 0) {
+            break;
+        }
+        if (count < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            std::cerr << "Unable to read password file " << path << ": "
+                      << std::strerror(errno) << "\n";
+            success = false;
+            break;
+        }
+        if (password.size() + static_cast<std::size_t>(count) > 4096) {
+            std::cerr << "Password file is too large: " << path << "\n";
+            success = false;
+            break;
+        }
+        password.append(buffer.data(), static_cast<std::size_t>(count));
+    }
+    if (::close(descriptor) != 0) {
+        success = false;
+    }
+    if (!success) {
+        clear_secret(password);
+        return false;
+    }
+
+    if (!password.empty() && password.back() == '\n') {
+        password.pop_back();
+        if (!password.empty() && password.back() == '\r') {
+            password.pop_back();
+        }
+    }
+    if (password.find_first_of("\r\n") != std::string::npos
+        || password.find('\0') != std::string::npos) {
+        std::cerr << "Password file must contain exactly one password line: " << path << "\n";
+        clear_secret(password);
+        return false;
+    }
+    return true;
+}
+
 bool parse_options(int argc, char** argv, Options& options) {
     options.config_dir = default_config_dir();
     for (int index = 1; index < argc; ++index) {
@@ -265,18 +335,27 @@ bool parse_options(int argc, char** argv, Options& options) {
                 return false;
             }
         } else if (argument == "--password") {
-            if (options.password_from_stdin
+            if (options.password_from_stdin || !options.password_file.empty()
                 || !next_value(index, argc, argv, options.password)) {
                 std::cerr << "--password requires a non-empty value and cannot be combined with"
-                             " --password-stdin\n";
+                             " --password-stdin or --password-file\n";
                 return false;
             }
         } else if (argument == "--password-stdin") {
-            if (!options.password.empty() || options.password_from_stdin) {
-                std::cerr << "Use only one of --password and --password-stdin\n";
+            if (!options.password.empty() || options.password_from_stdin
+                || !options.password_file.empty()) {
+                std::cerr << "Use only one of --password, --password-stdin, and"
+                             " --password-file\n";
                 return false;
             }
             options.password_from_stdin = true;
+        } else if (argument == "--password-file") {
+            if (!next_value(index, argc, argv, options.password_file)
+                || !options.password.empty() || options.password_from_stdin) {
+                std::cerr << "Use only one of --password, --password-stdin, and"
+                             " --password-file\n";
+                return false;
+            }
         } else if (argument == "--sam-file") {
             if (!next_value(index, argc, argv, options.sam_file)) {
                 std::cerr << "--sam-file requires a non-empty value\n";
@@ -311,6 +390,12 @@ bool parse_options(int argc, char** argv, Options& options) {
         }
     }
 
+    if (!options.password_file.empty()) {
+        if (!read_password_file(options.password_file, options.password)) {
+            return false;
+        }
+    }
+
     if (options.password.empty()) {
         const char* environment_password = std::getenv("MACRDP_PASSWORD");
         if (environment_password != nullptr) {
@@ -333,6 +418,9 @@ bool parse_options(int argc, char** argv, Options& options) {
 
     if (!options.sam_file.empty()) {
         options.sam_file = std::filesystem::absolute(options.sam_file).string();
+    }
+    if (!options.password_file.empty()) {
+        options.password_file = std::filesystem::absolute(options.password_file).string();
     }
     return true;
 }

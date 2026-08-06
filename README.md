@@ -50,7 +50,7 @@ cmake --build build --parallel 8
 ctest --test-dir build --output-on-failure
 ```
 
-To create a relocatable package containing the server and its Homebrew
+To create a relocatable package containing the server and its non-system
 FFmpeg/OpenSSL/cJSON runtime libraries:
 
 ```bash
@@ -119,6 +119,31 @@ printf '%s\n' 'change-this-password' | \
   ./build/macrdp-server --user Xian --password-stdin
 ```
 
+For a long-running server, store the password in an owner-only file and use
+the supplied LaunchAgent installer. The file must be a regular file with no
+group/other permissions, owned by the current user, and must contain one line:
+
+```bash
+umask 077
+mkdir -p "$HOME/Library/Application Support/macrdp-cpp"
+read -r -s macrdp_password
+printf '\n'
+printf '%s\n' "$macrdp_password" \
+  > "$HOME/Library/Application Support/macrdp-cpp/password"
+unset macrdp_password
+
+./scripts/install_launch_agent.sh \
+  ./build/macrdp-dist/bin/macrdp-server \
+  Xian \
+  "$HOME/Library/Application Support/macrdp-cpp/password"
+```
+
+The installer writes `~/Library/LaunchAgents/com.macrdp.cpp.server.plist`,
+starts the service in the logged-in Aqua session, and writes logs below
+`~/Library/Logs/macrdp-cpp`. Grant Screen Recording and Accessibility to the
+exact server executable used by the LaunchAgent. The same mechanism can be
+used manually with `--password-file` when LaunchAgent is not desired.
+
 For a fast local connection, the default VideoToolbox AVC420/16 Mbps profile
 is a good starting point. You can raise the bitrate or explicitly enable the
 more expensive AVC444 path:
@@ -184,9 +209,11 @@ Accessibility. The server checks both permissions before it opens the RDP
 listener.
 
 For an installed binary, grant TCC permissions to the exact executable at
-`build/macrdp-dist/bin/macrdp-server` (or to the terminal used to launch it). Code signing
-and notarization are still deployment tasks for distributing the install to
-other Macs.
+`build/macrdp-dist/bin/macrdp-server` (or to the terminal used to launch it).
+The package script rewrites non-system dependencies to package-relative paths
+and rejects leftover build-machine paths; it is still ad-hoc signed. Developer
+ID signing and notarization remain deployment tasks for distributing the
+install to other Macs.
 
 ## Layout
 
@@ -215,9 +242,9 @@ priority validation still requires a graphical macOS session and a Windows
    this repository, and `mstsc` remains the compatibility target.
 5. Add a macOS microphone/AUDIN implementation if microphone redirection is
    required. The current server supports audio output through RDPSND only.
-6. Add Developer ID signing, notarization, and dependency-minimized packaging
-   for distribution. The local package is ad-hoc signed and currently carries
-   the Homebrew runtime dependency graph.
+6. Add Developer ID signing and notarization for distribution. The local
+   package now carries its non-system runtime dependency closure, but it still
+   includes the full FFmpeg dependency graph and needs a distribution identity.
 
 ## Encoder test
 

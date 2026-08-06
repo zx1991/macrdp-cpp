@@ -41,6 +41,15 @@ is_system_dependency() {
     esac
 }
 
+canonical_existing_path() {
+    local candidate=$1
+    local directory
+
+    [[ -e "$candidate" ]] || return 1
+    directory=$(cd "$(dirname "$candidate")" && pwd -P) || return 1
+    printf '%s/%s\n' "$directory" "$(basename "$candidate")"
+}
+
 contains_path() {
     local candidate=$1
     shift
@@ -58,6 +67,7 @@ resolve_dependency() {
     local dependency=$2
     local candidate
     local name
+    local rpath_base
 
     case "$dependency" in
         /*)
@@ -81,7 +91,21 @@ resolve_dependency() {
             name=${dependency#@rpath/}
             while read -r candidate; do
                 [[ -n "$candidate" ]] || continue
-                candidate="$candidate/$name"
+                case "$candidate" in
+                    @loader_path/*)
+                        rpath_base="$(dirname "$owner")/${candidate#@loader_path/}"
+                        ;;
+                    @executable_path/*)
+                        rpath_base="$output_dir/${candidate#@executable_path/}"
+                        ;;
+                    /*)
+                        rpath_base="$candidate"
+                        ;;
+                    *)
+                        continue
+                        ;;
+                esac
+                candidate="$rpath_base/$name"
                 if [[ -f "$candidate" ]]; then
                     printf '%s\n' "$candidate"
                     return 0
@@ -131,6 +155,13 @@ while [[ ${#queue[@]} -gt 0 ]]; do
             exit 1
         fi
 
+        # An @rpath reference can legitimately resolve to a macOS system
+        # framework/runtime. Keep that reference and its system rpath; only
+        # non-system dependencies belong in the package.
+        if is_system_dependency "$resolved"; then
+            continue
+        fi
+
         name=$(basename "$resolved")
         destination="$output_dir/lib/$name"
         if [[ ! -e "$destination" ]]; then
@@ -151,6 +182,95 @@ while [[ ${#queue[@]} -gt 0 ]]; do
         fi
     done
 done
+
+delete_non_system_rpaths() {
+    local file=$1
+    local rpath
+
+    while read -r rpath; do
+        [[ -n "$rpath" ]] || continue
+        if ! is_system_dependency "$rpath"; then
+            install_name_tool -delete_rpath "$rpath" "$file"
+        fi
+    done < <(otool -l "$file" | awk '$1 == "path" { print $2 }')
+}
+
+validate_dependency() {
+    local owner=$1
+    local dependency=$2
+    local resolved
+    local canonical
+
+    if is_system_dependency "$dependency"; then
+        return 0
+    fi
+
+    case "$dependency" in
+        @loader_path/*|@executable_path/*)
+            resolved=$(resolve_dependency "$owner" "$dependency" || true)
+            canonical=$(canonical_existing_path "$resolved" || true)
+            if [[ -z "$canonical" || "$canonical" != "$output_dir"/* ]]; then
+                printf 'packaged dependency escapes output directory: %s of %s\n' \
+                    "$dependency" "$owner" >&2
+                return 1
+            fi
+            ;;
+        @rpath/*)
+            resolved=$(resolve_dependency "$owner" "$dependency" || true)
+            if [[ -z "$resolved" || ! -f "$resolved" ]]; then
+                printf 'unresolved @rpath dependency %s of %s\n' \
+                    "$dependency" "$owner" >&2
+                return 1
+            fi
+            if ! is_system_dependency "$resolved"; then
+                printf 'non-system @rpath dependency remains: %s of %s\n' \
+                    "$dependency" "$owner" >&2
+                return 1
+            fi
+            ;;
+        /*)
+            printf 'non-system absolute dependency remains: %s of %s\n' \
+                "$dependency" "$owner" >&2
+            return 1
+            ;;
+        *)
+            printf 'unsupported packaged dependency form: %s of %s\n' \
+                "$dependency" "$owner" >&2
+            return 1
+            ;;
+    esac
+}
+
+validate_packaged_file() {
+    local current=$1
+    local dependency
+    local rpath
+
+    while read -r rpath; do
+        [[ -n "$rpath" ]] || continue
+        if ! is_system_dependency "$rpath"; then
+            printf 'non-system LC_RPATH remains in %s: %s\n' "$current" "$rpath" >&2
+            return 1
+        fi
+    done < <(otool -l "$current" | awk '$1 == "path" { print $2 }')
+
+    while read -r dependency; do
+        [[ -n "$dependency" ]] || continue
+        validate_dependency "$current" "$dependency" || return 1
+    done < <(otool -L "$current" | sed -n 's/^[[:space:]]*\([^[:space:]]*\)[[:space:]]*(.*/\1/p')
+}
+
+# Once every non-system dependency has been rewritten to a package-relative
+# install name, non-system rpaths are unnecessary and make the package depend
+# on the build machine. Remove them before signing and fail closed if any
+# external reference remains.
+while IFS= read -r current; do
+    delete_non_system_rpaths "$current"
+done < <(find "$output_dir" -type f \( -name 'macrdp-server' -o -name '*.dylib' \) -print)
+
+while IFS= read -r current; do
+    validate_packaged_file "$current"
+done < <(find "$output_dir" -type f \( -name 'macrdp-server' -o -name '*.dylib' \) -print)
 
 # install_name_tool invalidates an existing signature. Re-sign the modified
 # payload ad hoc so macOS does not kill the packaged process at load time.
