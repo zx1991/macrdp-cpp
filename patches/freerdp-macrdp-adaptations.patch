@@ -1966,3 +1966,51 @@
 +	MONITOR_DEF primary_storage = macrdp_primary_monitor(subsystem);
 +	const MONITOR_DEF* primary = &primary_storage;
  	WINPR_ASSERT(primary);
+--- a/include/freerdp/server/shadow.h
++++ b/include/freerdp/server/shadow.h
+@@ -33,6 +33,7 @@
+ #include <freerdp/server/encomsp.h>
+ #include <freerdp/server/remdesk.h>
+ #include <freerdp/server/rdpsnd.h>
++#include <freerdp/server/cliprdr.h>
+ #if defined(CHANNEL_AUDIN_SERVER)
+ #include <freerdp/server/audin.h>
+ #endif
+@@ -139,6 +140,7 @@
+ 		EncomspServerContext* encomsp;
+ 		RemdeskServerContext* remdesk;
+ 		RdpsndServerContext* rdpsnd;
++		CliprdrServerContext* cliprdr;
+ #if defined(CHANNEL_AUDIN_SERVER)
+ 		audin_server_context* audin;
+ #endif
+--- a/server/shadow/shadow_channels.c
++++ b/server/shadow/shadow_channels.c
+@@ -18,12 +18,20 @@
+ 
+ #include <freerdp/config.h>
+ 
++#include <macrdp/cliprdr_adapter.h>
++
+ #include "shadow.h"
+ 
+ #include "shadow_channels.h"
+ 
+ UINT shadow_client_channels_post_connect(rdpShadowClient* client)
+ {
++	if (WTSVirtualChannelManagerIsChannelJoined(client->vcm, CLIPRDR_SVC_CHANNEL_NAME))
++	{
++		if (!macrdp_shadow_cliprdr_init(client))
++			return ERROR_NOT_READY;
++	}
++
+ 	if (WTSVirtualChannelManagerIsChannelJoined(client->vcm, ENCOMSP_SVC_CHANNEL_NAME))
+ 	{
+ 		if (shadow_client_encomsp_init(client) < 0)
+@@ -58,4 +66,6 @@
+ 	shadow_client_rdpsnd_uninit(client);
+ 	shadow_client_remdesk_uninit(client);
+ 	shadow_client_encomsp_uninit(client);
++	macrdp_shadow_cliprdr_uninit(client);
++	/* MACRDP_CLIPRDR_CHANNEL */
+ }

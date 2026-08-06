@@ -40,6 +40,10 @@ The server currently does not expose a macOS microphone. FreeRDP's AUDIN input
 channel is disabled, so Windows audio output can still be used without an
 unused microphone channel affecting connection setup.
 
+The clipboard channel supports bidirectional text redirection through macOS
+`NSPasteboard`. It advertises and transfers `CF_UNICODETEXT` and `CF_TEXT`.
+Images, files, and directory data are intentionally not redirected yet.
+
 ## Build
 
 ```bash
@@ -231,7 +235,8 @@ priority validation still requires a graphical macOS session and a Windows
 `mstsc` client:
 
 1. Run a current-build matrix for NLA, keyboard, Unicode input, left/right and
-   side buttons, drag, wheel, reconnect, window resize, and a slow client.
+   side buttons, drag, wheel, text clipboard in both directions, reconnect,
+   window resize, and a slow client.
 2. Collect fresh `Slow client frame handling` and `Frame barrier` logs. Logs
    from before the asynchronous worker and non-blocking output changes are not
    evidence about the current build.
@@ -240,9 +245,11 @@ priority validation still requires a graphical macOS session and a Windows
    does not offer multi-monitor selection.
 4. Add a repeatable protocol smoke test. No FreeRDP client binary is built by
    this repository, and `mstsc` remains the compatibility target.
-5. Add a macOS microphone/AUDIN implementation if microphone redirection is
+5. Validate the text-only clipboard implementation with current Windows
+   `mstsc`, then add image/file redirection only if the use case requires it.
+6. Add a macOS microphone/AUDIN implementation if microphone redirection is
    required. The current server supports audio output through RDPSND only.
-6. Add Developer ID signing and notarization for distribution. The local
+7. Add Developer ID signing and notarization for distribution. The local
    package now carries its non-system runtime dependency closure, but it still
    includes the full FFmpeg dependency graph and needs a distribution identity.
 
