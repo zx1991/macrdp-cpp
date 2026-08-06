@@ -559,6 +559,9 @@ bool copy_frame_to_surface(MacShadowSubsystem* subsystem, const macrdp::Frame& f
         LeaveCriticalSection(&surface->lock);
         return false;
     }
+    if (changed) {
+        surface->macrdpFrameGeneration++;
+    }
     LeaveCriticalSection(&surface->lock);
 
     if (!changed) {

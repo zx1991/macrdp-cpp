@@ -13,6 +13,12 @@
  		rdpShadowServer* server;
  		rdpShadowEncoder* encoder;
  		rdpShadowSubsystem* subsystem;
+@@ -205,3 +205,5 @@
+ 		CRITICAL_SECTION lock;
+ 		REGION16 invalidRegion;
++		UINT64 macrdpFrameGeneration;
++		/* MACRDP_SURFACE_FRAME_GENERATION */
+ 	};
 --- a/server/shadow/shadow_client.c
 +++ b/server/shadow/shadow_client.c
 @@ -242,6 +242,9 @@
@@ -57,7 +63,7 @@
  
  	if (client->resizeRequested)
  	{
-@@ -2205,10 +2216,69 @@
+@@ -2205,10 +2216,70 @@
   *
   * @return TRUE on success (or nothing need to be updated)
   */
@@ -125,10 +131,11 @@
  	BOOL ret = TRUE;
 +	BOOL has_update = FALSE;
 +	BOOL surface_locked = FALSE;
++	UINT64 snapshotGeneration = 0;
  	INT64 nXSrc = 0;
  	INT64 nYSrc = 0;
  	INT64 nWidth = 0;
-@@ -2227,37 +2272,52 @@
+@@ -2227,37 +2272,53 @@
  	const RECTANGLE_16* rects = nullptr;
  
  	if (!context || !pStatus)
@@ -177,7 +184,8 @@
  
  	EnterCriticalSection(&surface->lock);
 +	surface_locked = TRUE;
- 	rects = region16_rects(&(surface->invalidRegion), &numRects);
++	snapshotGeneration = surface->macrdpFrameGeneration;
+	rects = region16_rects(&(surface->invalidRegion), &numRects);
  
  	for (UINT32 index = 0; index < numRects; index++)
  	{
@@ -235,14 +243,15 @@
  	SrcFormat = surface->format;
  
  	/* Move to new pSrcData / nXSrc / nYSrc according to sub rect */
-@@ -2306,6 +2378,20 @@
+@@ -2306,6 +2378,21 @@
  		pSrcData = &pSrcData[((UINT16)subY * nSrcStep) + ((UINT16)subX * 4U)];
  	}
  
 +release_surface:
 +	if (surface_locked)
 +	{
-+		if (shadow_multiclient_consume_nowait(updateSubscriber))
++		const BOOL last = shadow_multiclient_consume_nowait(updateSubscriber);
++		if (last && surface->macrdpFrameGeneration == snapshotGeneration)
 +			region16_clear(&(surface->invalidRegion));
 +		LeaveCriticalSection(&surface->lock);
 +	}
@@ -279,7 +288,58 @@
  	return ret;
  }
  
-@@ -2715,9 +2715,10 @@
+@@ -2561,15 +2561,21 @@
+ static inline BOOL shadow_client_no_surface_update(rdpShadowClient* client,
+-                                                   SHADOW_GFX_STATUS* pStatus)
++                                                   SHADOW_GFX_STATUS* pStatus,
++                                                   void* updateSubscriber)
+ {
+ 	rdpShadowServer* server = nullptr;
+ 	rdpShadowSurface* surface = nullptr;
++	UINT64 snapshotGeneration = 0;
+ 	WINPR_UNUSED(pStatus);
+ 	WINPR_ASSERT(client);
+ 	server = client->server;
+ 	WINPR_ASSERT(server);
+ 	surface = client->inLobby ? server->lobby : server->surface;
+ 	EnterCriticalSection(&surface->lock);
++	snapshotGeneration = surface->macrdpFrameGeneration;
+ 	const BOOL rc = shadow_client_surface_update(client, &(surface->invalidRegion));
++	const BOOL last = shadow_multiclient_consume_nowait(updateSubscriber);
++	if (last && surface->macrdpFrameGeneration == snapshotGeneration)
++		region16_clear(&(surface->invalidRegion));
+ 	LeaveCriticalSection(&surface->lock);
+ 	return rc;
+ }
+@@ -2651,5 +2651,9 @@
+ 	rc = peer->Initialize(peer);
+ 	if (!rc)
+ 		goto out;
++
++	if (!freerdp_settings_set_bool(settings, FreeRDP_WaitForOutputBufferFlush, FALSE))
++		goto out;
++	/* MACRDP_NONBLOCKING_OUTPUT */
+ 
+ 	update = peer->context->update;
+@@ -2715,9 +2721,28 @@
++		if (peer->IsWriteBlocked && peer->IsWriteBlocked(peer))
++		{
++			const int drainStatus =
++				peer->DrainOutputBuffer ? peer->DrainOutputBuffer(peer) : -1;
++			if (drainStatus < 0)
++			{
++				WLog_ERR(TAG, "Failed to drain FreeRDP output buffer");
++				goto fail;
++			}
++		}
++
++		WINPR_ASSERT(peer->CheckFileDescriptor);
++		if (!peer->CheckFileDescriptor(peer))
++		{
++			WLog_ERR(TAG, "Failed to check FreeRDP input before frame update");
++			goto fail;
++		}
++
 -		if (WaitForSingleObject(UpdateEvent, 0) == WAIT_OBJECT_0)
 +		if (WaitForSingleObject(UpdateEvent, 0) == WAIT_OBJECT_0 &&
 +		    shadow_multiclient_subscriber_pending(UpdateSubscriber))
@@ -291,7 +351,7 @@
  			 * (at shadow_multiclient_consume). As best practice, subsystem
  			 * implementation should invoke shadow_subsystem_frame_update which
  			 * triggers the event and then wait for completion */
-@@ -2725,43 +2803,48 @@
+@@ -2725,43 +2803,46 @@
  			{
  				/* Send screen update or resize to this client */
  
@@ -336,10 +396,9 @@
 -					/* Send frame */
 -					if (!shadow_client_send_surface_update(client, &gfxstatus))
 +					/* Our client don't receive graphic updates. Just save the invalid region */
-+					if (!shadow_client_no_surface_update(client, &gfxstatus))
++					if (!shadow_client_no_surface_update(client, &gfxstatus, UpdateSubscriber))
  					{
 -						WLog_ERR(TAG, "Failed to send surface update");
-+						(void)shadow_multiclient_consume_nowait(UpdateSubscriber);
 +						WLog_ERR(TAG, "Failed to handle surface update");
  						break;
  					}
@@ -352,9 +411,8 @@
 -				{
 -					WLog_ERR(TAG, "Failed to handle surface update");
 -					break;
-+					(void)shadow_multiclient_consume_nowait(UpdateSubscriber);
- 				}
- 			}
+				}
+			}
  
 -			/*
 -			 * The return value of shadow_multiclient_consume is whether or not
@@ -363,9 +421,9 @@
 -			(void)shadow_multiclient_consume(UpdateSubscriber);
 -		}
 -
- 		WINPR_ASSERT(peer->CheckFileDescriptor);
- 		if (!peer->CheckFileDescriptor(peer))
- 		{
+		WINPR_ASSERT(peer->CheckFileDescriptor);
+		if (!peer->CheckFileDescriptor(peer))
+		{
 --- a/libfreerdp/codec/h264_ffmpeg.c
 +++ b/libfreerdp/codec/h264_ffmpeg.c
 @@ -21,6 +21,9 @@
@@ -603,13 +661,31 @@
 +#include <inttypes.h>
  #include <freerdp/log.h>
  #include "shadow.h"
-@@ -116,3 +116,7 @@
+@@ -29,13 +29,14 @@
+ struct rdp_shadow_multiclient_event
+ {
+ 	HANDLE event;        /* Kickoff event */
+ 	HANDLE barrierEvent; /* Represents that all clients have consumed event */
+ 	HANDLE doneEvent;    /* Event handling finished. Server could continue */
+ 	wArrayList* subscribers;
+ 	CRITICAL_SECTION lock;
+ 	int consuming;
+ 	int waiting;
++	BOOL pending;
+ 
+ 	/* For debug */
+ 	int eventid;
+ };
+@@ -116,3 +116,10 @@
 -	WINPR_ASSERT(event->consuming == 0);
-+	/* A slow client may still be consuming the current event. Its surface
-+	 * snapshot will include all changes made before it releases the surface
-+	 * lock, so coalesce newer notifications instead of blocking the publisher. */
++	/* A slow client may still be consuming the current event. Coalesce newer
++	 * notifications and publish them after the current event is consumed. */
 +	if (event->consuming > 0)
++	{
++		event->pending = TRUE;
 +		return;
++	}
++	event->pending = FALSE;
  
  	/* Count subscribing clients */
 @@ -136,11 +142,18 @@
@@ -631,14 +707,61 @@
 +			          event->eventid, (uint64_t)waitElapsed, expectedConsumers);
 +		/* MACRDP_FRAME_BARRIER_DIAGNOSTICS */
  	}
-@@ -335,7 +335,59 @@
+@@ -179,3 +179,6 @@
+ 	LeaveCriticalSection(&(event->lock));
+ }
++
++static void PublishPending(rdpShadowMultiClientEvent* event);
++
+ static BOOL Consume(struct rdp_shadow_multiclient_subscriber* subscriber, BOOL wait)
+@@ -186,6 +188,7 @@
+ 	if (WaitForSingleObject(event->event, 0) == WAIT_OBJECT_0 && subscriber->pleaseHandle)
+ 	{
+ 		/* Consume my share. Server is waiting for us */
+ 		event->consuming--;
++		subscriber->pleaseHandle = FALSE;
+ 		ret = TRUE;
+ 	}
+@@ -235,5 +238,8 @@
+ 		}
+ 	}
++
++	if (ret && event->consuming == 0 && event->waiting == 0)
++		PublishPending(event);
+ 
+ 	return ret;
+ }
+@@ -295,11 +301,10 @@
+ 	EnterCriticalSection(&(event->lock));
+ 
+ 	WLog_VRB(TAG, "Release Subscriber %p. Drop event %d. %d clients.\n", subscriber, event->eventid,
+ 	         event->consuming);
+-	(void)Consume(s, FALSE);
++	ArrayList_Remove(event->subscribers, subscriber);
++	(void)Consume(s, FALSE);
+ 	WLog_VRB(TAG, "Release Subscriber %p. Quit event %d. %d clients.\n", subscriber, event->eventid,
+ 	         event->consuming);
+ 
+-	ArrayList_Remove(event->subscribers, subscriber);
+-
+ 	LeaveCriticalSection(&(event->lock));
+@@ -335,7 +335,69 @@
  HANDLE shadow_multiclient_getevent(void* subscriber)
  {
  	if (!subscriber)
  		return (HANDLE) nullptr;
  
- 	return ((struct rdp_shadow_multiclient_subscriber*)subscriber)->ref->event;
+	return ((struct rdp_shadow_multiclient_subscriber*)subscriber)->ref->event;
  }
++
++static void PublishPending(rdpShadowMultiClientEvent* event)
++{
++	if (event->consuming != 0 || event->waiting != 0 || !event->pending)
++		return;
++
++	Publish(event);
++	/* MACRDP_PENDING_FRAME_EVENT */
++}
 +
 +BOOL shadow_multiclient_consume_nowait(void* subscriber)
 +{
@@ -667,6 +790,7 @@
 +			last = TRUE;
 +		}
 +	}
++	PublishPending(event);
 +	WINPR_ASSERT(event->consuming >= 0);
 +	LeaveCriticalSection(&(event->lock));
 +
