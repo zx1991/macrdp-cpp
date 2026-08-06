@@ -17,6 +17,7 @@
 #include <cinttypes>
 #include <cstdint>
 #include <cstring>
+#include <cstdlib>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -96,6 +97,39 @@ struct mac_shadow_subsystem {
 };
 
 using MacShadowSubsystem = struct mac_shadow_subsystem;
+
+void free_pointer_position_message(UINT32, SHADOW_MSG_OUT* message) {
+    std::free(message);
+}
+
+void publish_pointer_position(
+    MacShadowSubsystem* subsystem,
+    UINT16 x,
+    UINT16 y) {
+    if (subsystem == nullptr || subsystem->common.server == nullptr) {
+        return;
+    }
+
+    subsystem->common.pointerX = x;
+    subsystem->common.pointerY = y;
+
+    auto* message = static_cast<SHADOW_MSG_OUT_POINTER_POSITION_UPDATE*>(
+        std::calloc(1, sizeof(SHADOW_MSG_OUT_POINTER_POSITION_UPDATE)));
+    if (message == nullptr) {
+        WLog_WARN(TAG, "Unable to allocate RDP pointer position update");
+        return;
+    }
+
+    message->common.Free = free_pointer_position_message;
+    message->xPos = x;
+    message->yPos = y;
+    (void)shadow_client_boardcast_msg(
+        subsystem->common.server,
+        nullptr,
+        SHADOW_MSG_OUT_POINTER_POSITION_UPDATE_ID,
+        &message->common,
+        nullptr);
+}
 
 bool display_dimensions(std::uint32_t& width, std::uint32_t& height) {
     const auto display = CGMainDisplayID();
@@ -240,6 +274,7 @@ bool post_mouse_event(
     std::lock_guard lock(subsystem->input_mutex);
     subsystem->pointer_x = x;
     subsystem->pointer_y = y;
+    publish_pointer_position(subsystem, x, y);
 
     CGEventSourceRef source = CGEventSourceCreate(kCGEventSourceStateHIDSystemState);
     if (source == nullptr) {
@@ -345,6 +380,7 @@ bool post_extended_mouse_event(
     std::lock_guard lock(subsystem->input_mutex);
     subsystem->pointer_x = x;
     subsystem->pointer_y = y;
+    publish_pointer_position(subsystem, x, y);
     const CGPoint point = display_point(subsystem, x, y);
     const bool down = (flags & PTR_XFLAGS_DOWN) != 0;
     const UINT16 button_flags = flags & (PTR_XFLAGS_BUTTON1 | PTR_XFLAGS_BUTTON2);
