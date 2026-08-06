@@ -14,8 +14,10 @@ are implemented in `src/macos/*.mm`.
 The project now includes an experimental RDP shadow server. It reuses the
 FreeRDP 3.30.0 server/shadow core, captures the macOS main display through
 ScreenCaptureKit, and injects keyboard and mouse input through CoreGraphics.
-The default security mode is NLA and the default video path enables FreeRDP's
-FFmpeg-backed H.264 graphics pipeline.
+The default security mode is NLA and the default video path uses FreeRDP's
+FFmpeg-backed AVC420 H.264 graphics pipeline at 16 Mbps. AVC420 keeps the
+software encoder responsive for interactive use; AVC444 remains available for
+clients that need higher chroma fidelity.
 
 ## Build
 
@@ -64,6 +66,18 @@ read from standard input so it does not appear in the process list:
 ```bash
 printf '%s\n' 'change-this-password' | \
   ./build/macrdp-server --user Xian --password-stdin
+```
+
+For a fast local connection, the default AVC420/16 Mbps profile is a good
+starting point. You can raise the bitrate or explicitly enable the more
+expensive AVC444 path:
+
+```bash
+printf '%s\n' 'change-this-password' | \
+  ./build/macrdp-server --user Xian --password-stdin --bitrate 24M
+
+printf '%s\n' 'change-this-password' | \
+  ./build/macrdp-server --user Xian --password-stdin --bitrate 24M --avc444
 ```
 
 Then connect from Windows Remote Desktop (`mstsc`) to the Mac's IP address.

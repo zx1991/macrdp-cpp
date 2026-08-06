@@ -44,6 +44,8 @@ struct Options {
     std::string password;
     std::string sam_file;
     std::filesystem::path config_dir;
+    std::uint32_t h264_bitrate = 16'000'000;
+    bool avc444 = false;
     bool password_from_stdin = false;
     std::string log_level = "INFO";
 };
@@ -76,6 +78,8 @@ void print_usage(const char* program) {
         << "\n"
         << "  --port <number>             Listen port (default: 3389)\n"
         << "  --security <nla|tls|rdp>    Security protocol (default: nla)\n"
+        << "  --bitrate <value>           H.264 rate, e.g. 16M (default: 16M)\n"
+        << "  --avc444                    Use AVC444 (higher CPU and color fidelity)\n"
         << "  --user <name>               Login user for generated SAM/TLS auth\n"
         << "  --domain <name>             Optional login domain\n"
         << "  --password <value>          Login password (visible in process list)\n"
@@ -102,6 +106,34 @@ bool parse_port(std::string_view value, std::uint16_t& port) {
         return false;
     }
     port = static_cast<std::uint16_t>(parsed);
+    return true;
+}
+
+bool parse_bitrate(std::string_view value, std::uint32_t& bitrate) {
+    if (value.empty()) {
+        return false;
+    }
+
+    std::uint64_t multiplier = 1;
+    const char suffix = value.back();
+    if (suffix == 'k' || suffix == 'K') {
+        multiplier = 1'000;
+        value.remove_suffix(1);
+    } else if (suffix == 'm' || suffix == 'M') {
+        multiplier = 1'000'000;
+        value.remove_suffix(1);
+    }
+    if (value.empty()) {
+        return false;
+    }
+
+    std::uint64_t parsed = 0;
+    const auto result = std::from_chars(value.data(), value.data() + value.size(), parsed);
+    if (result.ec != std::errc{} || result.ptr != value.data() + value.size()
+        || parsed == 0 || parsed > std::numeric_limits<std::uint32_t>::max() / multiplier) {
+        return false;
+    }
+    bitrate = static_cast<std::uint32_t>(parsed * multiplier);
     return true;
 }
 
@@ -146,6 +178,14 @@ bool parse_options(int argc, char** argv, Options& options) {
                 std::cerr << "--security must be nla, tls, or rdp\n";
                 return false;
             }
+        } else if (argument == "--bitrate") {
+            if (!next_value(index, argc, argv, value)
+                || !parse_bitrate(value, options.h264_bitrate)) {
+                std::cerr << "--bitrate must be a positive value in bps, Kbps, or Mbps\n";
+                return false;
+            }
+        } else if (argument == "--avc444") {
+            options.avc444 = true;
         } else if (argument == "--user") {
             if (!next_value(index, argc, argv, options.username)) {
                 std::cerr << "--user requires a non-empty value\n";
@@ -327,7 +367,7 @@ bool configure_server(rdpShadowServer* server, const Options& options, const std
     server->ShowMouseCursor = FALSE;
     // Windows 11 24H2 clients are more reliable with one bitmap rectangle.
     server->SupportMultiRectBitmapUpdates = FALSE;
-    server->h264BitRate = 8'000'000;
+    server->h264BitRate = options.h264_bitrate;
     server->h264FrameRate = 30;
     server->h264QP = 0;
 
@@ -347,8 +387,8 @@ bool configure_server(rdpShadowServer* server, const Options& options, const std
 
 #if defined(WITH_GFX_H264)
     if (!freerdp_settings_set_bool(server->settings, FreeRDP_GfxH264, TRUE)
-        || !freerdp_settings_set_bool(server->settings, FreeRDP_GfxAVC444, TRUE)
-        || !freerdp_settings_set_bool(server->settings, FreeRDP_GfxAVC444v2, TRUE)) {
+        || !freerdp_settings_set_bool(server->settings, FreeRDP_GfxAVC444, options.avc444)
+        || !freerdp_settings_set_bool(server->settings, FreeRDP_GfxAVC444v2, options.avc444)) {
         return false;
     }
 #else
