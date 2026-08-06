@@ -134,6 +134,8 @@ set(WITH_CLANG_FORMAT OFF CACHE BOOL "Do not configure clang-format" FORCE)
 set(WITH_SERVER_INTERFACE ON CACHE BOOL "Build FreeRDP server interface" FORCE)
 set(WITH_WINPR_JSON OFF CACHE BOOL "Do not build optional WinPR JSON support" FORCE)
 set(WITH_WINPR_TOOLS_CLI OFF CACHE BOOL "Do not build WinPR command-line tools" FORCE)
+set(WITH_VERBOSE_WINPR_ASSERT OFF CACHE BOOL
+    "Disable verbose WinPR runtime assertions in Release builds" FORCE)
 set(WITH_VAAPI_H264_ENCODING OFF CACHE BOOL "Do not configure VAAPI H.264 encoding" FORCE)
 
 # The upstream shadow implementation references these channel contexts even
