@@ -1230,6 +1230,9 @@ bool refresh_display_surface(MacShadowSubsystem* subsystem) {
         return false;
     }
 
+    if (subsystem->common.macrdpMonitorLockInitialized) {
+        EnterCriticalSection(&subsystem->common.macrdpMonitorLock);
+    }
     const auto& current_monitor = subsystem->common.monitors[0];
     const bool changed = current_monitor.left != next_monitor.left
         || current_monitor.top != next_monitor.top
@@ -1237,12 +1240,19 @@ bool refresh_display_surface(MacShadowSubsystem* subsystem) {
         || current_monitor.bottom != next_monitor.bottom
         || current_monitor.flags != next_monitor.flags;
     if (!changed) {
+        if (subsystem->common.macrdpMonitorLockInitialized) {
+            LeaveCriticalSection(&subsystem->common.macrdpMonitorLock);
+        }
         return true;
     }
 
     subsystem->common.monitors[0] = next_monitor;
     subsystem->common.numMonitors = 1;
-    if (!shadow_screen_resize(subsystem->common.server->screen)) {
+    const bool resized = shadow_screen_resize(subsystem->common.server->screen) != 0;
+    if (subsystem->common.macrdpMonitorLockInitialized) {
+        LeaveCriticalSection(&subsystem->common.macrdpMonitorLock);
+    }
+    if (!resized) {
         return false;
     }
 
@@ -1365,11 +1375,20 @@ int mac_shadow_subsystem_init(rdpShadowSubsystem* base) {
         return -1;
     }
 
+    if (subsystem->common.macrdpMonitorLockInitialized) {
+        EnterCriticalSection(&subsystem->common.macrdpMonitorLock);
+    }
     const UINT32 monitor_count = mac_shadow_enum_monitors(subsystem->common.monitors, 16);
     if (monitor_count == 0 || subsystem->common.selectedMonitor >= monitor_count) {
+        if (subsystem->common.macrdpMonitorLockInitialized) {
+            LeaveCriticalSection(&subsystem->common.macrdpMonitorLock);
+        }
         return -1;
     }
     subsystem->common.numMonitors = monitor_count;
+    if (subsystem->common.macrdpMonitorLockInitialized) {
+        LeaveCriticalSection(&subsystem->common.macrdpMonitorLock);
+    }
     return 1;
 }
 
@@ -1501,11 +1520,22 @@ void mac_shadow_subsystem_free(rdpShadowSubsystem* base) {
     }
     (void)mac_shadow_subsystem_stop(base);
     clear_secret(subsystem->password);
+    if (subsystem->common.macrdpMonitorLockInitialized) {
+        DeleteCriticalSection(&subsystem->common.macrdpMonitorLock);
+        subsystem->common.macrdpMonitorLockInitialized = FALSE;
+    }
     delete subsystem;
 }
 
 rdpShadowSubsystem* mac_shadow_subsystem_new() {
     auto* subsystem = new MacShadowSubsystem{};
+    if (!InitializeCriticalSectionAndSpinCount(
+            &subsystem->common.macrdpMonitorLock,
+            4000)) {
+        delete subsystem;
+        return nullptr;
+    }
+    subsystem->common.macrdpMonitorLockInitialized = TRUE;
     {
         std::lock_guard lock(g_credentials_mutex);
         subsystem->username = g_credentials.username;

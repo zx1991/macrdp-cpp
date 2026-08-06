@@ -24,6 +24,38 @@
  	};
  
  	struct S_RDP_SHADOW_ENTRY_POINTS
+@@ -235,8 +235,11 @@
+ 	struct rdp_shadow_subsystem
+ 	{
+ 		RDP_SHADOW_ENTRY_POINTS ep;
+ 		HANDLE event;
+ 		UINT32 numMonitors;
++		CRITICAL_SECTION macrdpMonitorLock;
++		BOOL macrdpMonitorLockInitialized;
++		/* MACRDP_MONITOR_STATE_LOCK */
+ 		UINT32 captureFrameRate;
+ 		UINT32 selectedMonitor;
+ 		MONITOR_DEF monitors[16];
+--- a/server/shadow/shadow_client.c
++++ b/server/shadow/shadow_client.c
+@@ -219,5 +219,14 @@
+ 	pdu.width = freerdp_settings_get_uint32(settings, FreeRDP_DesktopWidth);
+ 	pdu.height = freerdp_settings_get_uint32(settings, FreeRDP_DesktopHeight);
+-	pdu.monitorCount = client->subsystem->numMonitors;
+-	pdu.monitorDefArray = client->subsystem->monitors;
++	MONITOR_DEF monitor_snapshot[16] = { 0 };
++	UINT32 monitor_count = 0;
++	if (client->subsystem->macrdpMonitorLockInitialized)
++		EnterCriticalSection(&(client->subsystem->macrdpMonitorLock));
++	monitor_count = MIN(client->subsystem->numMonitors, ARRAYSIZE(monitor_snapshot));
++	CopyMemory(monitor_snapshot, client->subsystem->monitors,
++	           monitor_count * sizeof(monitor_snapshot[0]));
++	if (client->subsystem->macrdpMonitorLockInitialized)
++		LeaveCriticalSection(&(client->subsystem->macrdpMonitorLock));
++	pdu.monitorCount = monitor_count;
++	pdu.monitorDefArray = monitor_snapshot;
+ 	IFCALLRET(context->ResetGraphics, error, context, &pdu);
+
 --- a/libfreerdp/codec/h264_ffmpeg.c
 +++ b/libfreerdp/codec/h264_ffmpeg.c
 @@ -21,6 +21,9 @@
@@ -1872,3 +1904,40 @@
  			{
  				RECTANGLE_16 rect;
  				rect.left = (UINT16)MIN(UINT16_MAX, regionRect->left + x);
+--- a/server/shadow/shadow_screen.c
++++ b/server/shadow/shadow_screen.c
+@@ -25,4 +25,17 @@
+ #include "shadow_screen.h"
+ #include "shadow_lobby.h"
+ 
++static MONITOR_DEF macrdp_primary_monitor(rdpShadowSubsystem* subsystem)
++{
++	MONITOR_DEF primary = { 0 };
++	if (subsystem->macrdpMonitorLockInitialized)
++		EnterCriticalSection(&(subsystem->macrdpMonitorLock));
++	WINPR_ASSERT(subsystem->selectedMonitor < ARRAYSIZE(subsystem->monitors));
++	primary = subsystem->monitors[subsystem->selectedMonitor];
++	if (subsystem->macrdpMonitorLockInitialized)
++		LeaveCriticalSection(&(subsystem->macrdpMonitorLock));
++	return primary;
++}
++/* MACRDP_MONITOR_STATE_READ */
++
+ rdpShadowScreen* shadow_screen_new(rdpShadowServer* server)
+@@ -47,5 +47,6 @@
+ 		{
+ 			WINPR_ASSERT(subsystem->selectedMonitor < ARRAYSIZE(subsystem->monitors));
+-			const MONITOR_DEF* primary = &(subsystem->monitors[subsystem->selectedMonitor]);
++			MONITOR_DEF primary_storage = macrdp_primary_monitor(subsystem);
++			const MONITOR_DEF* primary = &primary_storage;
+ 			WINPR_ASSERT(primary);
+
+@@ -132,6 +132,7 @@
+ 	rdpShadowSubsystem* subsystem = screen->server->subsystem;
+ 	WINPR_ASSERT(subsystem);
+ 	WINPR_ASSERT(subsystem->monitors);
+ 
+-	MONITOR_DEF* primary = &(subsystem->monitors[subsystem->selectedMonitor]);
++	MONITOR_DEF primary_storage = macrdp_primary_monitor(subsystem);
++	const MONITOR_DEF* primary = &primary_storage;
+ 	WINPR_ASSERT(primary);
