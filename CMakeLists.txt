@@ -633,3 +633,61 @@ add_test(
         --password test
 )
 set_tests_properties(server_invalid_bind_address PROPERTIES WILL_FAIL TRUE)
+
+add_test(
+    NAME server_missing_password
+    COMMAND macrdp-server
+        --user Xian
+)
+set_tests_properties(server_missing_password PROPERTIES WILL_FAIL TRUE)
+
+add_test(
+    NAME server_missing_user
+    COMMAND macrdp-server
+        --password test
+)
+set_tests_properties(server_missing_user PROPERTIES WILL_FAIL TRUE)
+
+add_test(
+    NAME server_empty_password
+    COMMAND macrdp-server
+        --user Xian
+        --password ""
+)
+set_tests_properties(server_empty_password PROPERTIES WILL_FAIL TRUE)
+
+add_test(
+    NAME server_invalid_security
+    COMMAND macrdp-server
+        --security invalid
+        --user Xian
+        --password test
+)
+set_tests_properties(server_invalid_security PROPERTIES WILL_FAIL TRUE)
+
+add_test(
+    NAME server_invalid_port
+    COMMAND macrdp-server
+        --port 0
+        --user Xian
+        --password test
+)
+set_tests_properties(server_invalid_port PROPERTIES WILL_FAIL TRUE)
+
+add_test(
+    NAME server_invalid_bitrate
+    COMMAND macrdp-server
+        --bitrate 0
+        --user Xian
+        --password test
+)
+set_tests_properties(server_invalid_bitrate PROPERTIES WILL_FAIL TRUE)
+
+add_test(
+    NAME server_invalid_fps
+    COMMAND macrdp-server
+        --fps 0
+        --user Xian
+        --password test
+)
+set_tests_properties(server_invalid_fps PROPERTIES WILL_FAIL TRUE)
