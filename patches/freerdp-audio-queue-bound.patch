@@ -1,0 +1,95 @@
+--- a/include/freerdp/server/shadow.h
++++ b/include/freerdp/server/shadow.h
+@@ -131,6 +131,9 @@
+ 		BOOL macrdpH264CompletionDeferred;
+ 		UINT64 macrdpH264LastDiagnostics;
+ 		/* MACRDP_CLIENT_FRAME_SNAPSHOT */
++		/* MACRDP_AUDIO_QUEUE_BOUND */
++		LONG macrdpAudioMessageQueued;
++		LONG macrdpAudioMessagesDropped;
+ 		rdpShadowServer* server;
+ 		rdpShadowEncoder* encoder;
+ 		rdpShadowSubsystem* subsystem;
+--- a/server/shadow/shadow_client.c
++++ b/server/shadow/shadow_client.c
+@@ -3299,12 +3299,14 @@
+ 			if (blockedDuration > outputBlockedMaxMs)
+ 				outputBlockedMaxMs = blockedDuration;
+ 			WLog_INFO(TAG,
+ 			          "Output pipeline recovered: blocked_ms=%llu blocked_max_ms=%llu "
+-			          "blocked_events=%llu drain_attempts=%llu",
++			          "blocked_events=%llu drain_attempts=%llu audio_dropped=%ld",
+ 			          (unsigned long long)outputBlockedTotalMs,
+ 			          (unsigned long long)outputBlockedMaxMs,
+ 			          (unsigned long long)outputBlockedEvents,
+-			          (unsigned long long)outputDrainAttempts);
++			          (unsigned long long)outputDrainAttempts,
++			          (long)InterlockedCompareExchange(
++			              &client->macrdpAudioMessagesDropped, 0, 0));
+ 			outputBlockedSince = 0;
+ 			outputLastDiagnostics = 0;
+ 		}
+@@ -3314,10 +3317,12 @@
+ 			const ULONGLONG currentBlockedMs = outputNow - outputBlockedSince;
+ 			WLog_INFO(TAG,
+ 			          "Output pipeline blocked: blocked_ms=%llu blocked_max_ms=%llu "
+-			          "blocked_events=%llu drain_attempts=%llu",
++			          "blocked_events=%llu drain_attempts=%llu audio_dropped=%ld",
+ 			          (unsigned long long)(outputBlockedTotalMs + currentBlockedMs),
+ 			          (unsigned long long)outputBlockedMaxMs,
+ 			          (unsigned long long)outputBlockedEvents,
+-			          (unsigned long long)outputDrainAttempts);
++			          (unsigned long long)outputDrainAttempts,
++			          (long)InterlockedCompareExchange(
++			              &client->macrdpAudioMessagesDropped, 0, 0));
+ 			outputLastDiagnostics = outputNow;
+ 		}
+@@ -3508,6 +3514,13 @@
+ 			/* MACRDP_MESSAGE_BUDGET */
+ 			while (messageBudget-- > 0 && MessageQueue_Peek(MsgQueue, &message, TRUE))
+ 			{
++				if (message.id == SHADOW_MSG_OUT_AUDIO_OUT_SAMPLES_ID)
++				{
++					/* The queue owns this message now; allow one replacement to wait. */
++					/* MACRDP_AUDIO_QUEUE_BOUND */
++					InterlockedExchange(&client->macrdpAudioMessageQueued, FALSE);
++				}
++
+ 				if (message.id == WMQ_QUIT)
+ 				{
+ 					break;
+@@ -3708,18 +3721,34 @@
+ static BOOL shadow_client_dispatch_msg(rdpShadowClient* client, wMessage* message)
+ {
+ 	if (!client || !message)
+ 		return FALSE;
+ 
++	if (message->id == SHADOW_MSG_OUT_AUDIO_OUT_SAMPLES_ID)
++	{
++		rdpTransport* transport = client->context.rdp ? client->context.rdp->transport : nullptr;
++		/* Audio is real-time. Reject it before it enters a blocked transport or
++		 * creates an unbounded MessageQueue backlog. */
++		if ((transport && transport_is_write_blocked(transport))
++		    || InterlockedCompareExchange(
++			       &client->macrdpAudioMessageQueued, TRUE, FALSE) != FALSE)
++		{
++			InterlockedIncrement(&client->macrdpAudioMessagesDropped);
++			return FALSE;
++		}
++	}
++
+ 	/* Add reference when it is posted */
+ 	shadow_msg_out_addref(message);
+ 
+ 	WINPR_ASSERT(client->MsgQueue);
+ 	if (MessageQueue_Dispatch(client->MsgQueue, message))
+ 		return TRUE;
+ 	else
+ 	{
+ 		/* Release the reference since post failed */
+ 		shadow_msg_out_release(message);
++		if (message->id == SHADOW_MSG_OUT_AUDIO_OUT_SAMPLES_ID)
++			InterlockedExchange(&client->macrdpAudioMessageQueued, FALSE);
+ 		return FALSE;
+ 	}
+ }

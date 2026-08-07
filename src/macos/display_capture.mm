@@ -838,10 +838,12 @@ bool DisplayCapture::Impl::start_locked() {
                     std::uint32_t{1},
                     std::uint32_t{60})));
             configuration.showsCursor = capture_options.show_cursor;
-            configuration.capturesAudio = YES;
-            configuration.sampleRate = 48000;
-            configuration.channelCount = 2;
-            configuration.excludesCurrentProcessAudio = YES;
+            configuration.capturesAudio = capture_options.capture_audio ? YES : NO;
+            if (capture_options.capture_audio) {
+                configuration.sampleRate = 48000;
+                configuration.channelCount = 2;
+                configuration.excludesCurrentProcessAudio = YES;
+            }
             configuration.queueDepth = 2;
             configuration.preservesAspectRatio = YES;
             configuration.scalesToFit = YES;
@@ -866,14 +868,16 @@ bool DisplayCapture::Impl::start_locked() {
             }
 
             NSError* audio_add_error = nil;
-            dispatch_queue_t audio_queue = dispatch_queue_create(
-                "com.macrdp.cpp.audio-capture",
-                DISPATCH_QUEUE_SERIAL);
-            if ([new_stream addStreamOutput:new_output
-                type:SCStreamOutputTypeAudio
-                sampleHandlerQueue:audio_queue
-                error:&audio_add_error]) {
-                audio_registered = true;
+            if (capture_options.capture_audio) {
+                dispatch_queue_t audio_queue = dispatch_queue_create(
+                    "com.macrdp.cpp.audio-capture",
+                    DISPATCH_QUEUE_SERIAL);
+                if ([new_stream addStreamOutput:new_output
+                    type:SCStreamOutputTypeAudio
+                    sampleHandlerQueue:audio_queue
+                    error:&audio_add_error]) {
+                    audio_registered = true;
+                }
             }
 
             {

@@ -1,0 +1,64 @@
+--- a/server/shadow/shadow_client.c
++++ b/server/shadow/shadow_client.c
+@@ -1372,8 +1372,8 @@
+ 		cmd->codecId = RDPGFX_CODECID_AV1;
+ 		cmd->extra = (void*)&avc420;
+ 
+-		IFCALLRET(client->rdpgfx->SurfaceFrameCommand, error, client->rdpgfx, cmd, cmdstart,
+-		          cmdend);
++		error = shadow_client_send_surface_frame(client, cmd, cmdstart,
++		                                          cmdend);
+ 		cmd->extra = nullptr;
+ 	}
+ 	free_h264_metablock(&avc420.meta);
+@@ -1562,8 +1562,8 @@
+ 	{
+ 		avc444.cbAvc420EncodedBitstream1 = rdpgfx_estimate_h264_avc420(&avc444.bitstream[0]);
+ 		cmd->extra = (void*)&avc444;
+-		IFCALLRET(client->rdpgfx->SurfaceFrameCommand, error, client->rdpgfx, cmd, cmdstart,
+-		          cmdend);
++		error = shadow_client_send_surface_frame(client, cmd, cmdstart,
++		                                          cmdend);
+ 		cmd->extra = nullptr;
+ 	}
+ 
+@@ -1708,8 +1708,8 @@
+ 		cmd->data = Stream_Buffer(s);
+ 		cmd->length = (UINT32)pos;
+ 
+-		IFCALLRET(client->rdpgfx->SurfaceFrameCommand, error, client->rdpgfx, cmd, cmdstart,
+-		          cmdend);
++		error = shadow_client_send_surface_frame(client, cmd, cmdstart,
++		                                          cmdend);
+ 		cmd->data = nullptr;
+ 	}
+ 
+@@ -1773,8 +1773,8 @@
+ 	{
+ 		cmd->codecId = RDPGFX_CODECID_CAPROGRESSIVE;
+ 
+-		IFCALLRET(client->rdpgfx->SurfaceFrameCommand, error, client->rdpgfx, cmd, cmdstart,
+-		          cmdend);
++		error = shadow_client_send_surface_frame(client, cmd, cmdstart,
++		                                          cmdend);
+ 	}
+ 	cmd->data = nullptr;
+ 
+@@ -1821,7 +1821,7 @@
+ 
+ 	cmd->codecId = RDPGFX_CODECID_PLANAR;
+ 
+-	IFCALLRET(client->rdpgfx->SurfaceFrameCommand, error, client->rdpgfx, cmd, cmdstart, cmdend);
++	error = shadow_client_send_surface_frame(client, cmd, cmdstart, cmdend);
+ 	free(cmd->data);
+ 	cmd->data = nullptr;
+ 
+@@ -1863,7 +1863,7 @@
+ 	cmd->length = length;
+ 	cmd->codecId = RDPGFX_CODECID_UNCOMPRESSED;
+ 
+-	IFCALLRET(client->rdpgfx->SurfaceFrameCommand, error, client->rdpgfx, cmd, cmdstart, cmdend);
++	error = shadow_client_send_surface_frame(client, cmd, cmdstart, cmdend);
+ 	free(data);
+ 	cmd->data = nullptr;
+ 	if (error)

@@ -22,7 +22,8 @@ void macrdp_shadow_set_credentials(
 void macrdp_shadow_set_capture_options(
     std::uint32_t max_width,
     std::uint32_t max_height,
-    std::uint32_t frame_rate);
+    std::uint32_t frame_rate,
+    bool audio_enabled);
 
 #ifdef __cplusplus
 }

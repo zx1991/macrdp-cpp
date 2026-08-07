@@ -56,6 +56,7 @@ struct Options {
     std::uint32_t max_height = 0;
     bool avc444 = false;
     bool no_gfx = false;
+    bool audio_enabled = true;
     bool password_from_stdin = false;
     std::string password_file;
     std::string log_level = "INFO";
@@ -96,6 +97,7 @@ void print_usage(const char* program) {
         << "  --max-height <pixels>       Optional capture height limit\n"
         << "  --avc444                    Use AVC444 (higher CPU and color fidelity)\n"
         << "  --no-gfx                    Use incremental SurfaceBits updates instead of GFX/H.264\n"
+        << "  --no-audio                  Disable screen audio capture and RDPSND output\n"
         << "  --user <name>               Login user for generated SAM/TLS auth\n"
         << "  --domain <name>             Optional login domain\n"
         << "  --password <value>          Login password (visible in process list)\n"
@@ -324,6 +326,8 @@ bool parse_options(int argc, char** argv, Options& options) {
             options.avc444 = true;
         } else if (argument == "--no-gfx") {
             options.no_gfx = true;
+        } else if (argument == "--no-audio") {
+            options.audio_enabled = false;
         } else if (argument == "--user") {
             if (!next_value(index, argc, argv, options.username)) {
                 std::cerr << "--user requires a non-empty value\n";
@@ -590,7 +594,8 @@ bool configure_server(rdpShadowServer* server, const Options& options, const std
     macrdp_shadow_set_capture_options(
         options.max_width,
         options.max_height,
-        options.frame_rate);
+        options.frame_rate,
+        options.audio_enabled);
 
     // This server currently exposes only the TCP RDP transport. These
     // features use the MCS message channel and must stay off until their

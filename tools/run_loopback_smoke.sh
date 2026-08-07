@@ -18,6 +18,7 @@ server_log_level=${MACRDP_LOOPBACK_SERVER_LOG_LEVEL:-DEBUG}
 server_bitrate=${MACRDP_LOOPBACK_SERVER_BITRATE:-}
 server_fps=${MACRDP_LOOPBACK_SERVER_FPS:-}
 synthetic_audio=${MACRDP_LOOPBACK_SYNTHETIC_AUDIO:-1}
+disable_audio=${MACRDP_LOOPBACK_DISABLE_AUDIO:-0}
 clipboard_client_text=${MACRDP_LOOPBACK_CLIENT_CLIPBOARD_TEXT:-macrdp\ loopback\ client\ clipboard\ text}
 clipboard_server_text=${MACRDP_LOOPBACK_SERVER_CLIPBOARD_TEXT:-macrdp\ loopback\ server\ clipboard\ text}
 keyboard_probe=${MACRDP_LOOPBACK_PROBE_F:-0}
@@ -37,6 +38,7 @@ Options:
   --client PATH   Use this FreeRDP loopback client executable.
   --bitrate RATE  Pass --bitrate RATE to the server for reproducible tuning.
   --fps NUMBER    Pass --fps NUMBER to the server for reproducible tuning.
+  --no-audio      Disable audio capture and RDPSND for this run.
   -h, --help      Show this help.
 
 The positional SERVER and CLIENT form is retained for compatibility. The
@@ -125,6 +127,10 @@ while [ "$#" -gt 0 ]; do
 			server_fps=${1#--fps=}
 			shift
 			;;
+		--no-audio)
+			disable_audio=1
+			shift
+			;;
 		-h|--help)
 			usage
 			exit 0
@@ -147,6 +153,21 @@ while [ "$#" -gt 0 ]; do
 			;;
 	esac
 done
+
+audio_label=on
+case "$disable_audio" in
+	1|y|Y|yes|YES|true|TRUE)
+		disable_audio=1
+		audio_label=off
+		;;
+	0|n|N|no|NO|false|FALSE|'')
+		disable_audio=0
+		;;
+	*)
+		echo "MACRDP_LOOPBACK_DISABLE_AUDIO must be a boolean value" >&2
+		exit 2
+		;;
+esac
 
 if [ "$positional_count" -eq 1 ]; then
 	case "$server" in
@@ -465,6 +486,9 @@ start_server() {
 	if [ -n "$server_fps" ]; then
 		server_command+=(--fps "$server_fps")
 	fi
+	if [ "$disable_audio" -eq 1 ]; then
+		server_command+=(--no-audio)
+	fi
 	mkdir -p "$case_dir/config"
 	if ! set_test_clipboard; then
 		return 1
@@ -631,7 +655,14 @@ run_client() {
 	if [ "${clipboard_failures:-0}" -ne 0 ]; then
 		fail "$case_name had $clipboard_failures clipboard verification failures"
 	fi
-	if [ "$synthetic_audio" != "0" ]; then
+	if [ "$disable_audio" = "1" ]; then
+		if [ "${audio_open_count:-0}" -ne 0 ] \
+			|| [ "${audio_play_callbacks:-0}" -ne 0 ] \
+			|| [ "${audio_pcm_bytes:-0}" -ne 0 ] \
+			|| [ "${audio_pcm_frames:-0}" -ne 0 ]; then
+			fail "$case_name received audio even though audio capture is disabled"
+		fi
+	elif [ "$synthetic_audio" != "0" ]; then
 		if [ "${audio_server_formats:-0}" -lt 1 ] \
 			|| [ "${audio_open_count:-0}" -lt 1 ] \
 			|| [ "${audio_play_callbacks:-0}" -lt 1 ] \
@@ -664,6 +695,11 @@ run_client() {
 	output_pipeline=$(grep -E 'Output pipeline (blocked|recovered):' "$server_log" || true)
 	if [ -n "$output_pipeline" ]; then
 		echo "$case_name: output backpressure diagnostics observed"
+		audio_dropped=$(metric_max audio_dropped "$output_pipeline")
+		if [ "$disable_audio" = "0" ] && [ "$network_profile" != "direct" ] \
+			&& [ "${audio_dropped:-0}" -lt 1 ]; then
+			fail "$case_name output backpressure did not drop stale audio messages"
+		fi
 	fi
 	if grep -q 'Slow frame update\|Slow client frame handling' "$server_log"; then
 		if [ "$allow_slow" = "1" ]; then
@@ -745,6 +781,7 @@ check_input_pipeline() {
 	server_synchronize=$(metric_max synchronize "$input_pipeline")
 	server_keyboard=$(metric_max keyboard "$input_pipeline")
 	server_keyboard_repeats=$(metric_max keyboard_repeats "$input_pipeline")
+	server_keyboard_recoveries=$(metric_max keyboard_release_recoveries "$input_pipeline")
 	server_unicode=$(metric_max unicode "$input_pipeline")
 	server_wheel=$(metric_max wheel "$input_pipeline")
 	server_failures=$(metric_max injection_failures "$input_pipeline")
@@ -756,6 +793,9 @@ check_input_pipeline() {
 	fi
 	if [ "${input_keyboard_repeats:-0}" -lt 2 ] || [ "${server_keyboard_repeats:-0}" -lt 2 ]; then
 		fail "$case_name keyboard repeat events did not reach the server"
+	fi
+	if [ "${server_keyboard_recoveries:-0}" -lt 1 ]; then
+		fail "$case_name did not exercise keyboard release identity recovery"
 	fi
 	if [ "${input_unicode:-0}" -lt 2 ] || [ "${server_unicode:-0}" -lt 2 ]; then
 		fail "$case_name Unicode input did not reach the server"
@@ -807,6 +847,7 @@ echo "loopback smoke test: server=$server client=$client profile=$network_profil
 	"duration=${duration_ms}ms delay=${proxy_delay_ms}ms jitter=${proxy_jitter_ms}ms "\
 	"bandwidth=${proxy_bandwidth_bps}bps outage=${proxy_outage_period_ms}/${proxy_outage_duration_ms}ms "\
 	"bitrate=${server_bitrate:-default} fps=${server_fps:-default} "\
+	"audio=$audio_label "\
 	"nogfx_duration=${nogfx_duration_ms}ms"
 
 if start_server gfx; then

@@ -81,6 +81,13 @@ server reports them as `keyboard_repeats` and marks the injected macOS events
 with the autorepeat flag. This covers both slow-path `KBD_FLAGS_DOWN` input and
 FastPath input, where the repeat bit is not carried on the wire.
 
+It also sends a left Windows key-up without its E0 prefix after a matching
+key-down. The server must count this as `keyboard_release_recoveries` and
+release the tracked macOS Command key by its scan-code identity. This catches
+the modifier-sticking failure mode seen with clients that do not preserve the
+extended flag on key-up. `keyboard_unmatched_releases` is a stricter subset
+for releases received without a corresponding key-down in the current session.
+
 ## Network profiles
 
 The optional C proxy shapes each TCP direction independently. It adds delay,
@@ -116,6 +123,18 @@ The same settings can be supplied with `MACRDP_LOOPBACK_SERVER_BITRATE` and
 `MACRDP_LOOPBACK_SERVER_FPS`. The script prints the selected values in its
 header; this makes low-bandwidth comparisons reproducible instead of relying
 on the server's default 16 Mbps/30 FPS configuration.
+
+Audio is enabled by default. Use `--no-audio` on the server, or
+`MACRDP_LOOPBACK_DISABLE_AUDIO=1` with the smoke script, to measure video without
+PCM RDPSND consuming the shaped link. This does not alter the default audio
+coverage; it provides a separate low-bandwidth comparison.
+
+During shaped-link backpressure, the server's `Output pipeline` diagnostics
+include `audio_dropped`. A nonzero value means stale per-client audio messages
+were rejected before entering the message queue; it is expected for the Wi-Fi,
+outage, and bad profiles with audio enabled. `Audio pipeline`'s
+`dropped_frames` measures capture-side loss and is independent of this queue
+bound.
 
 In the checked-in Wi-Fi profile (1 Mbps, 75 ms delay, 40 ms jitter), a local
 comparison of `4M/20FPS` reduced first-frame latency from about 3.37 s to

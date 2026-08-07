@@ -18,6 +18,7 @@ struct DisplayCaptureOptions {
     std::uint32_t max_height = 0;
     std::uint32_t frame_rate = 30;
     bool show_cursor = false;
+    bool capture_audio = true;
 };
 
 // ScreenCaptureKit audio normalized to interleaved signed 16-bit PCM. The

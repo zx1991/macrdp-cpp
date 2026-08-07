@@ -51,6 +51,7 @@ struct CaptureConfig {
     std::uint32_t max_width = 0;
     std::uint32_t max_height = 0;
     std::uint32_t frame_rate = 30;
+    bool audio_enabled = true;
 };
 
 std::mutex g_capture_config_mutex;
@@ -163,6 +164,8 @@ struct mac_shadow_subsystem {
     std::atomic<std::uint64_t> input_synchronize_events{0};
     std::atomic<std::uint64_t> input_keyboard_events{0};
     std::atomic<std::uint64_t> input_keyboard_repeats{0};
+    std::atomic<std::uint64_t> input_keyboard_release_recoveries{0};
+    std::atomic<std::uint64_t> input_keyboard_unmatched_releases{0};
     std::atomic<std::uint64_t> input_unicode_events{0};
     std::atomic<std::uint64_t> input_mouse_events{0};
     std::atomic<std::uint64_t> input_wheel_events{0};
@@ -373,6 +376,7 @@ std::optional<macrdp::DisplayCaptureOptions> capture_options_for_surface(
         : std::min(subsystem->capture_config.max_height, surface_height);
     options.frame_rate = subsystem->capture_config.frame_rate;
     options.show_cursor = false;
+    options.capture_audio = subsystem->capture_config.audio_enabled;
     return options;
 }
 
@@ -524,7 +528,9 @@ UINT16 release_flags_for_key_identity(std::uint16_t key_identity) {
 void release_stale_modifier_state(const char* reason) {
     // A previous server process can terminate after posting a modifier-down
     // event. The ownership ledger cannot survive that process boundary, so
-    // clear only RDP modifiers that CoreGraphics still reports as held.
+    // clear only RDP modifiers that CoreGraphics still reports as held. The
+    // aggregate flags are logged for diagnosis, but cannot decide which side
+    // of a modifier is safe to release and may include physical user input.
     struct Modifier {
         UINT16 flags;
         UINT8 code;
@@ -540,15 +546,20 @@ void release_stale_modifier_state(const char* reason) {
         {KBD_FLAGS_EXTENDED, 0x5C},       // right Windows/Command
     };
 
+    const auto hid_flags = CGEventSourceFlagsState(kCGEventSourceStateHIDSystemState);
     unsigned attempted = 0;
     unsigned skipped = 0;
     unsigned failures = 0;
     for (const auto& modifier : modifiers) {
         const auto key_code = mac_key_code(modifier.flags, modifier.code);
-        if (!key_code.has_value()
-            || !CGEventSourceKeyState(
-                kCGEventSourceStateHIDSystemState,
-                *key_code)) {
+        if (!key_code.has_value()) {
+            ++skipped;
+            continue;
+        }
+        const bool hid_key_down = CGEventSourceKeyState(
+            kCGEventSourceStateHIDSystemState,
+            *key_code);
+        if (!hid_key_down) {
             ++skipped;
             continue;
         }
@@ -560,11 +571,13 @@ void release_stale_modifier_state(const char* reason) {
         }
     }
     WLog_INFO(TAG,
-              "Reset stale macOS modifier state (%s): attempted=%u skipped=%u failures=%u",
+              "Reset stale macOS modifier state (%s): attempted=%u skipped=%u failures=%u "
+              "hid_flags=0x%" PRIx64,
               reason == nullptr ? "unspecified" : reason,
               attempted,
               skipped,
-              failures);
+              failures,
+              static_cast<std::uint64_t>(hid_flags));
 }
 
 bool synchronize_toggle_keys(UINT32 flags) {
@@ -644,7 +657,27 @@ bool inject_keyboard_event(
                      client_id,
                      flags,
                      code);
+            subsystem->input_keyboard_release_recoveries.fetch_add(
+                1,
+                std::memory_order_relaxed);
+            subsystem->input_keyboard_unmatched_releases.fetch_add(
+                1,
+                std::memory_order_relaxed);
             return post_keyboard_event(flags | KBD_FLAGS_RELEASE, code);
+        }
+
+        if (release_candidates.size() != 1 || release_candidates.front() != key_identity) {
+            subsystem->input_keyboard_release_recoveries.fetch_add(
+                1,
+                std::memory_order_relaxed);
+            WLog_DBG(TAG,
+                     "Recovered keyboard release client=%" PRIu64
+                     " flags=0x%04" PRIx16 " code=0x%02" PRIx8
+                     " candidates=%zu",
+                     client_id,
+                     flags,
+                     code,
+                     release_candidates.size());
         }
 
         // If the E0/E1 prefix is ambiguous, release every matching identity
@@ -1358,7 +1391,9 @@ void log_input_pipeline(MacShadowSubsystem* subsystem, bool force) {
     WLog_INFO(
         TAG,
         "Input pipeline: synchronize=%" PRIu64 " keyboard=%" PRIu64
-        " keyboard_repeats=%" PRIu64 " unicode=%" PRIu64
+        " keyboard_repeats=%" PRIu64
+        " keyboard_release_recoveries=%" PRIu64
+        " keyboard_unmatched_releases=%" PRIu64 " unicode=%" PRIu64
         " mouse=%" PRIu64 " wheel=%" PRIu64
         " left_button=%" PRIu64 " right_button=%" PRIu64
         " middle_button=%" PRIu64 " drag=%" PRIu64
@@ -1370,6 +1405,8 @@ void log_input_pipeline(MacShadowSubsystem* subsystem, bool force) {
         subsystem->input_synchronize_events.load(std::memory_order_relaxed),
         subsystem->input_keyboard_events.load(std::memory_order_relaxed),
         subsystem->input_keyboard_repeats.load(std::memory_order_relaxed),
+        subsystem->input_keyboard_release_recoveries.load(std::memory_order_relaxed),
+        subsystem->input_keyboard_unmatched_releases.load(std::memory_order_relaxed),
         subsystem->input_unicode_events.load(std::memory_order_relaxed),
         subsystem->input_mouse_events.load(std::memory_order_relaxed),
         subsystem->input_wheel_events.load(std::memory_order_relaxed),
@@ -2092,7 +2129,9 @@ int mac_shadow_subsystem_start(rdpShadowSubsystem* base) {
         subsystem->input_thread = std::thread(input_loop, subsystem);
         subsystem->publish_thread = std::thread(publish_loop, subsystem);
         subsystem->capture_thread = std::thread(capture_loop, subsystem);
-        subsystem->audio_thread = std::thread(audio_loop, subsystem);
+        if (options->capture_audio) {
+            subsystem->audio_thread = std::thread(audio_loop, subsystem);
+        }
     } catch (...) {
         subsystem->stop_requested.store(true);
         subsystem->input_stop_requested.store(true);
@@ -2343,11 +2382,13 @@ extern "C" void macrdp_shadow_set_credentials(
 extern "C" void macrdp_shadow_set_capture_options(
     std::uint32_t max_width,
     std::uint32_t max_height,
-    std::uint32_t frame_rate) {
+    std::uint32_t frame_rate,
+    bool audio_enabled) {
     std::lock_guard lock(g_capture_config_mutex);
     g_capture_config.max_width = max_width;
     g_capture_config.max_height = max_height;
     g_capture_config.frame_rate = std::clamp(frame_rate, std::uint32_t{1}, std::uint32_t{60});
+    g_capture_config.audio_enabled = audio_enabled;
 }
 
 bool macrdp_shadow_preflight_capture(std::string& error) {
@@ -2356,6 +2397,10 @@ bool macrdp_shadow_preflight_capture(std::string& error) {
     options.max_height = 64;
     options.frame_rate = 1;
     options.show_cursor = false;
+    {
+        std::lock_guard lock(g_capture_config_mutex);
+        options.capture_audio = g_capture_config.audio_enabled;
+    }
 
     macrdp::DisplayCapture capture(options);
     if (!capture.start()) {

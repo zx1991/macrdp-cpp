@@ -825,7 +825,7 @@ diff --git a/server/shadow/shadow_client.c b/server/shadow/shadow_client.c
 index 5aa3ab2..8494577 100644
 --- a/server/shadow/shadow_client.c
 +++ b/server/shadow/shadow_client.c
-@@ -35,9 +35,41 @@
+@@ -35,9 +35,58 @@
  #include <freerdp/channels/drdynvc.h>
  
  #include "shadow.h"
@@ -863,6 +863,23 @@ index 5aa3ab2..8494577 100644
 +	return status;
 +}
 +/* MACRDP_CONTROL_OUTPUT_PRIORITY */
++
++static UINT shadow_client_send_surface_frame(
++    rdpShadowClient* client,
++    RDPGFX_SURFACE_COMMAND* command,
++    const RDPGFX_START_FRAME_PDU* start,
++    const RDPGFX_END_FRAME_PDU* end)
++{
++    UINT error = CHANNEL_RC_OK;
++    rdpTransport* transport = client->context.rdp ? client->context.rdp->transport : nullptr;
++    if (transport)
++        transport_set_output_priority(transport, TRUE);
++    IFCALLRET(client->rdpgfx->SurfaceFrameCommand, error, client->rdpgfx, command, start, end);
++    if (transport)
++        transport_set_output_priority(transport, FALSE);
++    return error;
++}
++/* MACRDP_SURFACE_OUTPUT_PRIORITY */
 +
  typedef struct
  {
@@ -1170,8 +1187,10 @@ index 5aa3ab2..8494577 100644
  		cmd->codecId = RDPGFX_CODECID_AVC420;
  		cmd->extra = (void*)&avc420;
 +		const ULONGLONG channelStarted = GetTickCount64();
- 		IFCALLRET(client->rdpgfx->SurfaceFrameCommand, error, client->rdpgfx, cmd, cmdstart,
- 		          cmdend);
+-		IFCALLRET(client->rdpgfx->SurfaceFrameCommand, error, client->rdpgfx, cmd, cmdstart,
+-		          cmdend);
++		error = shadow_client_send_surface_frame(client, cmd, cmdstart,
++		                                          cmdend);
 +		const ULONGLONG channelElapsed = GetTickCount64() - channelStarted;
 +		if (encodeElapsed >= 200 || channelElapsed >= 200)
 +			WLog_WARN(TAG, "AVC420 frame stages: encode=%llums channel=%llums",
@@ -1376,8 +1395,8 @@ index 5aa3ab2..8494577 100644
 +
 +        if (!error)
 +        {
-+            IFCALLRET(client->rdpgfx->SurfaceFrameCommand, error, client->rdpgfx,
-+                      &pending->command, &pending->start, &pending->end);
++            error = shadow_client_send_surface_frame(client, &pending->command,
++                                                     &pending->start, &pending->end);
 +        }
 +        pending->command.extra = nullptr;
 +    }
@@ -2333,3 +2352,33 @@ index 190cac7..3d9e467 100644
  }
 +
 +/* MACRDP_SURFACE_RESIZE_LOCK */
+
+diff --git a/server/shadow/shadow_encoder.c b/server/shadow/shadow_encoder.c
+--- a/server/shadow/shadow_encoder.c
++++ b/server/shadow/shadow_encoder.c
+@@ -253,21 +253,22 @@ static int shadow_encoder_init_h264(rdpShadowEncoder* encoder)
+ 	if (!encoder->h264)
+ 		goto fail;
+ 
+-	if (!h264_context_reset(encoder->h264, encoder->width, encoder->height))
+-		goto fail;
+-
+ 	if (!h264_context_set_option(encoder->h264, H264_CONTEXT_OPTION_RATECONTROL,
+ 	                             encoder->server->h264RateControlMode))
+ 		goto fail;
+ 	if (!h264_context_set_option(encoder->h264, H264_CONTEXT_OPTION_BITRATE,
+ 	                             encoder->server->h264BitRate))
+ 		goto fail;
+ 	if (!h264_context_set_option(encoder->h264, H264_CONTEXT_OPTION_FRAMERATE,
+ 	                             encoder->server->h264FrameRate))
+ 		goto fail;
+ 	if (!h264_context_set_option(encoder->h264, H264_CONTEXT_OPTION_QP, encoder->server->h264QP))
+ 		goto fail;
+ 
++	if (!h264_context_reset(encoder->h264, encoder->width, encoder->height))
++		goto fail;
++	/* MACRDP_H264_OPTIONS_BEFORE_RESET */
++
+ 	encoder->codecs |= FREERDP_CODEC_AVC420 | FREERDP_CODEC_AVC444;
+ 	return 1;
+ fail:
