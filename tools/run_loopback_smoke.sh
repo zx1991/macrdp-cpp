@@ -17,6 +17,7 @@ client_log_level=${MACRDP_LOOPBACK_CLIENT_LOG_LEVEL:-WARN}
 server_log_level=${MACRDP_LOOPBACK_SERVER_LOG_LEVEL:-DEBUG}
 server_bitrate=${MACRDP_LOOPBACK_SERVER_BITRATE:-}
 server_fps=${MACRDP_LOOPBACK_SERVER_FPS:-}
+gfx_codec=${MACRDP_LOOPBACK_GFX_CODEC:-AVC420}
 synthetic_audio=${MACRDP_LOOPBACK_SYNTHETIC_AUDIO:-1}
 disable_audio=${MACRDP_LOOPBACK_DISABLE_AUDIO:-0}
 audio_format=${MACRDP_LOOPBACK_AUDIO_FORMAT:-auto}
@@ -40,6 +41,7 @@ Options:
   --client PATH   Use this FreeRDP loopback client executable.
   --bitrate RATE  Pass --bitrate RATE to the server for reproducible tuning.
   --fps NUMBER    Pass --fps NUMBER to the server for reproducible tuning.
+  --gfx-codec NAME  Use AVC420 or AVC444 for the GFX phase (default: AVC420).
   --audio-format FORMAT  Request a WAVE format tag, or auto-negotiate.
   --expect-audio-format FORMAT  Expect a WAVE format tag, or auto for compressed audio.
   --no-audio      Disable audio capture and RDPSND for this run.
@@ -131,6 +133,19 @@ while [ "$#" -gt 0 ]; do
 			server_fps=${1#--fps=}
 			shift
 			;;
+		--gfx-codec)
+			if [ "$#" -lt 2 ]; then
+				echo "--gfx-codec requires a value" >&2
+				usage >&2
+				exit 2
+			fi
+			gfx_codec=$2
+			shift 2
+			;;
+		--gfx-codec=*)
+			gfx_codec=${1#--gfx-codec=}
+			shift
+			;;
 		--audio-format)
 			if [ "$#" -lt 2 ]; then
 				echo "--audio-format requires a value" >&2
@@ -183,6 +198,19 @@ while [ "$#" -gt 0 ]; do
 			;;
 	esac
 done
+
+case "$gfx_codec" in
+	AVC420|avc420)
+		gfx_codec=AVC420
+		;;
+	AVC444|avc444)
+		gfx_codec=AVC444
+		;;
+	*)
+		echo "GFX codec must be AVC420 or AVC444" >&2
+		exit 2
+		;;
+esac
 
 audio_label=on
 case "$disable_audio" in
@@ -556,6 +584,8 @@ start_server() {
 
 	if [ "$case_name" = "nogfx" ]; then
 		server_command+=(--no-gfx)
+	elif [ "$gfx_codec" = "AVC444" ]; then
+		server_command+=(--avc444)
 	fi
 	MACRDP_AUDIO_TEST_TONE="$synthetic_audio" MACRDP_PASSWORD="$password" \
 		"${server_command[@]}" >"$server_log" 2>&1 &
@@ -589,7 +619,7 @@ run_client() {
 	)
 	if [ "$client_mode" != "nogfx" ]; then
 		client_gfx=1
-		client_command+=(/gfx:AVC420)
+		client_command+=(/gfx:"$gfx_codec")
 	fi
 	if [ -n "$requested_width" ] && [ -n "$requested_height" ]; then
 		client_command+=(/w:"$requested_width" /h:"$requested_height")
@@ -601,6 +631,7 @@ run_client() {
 
 	if MACRDP_LOOPBACK_DURATION_MS="$duration_override" \
 		MACRDP_LOOPBACK_GFX="$client_gfx" \
+		MACRDP_LOOPBACK_GFX_CODEC="$gfx_codec" \
 		MACRDP_LOOPBACK_AUDIO_FORMAT="$audio_format" \
 		MACRDP_LOOPBACK_EVENT_DELAY_MS="$event_delay_ms" \
 		MACRDP_LOOPBACK_CLIENT_CLIPBOARD_TEXT="$clipboard_client_text" \
@@ -656,8 +687,10 @@ run_client() {
 	audio_sample_rate=$(metric audio_sample_rate "$summary")
 	audio_bits=$(metric audio_bits_per_sample "$summary")
 	gfx_frames=$(metric gfx_frames "$summary")
+	gfx_max_interval=$(metric gfx_max_interval_ms "$summary")
 	gfx_wire=$(metric gfx_wire_commands "$summary")
 	gfx_avc420=$(metric gfx_avc420 "$summary")
+	gfx_avc444=$(metric gfx_avc444 "$summary")
 	case_min_frames=$gfx_min_frames
 	allow_slow=0
 	case "$client_mode" in
@@ -816,7 +849,11 @@ run_client() {
 		if [ "${gfx_frames:-0}" -lt 1 ] || [ "${gfx_wire:-0}" -lt 1 ]; then
 			fail "$case_name client received no RDPGFX surface frames"
 		fi
-		if [ "${gfx_avc420:-0}" -lt 1 ]; then
+		if [ "$gfx_codec" = "AVC444" ]; then
+			if [ "${gfx_avc444:-0}" -lt 1 ]; then
+				fail "$case_name client did not receive AVC444 frames"
+			fi
+		elif [ "${gfx_avc420:-0}" -lt 1 ]; then
 			fail "$case_name client did not receive AVC420 frames"
 		fi
 	else
@@ -845,9 +882,13 @@ check_slow_client() {
 	if [ "${frames:-0}" -lt 2 ]; then
 		fail "slow-client test observed too few frames to measure pacing"
 	fi
+	slow_interval_ms=${max_interval:-0}
+	if [ "${gfx_frames:-0}" -ge 2 ]; then
+		slow_interval_ms=${gfx_max_interval:-$slow_interval_ms}
+	fi
 	if [ "$slow_client_event_delay_ms" -gt 0 ] \
-		&& [ "${max_interval:-0}" -lt "$slow_client_event_delay_ms" ]; then
-		fail "slow-client max frame interval ${max_interval:-0}ms did not reflect the configured ${slow_client_event_delay_ms}ms event delay"
+		&& [ "$slow_interval_ms" -lt "$slow_client_event_delay_ms" ]; then
+		fail "slow-client max frame interval ${slow_interval_ms}ms did not reflect the configured ${slow_client_event_delay_ms}ms event delay"
 	fi
 	if grep -q 'Slow client frame handling\|Frame barrier event\|Slow frame update' "$server_log"; then
 		echo "slow-client: server slow-stage diagnostics observed"
@@ -916,14 +957,15 @@ run_bad_password() {
 	case_dir="$temp_dir/gfx"
 	client_log="$case_dir/bad-password.log"
 	if MACRDP_LOOPBACK_DURATION_MS=2000 \
-	MACRDP_LOOPBACK_GFX=1 \
+		MACRDP_LOOPBACK_GFX=1 \
+		MACRDP_LOOPBACK_GFX_CODEC="$gfx_codec" \
 		"$client" \
 			/v:127.0.0.1:"$client_port" \
 			/u:"$user" \
 			/p:DefinitelyWrongPassword \
 			/cert:ignore \
 			/log-level:WARN \
-			/gfx:AVC420 >"$client_log" 2>&1; then
+			/gfx:"$gfx_codec" >"$client_log" 2>&1; then
 		fail "wrong-password client unexpectedly connected"
 	fi
 	if ! grep -q 'authentication failure\|nla_server_recv_stream\|Connection reset' "$case_dir/server.log"; then
@@ -934,7 +976,7 @@ run_bad_password() {
 echo "loopback smoke test: server=$server client=$client profile=$network_profile "\
 	"duration=${duration_ms}ms delay=${proxy_delay_ms}ms jitter=${proxy_jitter_ms}ms "\
 	"bandwidth=${proxy_bandwidth_bps}bps outage=${proxy_outage_period_ms}/${proxy_outage_duration_ms}ms "\
-	"bitrate=${server_bitrate:-default} fps=${server_fps:-default} "\
+	"bitrate=${server_bitrate:-default} fps=${server_fps:-default} gfx_codec=$gfx_codec "\
 	"audio=$audio_label audio_format=$audio_format expected_audio_format=$expected_audio_label "\
 	"nogfx_duration=${nogfx_duration_ms}ms"
 

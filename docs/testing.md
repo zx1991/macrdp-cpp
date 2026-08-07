@@ -45,7 +45,8 @@ preconfigured FreeRDP build.
 
 The smoke script uses a real TCP connection to the server and checks:
 
-- GFX/AVC420 and classic SurfaceBits frame delivery;
+- GFX/AVC420 by default, optional AVC444, and classic SurfaceBits frame
+  delivery;
 - first-frame and inter-frame timing;
 - NLA failure with an incorrect password;
 - mouse buttons, drag, wheel, keyboard, Unicode, and synchronization input;
@@ -79,6 +80,19 @@ tools/run_loopback_smoke.sh
 
 The server still needs Screen Recording and Accessibility permission because
 the loopback test exercises the actual macOS capture and input paths.
+
+The direct profile requests AVC420 unless `--gfx-codec AVC444` is supplied:
+
+```bash
+tools/run_loopback_smoke.sh --gfx-codec AVC444
+```
+
+AVC420 requests the direct macOS VideoToolbox bridge when it is available.
+AVC444 uses the server's FFmpeg path because the direct bridge currently
+accepts I420/AVC420 input. The script checks the decoded client's negotiated
+codec counters, so a run cannot pass merely because an unrelated GFX codec was
+used. The profile's separate `nogfx` phase uses classic SurfaceBits and is
+unaffected by `--gfx-codec`.
 
 Clipboard verification uses a profile-specific wait after the client exits so
 low-bandwidth runs are not mistaken for protocol failures. Override it with

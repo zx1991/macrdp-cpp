@@ -246,8 +246,9 @@ codec counts, sends left/right/middle clicks, a drag, X1/X2 extended mouse
 events, plus harmless keyboard, Unicode, and vertical/horizontal wheel events,
 checks the server's aggregated input counters, verifies bidirectional text
 clipboard transfer, tests a wrong NLA password, and compares
-GFX/AVC420 with the `--no-gfx` SurfaceBits path. The direct profile also checks
-reconnects, requested desktop sizes, and a deliberately slow client event loop.
+GFX/AVC420 (or AVC444 when selected with `--gfx-codec AVC444`) with the
+`--no-gfx` SurfaceBits path. The direct profile also checks reconnects,
+requested desktop sizes, and a deliberately slow client event loop.
 The client-reported frame pacing is the primary slow-client metric; server slow
 stage diagnostics are supplementary observations. The server logs an `Input
 pipeline` line with received event counts and platform injection failures, and
@@ -284,6 +285,18 @@ MACRDP_SERVER=./build/macrdp-server \
 MACRDP_LOOPBACK_CLIENT=/tmp/macrdp-loopback-client \
 tools/run_loopback_smoke.sh
 ```
+
+The default GFX phase requests AVC420. To exercise the higher-fidelity AVC444
+path, which uses FreeRDP's FFmpeg encoder on the server, run:
+
+```bash
+MACRDP_SERVER=./build/macrdp-server \
+MACRDP_LOOPBACK_CLIENT=/tmp/macrdp-loopback-client \
+tools/run_loopback_smoke.sh --gfx-codec AVC444
+```
+
+The classic SurfaceBits phase is still run separately by the direct profile;
+its updates do not use the selected GFX codec.
 
 The script uses TCP port 3390 by default and refuses to touch an existing
 listener. Set `MACRDP_LOOPBACK_PORT` to use another port. Set

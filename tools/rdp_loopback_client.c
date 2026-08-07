@@ -361,6 +361,12 @@ static BOOL env_gfx_enabled(void)
 	return !(value && (*value == '0' || *value == 'n' || *value == 'N'));
 }
 
+static BOOL env_gfx_avc444(void)
+{
+	const char* value = getenv("MACRDP_LOOPBACK_GFX_CODEC");
+	return value && (strcmp(value, "AVC444") == 0 || strcmp(value, "avc444") == 0);
+}
+
 static const char* env_clipboard_text(const char* name, const char* fallback)
 {
 	const char* value = getenv(name);
@@ -811,6 +817,7 @@ static BOOL loopback_pre_connect(freerdp* instance)
 {
 	rdpSettings* settings = NULL;
 	const BOOL gfx_enabled = env_gfx_enabled();
+	const BOOL gfx_avc444 = gfx_enabled && env_gfx_avc444();
 	const char* audio_format = getenv("MACRDP_LOOPBACK_AUDIO_FORMAT");
 	const char* audio_channel[] = { RDPSND_CHANNEL_NAME, "sys:macrdp", NULL,
 	                              "rate:44100", "channel:2" };
@@ -844,8 +851,8 @@ static BOOL loopback_pre_connect(freerdp* instance)
 	 * real speaker. */
 	if (!freerdp_settings_set_bool(settings, FreeRDP_SupportGraphicsPipeline, gfx_enabled)
 	    || !freerdp_settings_set_bool(settings, FreeRDP_GfxH264, gfx_enabled)
-	    || !freerdp_settings_set_bool(settings, FreeRDP_GfxAVC444, FALSE)
-	    || !freerdp_settings_set_bool(settings, FreeRDP_GfxAVC444v2, FALSE)
+	    || !freerdp_settings_set_bool(settings, FreeRDP_GfxAVC444, gfx_avc444)
+	    || !freerdp_settings_set_bool(settings, FreeRDP_GfxAVC444v2, gfx_avc444)
 	    || !freerdp_settings_set_bool(settings, FreeRDP_RemoteFxCodec, !gfx_enabled)
 	    || !freerdp_settings_set_bool(settings, FreeRDP_RemoteFxImageCodec, !gfx_enabled)
 	    || !freerdp_settings_set_bool(settings, FreeRDP_GfxProgressive, FALSE)
