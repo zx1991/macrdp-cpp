@@ -66,7 +66,9 @@ For an opt-in live keyboard check, set `MACRDP_LOOPBACK_PROBE_F=1`. The client
 then sends one ordinary `F` key-down/key-up pair to the active macOS
 application, so use it only when typing one `f` there is acceptable. The
 default smoke test keeps this disabled and validates the scan-code path through
-the server counters instead.
+the server counters instead. With the probe enabled, keep
+`MACRDP_LOOPBACK_SERVER_LOG_LEVEL=DEBUG` (the default) so the smoke test also
+checks the server's `0x21 -> macOS keycode 3` down/up mapping.
 
 ## Network profiles
 

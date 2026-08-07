@@ -10,6 +10,8 @@ fi
 freerdp_build=$1
 freerdp_source=$2
 output=${3:-/tmp/macrdp-loopback-client}
+script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+repo_dir=$(CDPATH= cd -- "$script_dir/.." && pwd)
 
 for required_path in \
 	"$freerdp_build/include/freerdp/config.h" \
@@ -28,9 +30,10 @@ done
 clang -std=c11 -O2 -Wall -Wextra -Wpedantic \
 	-I"$freerdp_build/include" \
 	-I"$freerdp_build/winpr/include" \
+	-I"$repo_dir/include" \
 	-I"$freerdp_source/include" \
 	-I"$freerdp_source/winpr/include" \
-	"$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)/rdp_loopback_client.c" \
+	"$script_dir/rdp_loopback_client.c" \
 	-L"$freerdp_build/client/common" \
 	-L"$freerdp_build/libfreerdp" \
 	-L"$freerdp_build/winpr/libwinpr" \

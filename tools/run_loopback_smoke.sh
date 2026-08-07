@@ -18,6 +18,12 @@ server_log_level=${MACRDP_LOOPBACK_SERVER_LOG_LEVEL:-DEBUG}
 synthetic_audio=${MACRDP_LOOPBACK_SYNTHETIC_AUDIO:-1}
 clipboard_client_text=${MACRDP_LOOPBACK_CLIENT_CLIPBOARD_TEXT:-macrdp\ loopback\ client\ clipboard\ text}
 clipboard_server_text=${MACRDP_LOOPBACK_SERVER_CLIPBOARD_TEXT:-macrdp\ loopback\ server\ clipboard\ text}
+keyboard_probe=${MACRDP_LOOPBACK_PROBE_F:-0}
+keyboard_probe_enabled=0
+case "$keyboard_probe" in
+	""|0|n|N) ;;
+	*) keyboard_probe_enabled=1 ;;
+esac
 
 usage() {
 	cat <<EOF
@@ -569,6 +575,9 @@ run_client() {
 	if [ "${input_failures:-0}" -ne 0 ]; then
 		fail "$case_name had $input_failures client-side input send failures"
 	fi
+	if [ "$keyboard_probe_enabled" = "1" ] && [ "${input_keyboard:-0}" -lt 22 ]; then
+		fail "$case_name keyboard probe did not send the expected F key pair"
+	fi
 	if [ "${clipboard_server_lists:-0}" -lt 1 ] \
 		|| [ "${clipboard_server_list_responses:-0}" -lt 1 ] \
 		|| [ "${clipboard_server_requests:-0}" -lt 1 ] \
@@ -630,6 +639,16 @@ run_client() {
 	fi
 	if ! wait_for_log "$server_log" 'Input pipeline:'; then
 		fail "$case_name server did not process input events"
+	fi
+	if [ "$keyboard_probe_enabled" = "1" ]; then
+		if [ "$server_log_level" = "DEBUG" ]; then
+			if ! grep -Eq 'post_keyboard_event.*code=0x21 keycode=3 action=down' "$server_log" \
+				|| ! grep -Eq 'post_keyboard_event.*code=0x21 keycode=3 action=up' "$server_log"; then
+				fail "$case_name server did not map the F probe to macOS keycode 3 down/up"
+			fi
+		else
+			echo "$case_name: F mapping log check skipped because server log level is $server_log_level (use DEBUG for keycode verification)"
+		fi
 	fi
 
 	if [ "$client_gfx" = "1" ]; then
