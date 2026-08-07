@@ -1742,7 +1742,7 @@ index 5aa3ab2..8494577 100644
 -		events[nCount++] = UpdateEvent;
 		{
  			DWORD tmp = peer->GetEventHandles(peer, &events[nCount], 64 - nCount);
-@@ -2694,11 +3168,20 @@ static DWORD WINAPI shadow_client_thread(LPVOID arg)
+@@ -2694,11 +3168,24 @@ static DWORD WINAPI shadow_client_thread(LPVOID arg)
  				WLog_ERR(TAG, "Failed to get FreeRDP transport event handles");
  				goto fail;
  			}
@@ -1757,7 +1757,11 @@ index 5aa3ab2..8494577 100644
 +		{
 +			H264WorkerEvent = macrdp_h264_worker_event(
 +				(macrdp_h264_worker*)client->macrdpH264Worker);
-+			if (H264WorkerEvent)
++			/* The worker event is manual-reset. Keep a deferred completion out of
++			 * the wait set while transport output is blocked, otherwise the event
++			 * causes a tight loop around DrainOutputBuffer. The 16ms timeout below
++			 * still retries output and re-enables this event as soon as it recovers. */
++			if (H264WorkerEvent && !outputBlocked)
 +				events[nCount++] = H264WorkerEvent;
 +		}
  
@@ -2003,7 +2007,7 @@ index 5aa3ab2..8494577 100644
  				goto fail;
  			}
  			else
-@@ -2917,7 +3553,13 @@
+@@ -2917,7 +3553,20 @@
  				if (audioVolumeMsg.id)
  				{
  					if (!shadow_client_subsystem_process_message(client, &audioVolumeMsg))
@@ -2012,7 +2016,14 @@ index 5aa3ab2..8494577 100644
 +
 +				if (audioSamplesMsg.id)
 +				{
-+					if (!shadow_client_subsystem_process_message(client, &audioSamplesMsg))
++					rdpTransport* transport = client->context.rdp
++						? client->context.rdp->transport : nullptr;
++					if (transport && transport_is_write_blocked(transport))
++					{
++						/* Audio is real-time; do not grow the transport queue with stale samples. */
++						shadow_client_free_queued_message(&audioSamplesMsg);
++					}
++					else if (!shadow_client_subsystem_process_message(client, &audioSamplesMsg))
 +						goto fail;
 +				}
  			}
