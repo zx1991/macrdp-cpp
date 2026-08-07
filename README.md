@@ -3,15 +3,17 @@
 [![macOS build](https://github.com/zx1991/macrdp-cpp/actions/workflows/macos.yml/badge.svg)](https://github.com/zx1991/macrdp-cpp/actions/workflows/macos.yml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
-An experimental C++/Objective-C++ implementation of the macOS remote desktop
-building blocks. This is intentionally separate from the existing Rust
-implementation in `../macrdp`.
+An experimental C++/Objective-C++ macOS remote desktop server built around
+ScreenCaptureKit, CoreGraphics, VideoToolbox, and FreeRDP.
 
 This repository is an active engineering project, not a production-ready
 remote desktop distribution. The server currently targets a logged-in macOS
 session, one main display, and a Windows `mstsc` client. Expect incomplete
 features and platform-specific limitations; see the [roadmap](docs/roadmap.md)
 before deploying it beyond a trusted test network.
+
+The account name in the commands below is deliberately a placeholder. Replace
+`example-user` with the username you will enter in the RDP client.
 
 ## Current state
 
@@ -76,7 +78,7 @@ Run the installed binary from the logged-in graphical macOS session:
 read -r -s macrdp_password
 printf '\n'
 printf '%s\n' "$macrdp_password" | \
-  ./build/macrdp-dist/bin/macrdp-server --user Xian --password-stdin
+  ./build/macrdp-dist/bin/macrdp-server --user example-user --password-stdin
 unset macrdp_password
 ```
 
@@ -129,7 +131,7 @@ read from standard input so it does not appear in the process list:
 
 ```bash
 printf '%s\n' 'change-this-password' | \
-  ./build/macrdp-server --user Xian --password-stdin
+  ./build/macrdp-server --user example-user --password-stdin
 ```
 
 For a long-running server, store the password in an owner-only file and use
@@ -147,7 +149,7 @@ unset macrdp_password
 
 ./scripts/install_launch_agent.sh \
   ./build/macrdp-dist/bin/macrdp-server \
-  Xian \
+  example-user \
   "$HOME/Library/Application Support/macrdp-cpp/password"
 ```
 
@@ -163,10 +165,10 @@ more expensive AVC444 path:
 
 ```bash
 printf '%s\n' 'change-this-password' | \
-  ./build/macrdp-server --user Xian --password-stdin --bitrate 24M
+  ./build/macrdp-server --user example-user --password-stdin --bitrate 24M
 
 printf '%s\n' 'change-this-password' | \
-  ./build/macrdp-server --user Xian --password-stdin --bitrate 24M --avc444
+  ./build/macrdp-server --user example-user --password-stdin --bitrate 24M --avc444
 ```
 
 Then connect from Windows Remote Desktop (`mstsc`) to the Mac's IP address.
@@ -179,7 +181,7 @@ should only be reachable through one interface:
 
 ```bash
 printf '%s\n' 'change-this-password' | \
-  ./build/macrdp-server --bind-address 127.0.0.1 --user Xian --password-stdin
+  ./build/macrdp-server --bind-address 127.0.0.1 --user example-user --password-stdin
 ```
 
 For a remote RDP client, replace `127.0.0.1` with the Mac's address on the
@@ -193,7 +195,7 @@ try the incremental SurfaceBits path:
 
 ```bash
 printf '%s\n' 'change-this-password' | \
-  ./build/macrdp-server --user Xian --password-stdin --no-gfx
+  ./build/macrdp-server --user example-user --password-stdin --no-gfx
 ```
 
 This path sends changed rectangles with the classic RDP update channel instead
@@ -326,6 +328,17 @@ diagnosing an isolated clipboard mismatch as a transport regression.
 - `.github/`: CI, issue templates, and pull request guidance.
 - `CMakeLists.txt`: manages C, C++, Objective-C, Objective-C++, FreeRDP, and
   Apple framework dependencies.
+
+## Documentation
+
+- [Architecture](docs/architecture.md): runtime pipeline and ownership
+  boundaries.
+- [Testing](docs/testing.md): local, loopback, and shaped-network tests.
+- [Roadmap](docs/roadmap.md): planned work and known release gates.
+- [Contributing](CONTRIBUTING.md): development and pull request guidance.
+- [Security policy](SECURITY.md): deployment warnings and private reports.
+- [Code of conduct](CODE_OF_CONDUCT.md): participation expectations.
+- [Changelog](CHANGELOG.md): user-visible changes by release.
 
 ## Roadmap and known limitations
 

@@ -7,8 +7,8 @@ repo_dir=$(CDPATH= cd -- "$script_dir/.." && pwd)
 server=${MACRDP_SERVER:-${1:-$repo_dir/build/macrdp-server}}
 client=${MACRDP_LOOPBACK_CLIENT:-${2:-/tmp/macrdp-loopback-client}}
 port=${MACRDP_LOOPBACK_PORT:-3390}
-user=${MACRDP_LOOPBACK_USER:-Xian}
-password=${MACRDP_LOOPBACK_PASSWORD:-LoopbackTest-2026}
+user=${MACRDP_LOOPBACK_USER:-macrdp-test-user}
+password=${MACRDP_LOOPBACK_PASSWORD:-macrdp-test-password}
 network_profile=${MACRDP_LOOPBACK_NETWORK_PROFILE:-direct}
 proxy=${MACRDP_LOOPBACK_PROXY:-/tmp/macrdp-loopback-proxy}
 proxy_port=${MACRDP_LOOPBACK_PROXY_PORT:-3391}

@@ -20,10 +20,11 @@ minimal reproducer.
 
 ## Reporting
 
-Please email `zx1991@163.com` rather than opening a public issue. Include the
-commit, macOS version, architecture, build options, and a minimal reproducer.
-Redact passwords, SAM files, private IP addresses, clipboard contents, and
-screen captures. Do not attach generated `build/_deps` trees unless they are
+Use the repository's private vulnerability reporting form in the GitHub
+Security tab rather than opening a public issue. Include the commit, macOS
+version, architecture, build options, and a minimal reproducer. Redact
+passwords, SAM files, private IP addresses, clipboard contents, and screen
+captures. Do not attach generated `build/_deps` trees unless they are
 necessary to reproduce an upstream issue.
 
 There is no guaranteed response time. Reports will be acknowledged when the
