@@ -162,6 +162,7 @@ struct mac_shadow_subsystem {
     std::chrono::steady_clock::time_point last_audio_log{};
     std::atomic<std::uint64_t> input_synchronize_events{0};
     std::atomic<std::uint64_t> input_keyboard_events{0};
+    std::atomic<std::uint64_t> input_keyboard_repeats{0};
     std::atomic<std::uint64_t> input_unicode_events{0};
     std::atomic<std::uint64_t> input_mouse_events{0};
     std::atomic<std::uint64_t> input_wheel_events{0};
@@ -465,7 +466,7 @@ std::optional<CGKeyCode> mac_key_code(UINT16 flags, UINT8 code) {
     return key_code;
 }
 
-bool post_keyboard_event(UINT16 flags, UINT8 code) {
+bool post_keyboard_event(UINT16 flags, UINT8 code, bool autorepeat = false) {
     const auto key_code = mac_key_code(flags, code);
     if (!key_code.has_value()) {
         WLog_WARN(TAG, "Ignoring unmapped keyboard event flags=0x%04" PRIx16
@@ -492,12 +493,17 @@ bool post_keyboard_event(UINT16 flags, UINT8 code) {
         return false;
     }
 
+    CGEventSetIntegerValueField(
+        event,
+        kCGKeyboardEventAutorepeat,
+        autorepeat ? 1 : 0);
     WLog_DBG(TAG, "Keyboard event flags=0x%04" PRIx16 " code=0x%02" PRIx8
-             " keycode=%u action=%s",
+             " keycode=%u action=%s repeat=%u",
              flags,
              code,
              static_cast<unsigned>(*key_code),
-             key_down ? "down" : "up");
+             key_down ? "down" : "up",
+             autorepeat ? 1U : 0U);
     CGEventPost(kCGHIDEventTap, event);
     CFRelease(event);
     CFRelease(source);
@@ -665,10 +671,19 @@ bool inject_keyboard_event(
         return success;
     }
 
-    const bool should_post = subsystem->input_ownership.acquire_key(
-        client_id,
-        key_identity);
-    if (!should_post) {
+    if (subsystem->input_ownership.find_key(client_id, key_identity).has_value()) {
+        if (!subsystem->input_ownership.is_key_exclusive(client_id, key_identity)) {
+            return true;
+        }
+        // Slow-path input may mark a held key with KBD_FLAGS_DOWN, but
+        // FastPath has no repeat bit and delivers another key-down instead.
+        // Ownership makes that distinction without relying on the transport
+        // encoding, so macOS can generate key repeat for both paths.
+        subsystem->input_keyboard_repeats.fetch_add(1, std::memory_order_relaxed);
+        return post_keyboard_event(flags, code, true);
+    }
+
+    if (!subsystem->input_ownership.acquire_key(client_id, key_identity)) {
         return true;
     }
     const bool posted = post_keyboard_event(flags, code);
@@ -1343,7 +1358,8 @@ void log_input_pipeline(MacShadowSubsystem* subsystem, bool force) {
     WLog_INFO(
         TAG,
         "Input pipeline: synchronize=%" PRIu64 " keyboard=%" PRIu64
-        " unicode=%" PRIu64 " mouse=%" PRIu64 " wheel=%" PRIu64
+        " keyboard_repeats=%" PRIu64 " unicode=%" PRIu64
+        " mouse=%" PRIu64 " wheel=%" PRIu64
         " left_button=%" PRIu64 " right_button=%" PRIu64
         " middle_button=%" PRIu64 " drag=%" PRIu64
         " extended_mouse=%" PRIu64 " injection_failures=%" PRIu64
@@ -1353,6 +1369,7 @@ void log_input_pipeline(MacShadowSubsystem* subsystem, bool force) {
         " queue_wait_max_us=%" PRIu64,
         subsystem->input_synchronize_events.load(std::memory_order_relaxed),
         subsystem->input_keyboard_events.load(std::memory_order_relaxed),
+        subsystem->input_keyboard_repeats.load(std::memory_order_relaxed),
         subsystem->input_unicode_events.load(std::memory_order_relaxed),
         subsystem->input_mouse_events.load(std::memory_order_relaxed),
         subsystem->input_wheel_events.load(std::memory_order_relaxed),

@@ -62,6 +62,20 @@ public:
         return key;
     }
 
+    // A repeated key-down should only be forwarded when this client owns the
+    // physical key exclusively. A second client sharing the same key must not
+    // create an independent autorepeat stream.
+    [[nodiscard]] bool is_key_exclusive(
+        InputClientId client,
+        std::uint16_t key) const {
+        const auto client_it = clients_.find(client);
+        const auto key_it = key_counts_.find(key);
+        return client_it != clients_.end()
+            && client_it->second.keys.find(key) != client_it->second.keys.end()
+            && key_it != key_counts_.end()
+            && key_it->second == 1;
+    }
+
     [[nodiscard]] std::vector<std::uint16_t> find_keys_by_code(
         InputClientId client,
         std::uint8_t code) const {

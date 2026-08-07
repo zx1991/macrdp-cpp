@@ -100,6 +100,8 @@ int main() {
                 "mismatched extended identity unexpectedly matched exactly") && ok;
     ok = expect(ownership.find_key_by_code(3, 0x5B) == 0x015B,
                 "key release fallback did not recover the scan-code identity") && ok;
+    ok = expect(ownership.is_key_exclusive(3, 0x015B),
+                "single key owner was not marked exclusive") && ok;
     ok = expect(ownership.release_key(3, 0x015B),
                 "extended key owner was not released") && ok;
 
@@ -107,6 +109,16 @@ int main() {
                 "left modifier owner was not announced") && ok;
     ok = expect(ownership.acquire_key(4, 0x011D),
                 "right modifier owner was not announced") && ok;
+    // A shared owner is recorded, but does not request a second platform
+    // key-down, so acquire_key intentionally returns false here.
+    ok = expect(!ownership.acquire_key(5, 0x001D),
+                "shared modifier owner unexpectedly requested a duplicate press") && ok;
+    ok = expect(!ownership.is_key_exclusive(4, 0x001D)
+                    && !ownership.is_key_exclusive(5, 0x001D),
+                "shared key was incorrectly marked exclusive") && ok;
+    (void)ownership.release_client(5);
+    ok = expect(ownership.is_key_exclusive(4, 0x001D),
+                "key did not become exclusive after the shared owner left") && ok;
     const auto modifier_matches = ownership.find_keys_by_code(4, 0x1D);
     ok = expect(modifier_matches.size() == 2,
                 "ambiguous modifier release candidates were not retained") && ok;

@@ -37,6 +37,7 @@ The smoke script uses a real TCP connection to the server and checks:
 - first-frame and inter-frame timing;
 - NLA failure with an incorrect password;
 - mouse buttons, drag, wheel, keyboard, Unicode, and synchronization input;
+- initial, repeated, and released keyboard events, including modifier cleanup;
 - bidirectional text clipboard traffic;
 - PCM RDPSND negotiation and delivery;
 - reconnect, requested sizes, and an intentionally slow client event loop.
@@ -74,6 +75,11 @@ default smoke test keeps this disabled and validates the scan-code path through
 the server counters instead. With the probe enabled, keep
 `MACRDP_LOOPBACK_SERVER_LOG_LEVEL=DEBUG` (the default) so the smoke test also
 checks the server's `0x21 -> macOS keycode 3` down/up mapping.
+
+The first input batch also sends two repeated key-down events for F17. The
+server reports them as `keyboard_repeats` and marks the injected macOS events
+with the autorepeat flag. This covers both slow-path `KBD_FLAGS_DOWN` input and
+FastPath input, where the repeat bit is not carried on the wire.
 
 ## Network profiles
 

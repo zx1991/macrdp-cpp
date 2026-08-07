@@ -59,6 +59,7 @@ typedef struct
 	uint64_t input_clicks_sent;
 	uint64_t input_synchronize_events_sent;
 	uint64_t input_keyboard_events_sent;
+	uint64_t input_keyboard_repeats_sent;
 	uint64_t input_unicode_events_sent;
 	uint64_t input_wheel_events_sent;
 	uint64_t input_right_button_events_sent;
@@ -975,6 +976,27 @@ static void loopback_send_keyboard_pair(loopback_context* loop, UINT32 scan_code
 	    freerdp_input_send_keyboard_event_ex(input, FALSE, FALSE, scan_code));
 }
 
+static void loopback_send_keyboard_repeat_sequence(loopback_context* loop, UINT32 scan_code)
+{
+	rdpInput* input = loop->common.context.input;
+	loopback_record_input_result(
+	    loop,
+	    &loop->input_keyboard_events_sent,
+	    freerdp_input_send_keyboard_event_ex(input, TRUE, FALSE, scan_code));
+	for (int repeat = 0; repeat < 2; repeat++)
+	{
+		loop->input_keyboard_repeats_sent++;
+		loopback_record_input_result(
+		    loop,
+		    &loop->input_keyboard_events_sent,
+		    freerdp_input_send_keyboard_event_ex(input, TRUE, TRUE, scan_code));
+	}
+	loopback_record_input_result(
+	    loop,
+	    &loop->input_keyboard_events_sent,
+	    freerdp_input_send_keyboard_event_ex(input, FALSE, FALSE, scan_code));
+}
+
 static void loopback_send_input(loopback_context* loop)
 {
 	rdpInput* input = loop->common.context.input;
@@ -987,10 +1009,6 @@ static void loopback_send_input(loopback_context* loop)
 	loop->input_sequence++;
 	if (loop->input_sequence == 1)
 	{
-		// F17 has a stable Apple key-code mapping. F24 is not represented by
-		// the macOS keyboard map and would make this protocol smoke test report
-		// an expected unmapped-key failure.
-		const UINT8 harmless_key = RDP_SCANCODE_CODE(RDP_SCANCODE_F17);
 		const UINT16 wheel_positive = PTR_FLAGS_WHEEL | 0x0078;
 		const UINT16 wheel_negative = PTR_FLAGS_WHEEL | PTR_FLAGS_WHEEL_NEGATIVE | 0x0088;
 		const UINT16 horizontal_positive = PTR_FLAGS_HWHEEL | 0x0078;
@@ -1003,14 +1021,9 @@ static void loopback_send_input(loopback_context* loop)
 		    loop,
 		    &loop->input_synchronize_events_sent,
 		    freerdp_input_send_synchronize_event(input, 0));
-		loopback_record_input_result(
-		    loop,
-		    &loop->input_keyboard_events_sent,
-		    freerdp_input_send_keyboard_event(input, KBD_FLAGS_DOWN, harmless_key));
-		loopback_record_input_result(
-		    loop,
-		    &loop->input_keyboard_events_sent,
-		    freerdp_input_send_keyboard_event(input, KBD_FLAGS_RELEASE, harmless_key));
+		// Exercise the initial down, repeated down, and release states with a
+		// function key that does not type into the active application.
+		loopback_send_keyboard_repeat_sequence(loop, RDP_SCANCODE_F17);
 		// Exercise each modifier independently so a failed key-up cannot hide
 		// behind a combination that changes the foreground application's action.
 		loopback_send_keyboard_pair(loop, RDP_SCANCODE_LCONTROL);
@@ -1240,6 +1253,7 @@ int main(int argc, char** argv)
 	       " input_clicks_sent=%" PRIu64
 	       " input_synchronize_events_sent=%" PRIu64
 	       " input_keyboard_events_sent=%" PRIu64
+	       " input_keyboard_repeats_sent=%" PRIu64
 	       " input_unicode_events_sent=%" PRIu64
 	       " input_wheel_events_sent=%" PRIu64
 	       " input_right_button_events_sent=%" PRIu64
@@ -1294,6 +1308,7 @@ int main(int argc, char** argv)
 	       loop->input_clicks_sent,
 	       loop->input_synchronize_events_sent,
 	       loop->input_keyboard_events_sent,
+	       loop->input_keyboard_repeats_sent,
 	       loop->input_unicode_events_sent,
 	       loop->input_wheel_events_sent,
 	       loop->input_right_button_events_sent,

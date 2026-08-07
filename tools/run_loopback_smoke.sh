@@ -541,6 +541,7 @@ run_client() {
 	input_clicks=$(metric input_clicks_sent "$summary")
 	input_synchronize=$(metric input_synchronize_events_sent "$summary")
 	input_keyboard=$(metric input_keyboard_events_sent "$summary")
+	input_keyboard_repeats=$(metric input_keyboard_repeats_sent "$summary")
 	input_unicode=$(metric input_unicode_events_sent "$summary")
 	input_wheel=$(metric input_wheel_events_sent "$summary")
 	input_right_button=$(metric input_right_button_events_sent "$summary")
@@ -608,7 +609,10 @@ run_client() {
 	if [ "${input_failures:-0}" -ne 0 ]; then
 		fail "$case_name had $input_failures client-side input send failures"
 	fi
-	if [ "$keyboard_probe_enabled" = "1" ] && [ "${input_keyboard:-0}" -lt 22 ]; then
+	if [ "${input_keyboard_repeats:-0}" -lt 2 ]; then
+		fail "$case_name keyboard repeat probe did not send two repeated key-down events"
+	fi
+	if [ "$keyboard_probe_enabled" = "1" ] && [ "${input_keyboard:-0}" -lt 24 ]; then
 		fail "$case_name keyboard probe did not send the expected F key pair"
 	fi
 	if [ "${clipboard_server_lists:-0}" -lt 1 ] \
@@ -740,6 +744,7 @@ check_input_pipeline() {
 
 	server_synchronize=$(metric_max synchronize "$input_pipeline")
 	server_keyboard=$(metric_max keyboard "$input_pipeline")
+	server_keyboard_repeats=$(metric_max keyboard_repeats "$input_pipeline")
 	server_unicode=$(metric_max unicode "$input_pipeline")
 	server_wheel=$(metric_max wheel "$input_pipeline")
 	server_failures=$(metric_max injection_failures "$input_pipeline")
@@ -748,6 +753,9 @@ check_input_pipeline() {
 	fi
 	if [ "${input_keyboard:-0}" -lt 2 ] || [ "${server_keyboard:-0}" -lt 2 ]; then
 		fail "$case_name keyboard input did not reach the server"
+	fi
+	if [ "${input_keyboard_repeats:-0}" -lt 2 ] || [ "${server_keyboard_repeats:-0}" -lt 2 ]; then
+		fail "$case_name keyboard repeat events did not reach the server"
 	fi
 	if [ "${input_unicode:-0}" -lt 2 ] || [ "${server_unicode:-0}" -lt 2 ]; then
 		fail "$case_name Unicode input did not reach the server"
