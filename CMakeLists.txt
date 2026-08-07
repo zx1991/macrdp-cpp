@@ -379,7 +379,7 @@ if(MACRDP_SHADOW_HEADER_PATCH_OFFSET EQUAL -1
     endif()
 
     execute_process(
-        COMMAND "${MACRDP_PATCH_EXECUTABLE}" -N -t -p1
+        COMMAND "${MACRDP_PATCH_EXECUTABLE}" -N -t -F 0 -p1
             -i "${MACRDP_FREERDP_PATCH}"
         WORKING_DIRECTORY "${freerdp_SOURCE_DIR}"
         RESULT_VARIABLE MACRDP_PATCH_RESULT

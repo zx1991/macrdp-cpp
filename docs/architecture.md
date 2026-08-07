@@ -68,11 +68,9 @@ a private configuration directory. macOS TCC permissions remain enforced by
 the operating system: Screen Recording is required for capture and Accessibility
 is required for input injection. The server does not bypass those controls.
 
-## Reference projects
+## Design constraints
 
-RustDesk is a useful architectural reference for this project, especially its
-service/subscriber lifecycle, platform-specific modules, bounded media flows,
-and separation of video, audio, clipboard, and input services. macrdp-cpp does
-not copy RustDesk code or protocol design: it must remain compatible with RDP
-clients and FreeRDP's server API. Any future borrowing of an implementation
-must preserve its original license and attribution.
+The implementation keeps protocol handling, platform capture, input injection,
+audio, clipboard, and media encoding as separate ownership domains. Changes at
+the FreeRDP boundary must remain compatible with the pinned upstream API and
+must preserve the upstream license and attribution.

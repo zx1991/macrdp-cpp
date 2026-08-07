@@ -519,8 +519,8 @@ run_client() {
 			echo "$case_name: slow frame stages observed under network profile $network_profile"
 		fi
 	fi
-	if ! wait_for_log "$server_log" 'shadow_input_mouse_event'; then
-		fail "$case_name server did not receive a mouse event"
+	if ! wait_for_log "$server_log" 'Input pipeline:'; then
+		fail "$case_name server did not process input events"
 	fi
 
 	if [ "$client_gfx" = "1" ]; then

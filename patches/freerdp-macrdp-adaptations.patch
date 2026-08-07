@@ -1,6 +1,16 @@
+diff --git a/include/freerdp/server/shadow.h b/include/freerdp/server/shadow.h
+index 027bad9..2645248 100644
 --- a/include/freerdp/server/shadow.h
 +++ b/include/freerdp/server/shadow.h
-@@ -120,6 +120,16 @@
+@@ -33,6 +33,7 @@
+ #include <freerdp/server/encomsp.h>
+ #include <freerdp/server/remdesk.h>
+ #include <freerdp/server/rdpsnd.h>
++#include <freerdp/server/cliprdr.h>
+ #if defined(CHANNEL_AUDIN_SERVER)
+ #include <freerdp/server/audin.h>
+ #endif
+@@ -120,6 +121,16 @@ extern "C"
  		wMessageQueue* MsgQueue;
  		CRITICAL_SECTION lock;
  		REGION16 invalidRegion;
@@ -17,7 +27,15 @@
  		rdpShadowServer* server;
  		rdpShadowEncoder* encoder;
  		rdpShadowSubsystem* subsystem;
-@@ -203,6 +211,8 @@
+@@ -131,6 +142,7 @@ extern "C"
+ 		EncomspServerContext* encomsp;
+ 		RemdeskServerContext* remdesk;
+ 		RdpsndServerContext* rdpsnd;
++		CliprdrServerContext* cliprdr;
+ #if defined(CHANNEL_AUDIN_SERVER)
+ 		audin_server_context* audin;
+ #endif
+@@ -203,6 +215,8 @@ extern "C"
  
  		CRITICAL_SECTION lock;
  		REGION16 invalidRegion;
@@ -26,9 +44,7 @@
  	};
  
  	struct S_RDP_SHADOW_ENTRY_POINTS
-@@ -235,8 +235,11 @@
- 	struct rdp_shadow_subsystem
- 	{
+@@ -224,6 +238,9 @@ extern "C"
  		RDP_SHADOW_ENTRY_POINTS ep;
  		HANDLE event;
  		UINT32 numMonitors;
@@ -38,26 +54,25 @@
  		UINT32 captureFrameRate;
  		UINT32 selectedMonitor;
  		MONITOR_DEF monitors[16];
---- a/server/shadow/shadow_client.c
-+++ b/server/shadow/shadow_client.c
-@@ -219,5 +219,14 @@
- 	pdu.width = freerdp_settings_get_uint32(settings, FreeRDP_DesktopWidth);
- 	pdu.height = freerdp_settings_get_uint32(settings, FreeRDP_DesktopHeight);
--	pdu.monitorCount = client->subsystem->numMonitors;
--	pdu.monitorDefArray = client->subsystem->monitors;
-+	MONITOR_DEF monitor_snapshot[16] = { 0 };
-+	UINT32 monitor_count = 0;
-+	if (client->subsystem->macrdpMonitorLockInitialized)
-+		EnterCriticalSection(&(client->subsystem->macrdpMonitorLock));
-+	monitor_count = MIN(client->subsystem->numMonitors, ARRAYSIZE(monitor_snapshot));
-+	CopyMemory(monitor_snapshot, client->subsystem->monitors,
-+	           monitor_count * sizeof(monitor_snapshot[0]));
-+	if (client->subsystem->macrdpMonitorLockInitialized)
-+		LeaveCriticalSection(&(client->subsystem->macrdpMonitorLock));
-+	pdu.monitorCount = monitor_count;
-+	pdu.monitorDefArray = monitor_snapshot;
- 	IFCALLRET(context->ResetGraphics, error, context, &pdu);
-
+diff --git a/libfreerdp/codec/h264.c b/libfreerdp/codec/h264.c
+index 3d30adc..326e790 100644
+--- a/libfreerdp/codec/h264.c
++++ b/libfreerdp/codec/h264.c
+@@ -301,9 +301,10 @@ static BOOL detect_changes(BOOL firstFrameDone, const UINT32 QP, const RECTANGLE
+ 	}
+ 	else
+ 	{
+-		for (size_t y = regionRect->top; y < regionRect->bottom; y += 64)
++		/* MACRDP_H264_REGION_FIX */
++		for (size_t y = 0; y < regionRect->bottom - regionRect->top; y += 64)
+ 		{
+-			for (size_t x = regionRect->left; x < regionRect->right; x += 64)
++			for (size_t x = 0; x < regionRect->right - regionRect->left; x += 64)
+ 			{
+ 				RECTANGLE_16 rect;
+ 				rect.left = (UINT16)MIN(UINT16_MAX, regionRect->left + x);
+diff --git a/libfreerdp/codec/h264_ffmpeg.c b/libfreerdp/codec/h264_ffmpeg.c
+index 049696a..2482e6b 100644
 --- a/libfreerdp/codec/h264_ffmpeg.c
 +++ b/libfreerdp/codec/h264_ffmpeg.c
 @@ -21,6 +21,9 @@
@@ -70,7 +85,7 @@
  #include <freerdp/log.h>
  #include <freerdp/codec/h264.h>
  #include <libavcodec/avcodec.h>
-@@ -106,6 +109,10 @@
+@@ -106,6 +109,10 @@ typedef struct
  	AVPacket bufferpacket;
  #endif
  	AVPacket* packet;
@@ -81,7 +96,7 @@
  #if defined(WITH_VAAPI) || defined(WITH_VAAPI_H264_ENCODING) || defined(WITH_VIDEOTOOLBOX)
  	AVBufferRef* hwctx;
  	AVFrame* hwVideoFrame;
-@@ -126,6 +133,14 @@
+@@ -126,6 +133,14 @@ static void libavcodec_destroy_encoder_context(H264_CONTEXT* WINPR_RESTRICT h264
  
  	sys = (H264_CONTEXT_LIBAVCODEC*)h264->pSystemData;
  
@@ -96,11 +111,10 @@
  	if (sys->codecEncoderContext)
  	{
  #if LIBAVCODEC_VERSION_INT >= AV_VERSION_INT(55, 69, 100)
-@@ -190,7 +205,33 @@
- 	sys = (H264_CONTEXT_LIBAVCODEC*)h264->pSystemData;
+@@ -191,6 +206,32 @@ static BOOL libavcodec_create_encoder_context(H264_CONTEXT* WINPR_RESTRICT h264)
  	if (!sys || !sys->codecEncoder)
  		return FALSE;
-+
+ 
 +#ifdef MACRDP_USE_VIDEOTOOLBOX_H264_ENCODING
 +	if (sys->macrdpVideoToolboxEncoder)
 +		return TRUE;
@@ -118,7 +132,7 @@
 +			/* MACRDP_VIDEOTOOLBOX_BRIDGE_ACTIVE_LOG_V2 */
 +			return TRUE;
 +		}
- 
++
 +		WLog_Print(h264->log, WLOG_WARN,
 +		           "Direct VideoToolbox H264 encoder unavailable, falling back to FFmpeg");
 +		sys->codecEncoder = avcodec_find_encoder(AV_CODEC_ID_H264);
@@ -130,7 +144,7 @@
  	recreate = !sys->codecEncoderContext;
  
  	if (sys->codecEncoderContext)
-@@ -231,6 +272,9 @@
+@@ -231,6 +272,9 @@ static BOOL libavcodec_create_encoder_context(H264_CONTEXT* WINPR_RESTRICT h264)
  	sys->codecEncoderContext->width = (int)MIN(INT32_MAX, h264->width);
  	sys->codecEncoderContext->height = (int)MIN(INT32_MAX, h264->height);
  	sys->codecEncoderContext->delay = 0;
@@ -140,7 +154,7 @@
  #if LIBAVCODEC_VERSION_INT >= AV_VERSION_INT(56, 13, 100)
  	sys->codecEncoderContext->framerate =
  	    (AVRational){ WINPR_ASSERTING_INT_CAST(int, h264->FrameRate), 1 };
-@@ -238,6 +282,14 @@
+@@ -238,6 +282,14 @@ static BOOL libavcodec_create_encoder_context(H264_CONTEXT* WINPR_RESTRICT h264)
  	sys->codecEncoderContext->time_base =
  	    (AVRational){ 1, WINPR_ASSERTING_INT_CAST(int, h264->FrameRate) };
  	av_opt_set(sys->codecEncoderContext, "tune", "zerolatency", AV_OPT_SEARCH_CHILDREN);
@@ -155,7 +169,7 @@
  
  	sys->codecEncoderContext->flags |= AV_CODEC_FLAG_LOOP_FILTER;
  
-@@ -424,6 +476,30 @@
+@@ -424,6 +476,30 @@ static int libavcodec_compress(H264_CONTEXT* WINPR_RESTRICT h264,
  	if (!libavcodec_create_encoder_context(h264))
  		return -1;
  
@@ -186,11 +200,10 @@
  #if LIBAVCODEC_VERSION_INT < AV_VERSION_INT(58, 133, 100)
  	sys->packet = &sys->bufferpacket;
  	av_packet_unref(sys->packet);
-@@ -506,7 +582,28 @@
- 	}
+@@ -507,6 +583,27 @@ static int libavcodec_compress(H264_CONTEXT* WINPR_RESTRICT h264,
  
  	status = avcodec_receive_packet(sys->codecEncoderContext, sys->packet);
-+
+ 
 +	if (status == AVERROR(EAGAIN))
 +	{
 +		/* MACRDP_EAGAIN_POLL: let asynchronous VideoToolbox output settle. */
@@ -202,7 +215,7 @@
 +			status = avcodec_receive_packet(sys->codecEncoderContext, sys->packet);
 +		}
 +	}
- 
++
 +	if (status == AVERROR(EAGAIN))
 +	{
 +		/* MACRDP_EAGAIN_FIX: no packet is ready for this input yet. */
@@ -215,7 +228,7 @@
  	if (status < 0)
  	{
  		WLog_Print(h264->log, WLOG_ERROR, "Failed to encode video frame (%s [%d])",
-@@ -803,6 +900,14 @@
+@@ -803,6 +900,14 @@ static BOOL libavcodec_init(H264_CONTEXT* h264)
  	}
  	else
  	{
@@ -230,16 +243,33 @@
  #ifdef WITH_VAAPI_H264_ENCODING
  		if (h264->hwAccel) /* user requested hw accel */
  		{
+diff --git a/libfreerdp/core/server.c b/libfreerdp/core/server.c
+index a46be5c..8215c0b 100644
+--- a/libfreerdp/core/server.c
++++ b/libfreerdp/core/server.c
+@@ -628,7 +628,9 @@ BOOL WTSVirtualChannelManagerCheckFileDescriptorEx(HANDLE hServer, BOOL autoOpen
+ 			return FALSE;
+ 	}
+ 
+-	while (MessageQueue_Peek(vcm->queue, &message, TRUE))
++	/* MACRDP_CHANNEL_MESSAGE_BUDGET: keep channel draining from starving input. */
++	size_t messageBudget = 8;
++	while (messageBudget-- > 0 && MessageQueue_Peek(vcm->queue, &message, TRUE))
+ 	{
+ 		BYTE* buffer = nullptr;
+ 		UINT32 length = 0;
+diff --git a/libfreerdp/core/transport.c b/libfreerdp/core/transport.c
+index 5a074df..1e13ee2 100644
 --- a/libfreerdp/core/transport.c
 +++ b/libfreerdp/core/transport.c
-@@ -64,7 +64,20 @@
+@@ -64,6 +64,19 @@
  #define TAG FREERDP_TAG("core.transport")
  
  #define BUFFER_SIZE 16384
 +#define MACRDP_WRITE_QUEUE_LIMIT (16ULL * 1024ULL * 1024ULL)
 +#define MACRDP_WRITE_CHUNK (16ULL * 1024ULL)
 +#define MACRDP_WRITE_BUDGET (256ULL * 1024ULL)
- 
++
 +typedef struct rdp_transport_write_item rdpTransportWriteItem;
 +
 +struct rdp_transport_write_item
@@ -249,11 +279,10 @@
 +	size_t length;
 +	rdpTransportWriteItem* next;
 +};
-+
+ 
  struct rdp_transport
  {
- 	TRANSPORT_LAYER layer;
-@@ -89,6 +102,9 @@
+@@ -89,6 +102,9 @@ struct rdp_transport
  	CRITICAL_SECTION ReadLock;
  	BOOL haveWriteLock;
  	CRITICAL_SECTION WriteLock;
@@ -263,10 +292,20 @@
  	UINT64 written;
  	HANDLE rereadEvent;
  	BOOL haveMoreBytesToRead;
-@@ -104,7 +120,152 @@
- 	rdpTransportLayer pub;
+@@ -105,6 +121,162 @@ typedef struct
  	void* userContextShadowPtr;
  } rdpTransportLayerInt;
+ 
++static BOOL transport_errno_is_retryable(int error)
++{
++	if (error == EINTR || error == EAGAIN)
++		return TRUE;
++#ifdef EWOULDBLOCK
++	if (error == EWOULDBLOCK)
++		return TRUE;
++#endif
++	return FALSE;
++}
 +
 +static void transport_write_queue_clear(rdpTransport* transport)
 +{
@@ -370,7 +409,7 @@
 +					continue;
 +				}
 +			}
- 
++
 +			ERR_clear_error();
 +			const size_t remaining = item->length - item->offset;
 +			const size_t chunk =
@@ -416,7 +455,33 @@
  static const char* where2str(int where, char* ibuffer, size_t ilen)
  {
  	if (!ibuffer || (ilen < 2))
-@@ -1228,6 +1377,10 @@
+@@ -859,13 +1031,24 @@ static SSIZE_T transport_read_layer(rdpTransport* transport, BYTE* data, size_t
+ 		int r = (int)((tr > INT_MAX) ? INT_MAX : tr);
+ 		ERR_clear_error();
+ 		int status = BIO_read(transport->frontBio, data + read, r);
++		const int savedErrno = errno;
+ 
+ 		if (freerdp_shall_disconnect_context(context))
+ 			return -1;
+ 
+ 		if (status <= 0)
+ 		{
+-			if (!transport->frontBio || !BIO_should_retry(transport->frontBio))
++			const BOOL retryable = transport->frontBio
++				&& (BIO_should_retry(transport->frontBio)
++				    || transport_errno_is_retryable(savedErrno));
++			if (!retryable)
+ 			{
++				if (status == 0)
++				{
++					/* A clean socket EOF is a normal client disconnect. */
++					transport->layer = TRANSPORT_LAYER_CLOSED;
++					freerdp_set_last_error_if_not(context, FREERDP_ERROR_CONNECT_TRANSPORT_FAILED);
++					return -1;
++				}
+ 				/* something unexpected happened, let's close */
+ 				if (!transport->frontBio)
+@@ -1228,6 +1404,10 @@ static int transport_default_write(rdpTransport* transport, wStream* s)
  		size_t length = Stream_GetPosition(s);
  		size_t writtenlength = length;
  		Stream_ResetPosition(s);
@@ -427,7 +492,7 @@
  
  		if (length > 0)
  		{
-@@ -1235,10 +1388,82 @@
+@@ -1235,10 +1415,82 @@ static int transport_default_write(rdpTransport* transport, wStream* s)
  			WLog_Packet(transport->log, WLOG_TRACE, Stream_Buffer(s), length, WLOG_PACKET_OUTBOUND);
  		}
  
@@ -511,7 +576,7 @@
  			status = BIO_write(transport->frontBio, Stream_ConstPointer(s), towrite);
  
  			if (status <= 0)
-@@ -1256,8 +1481,17 @@
+@@ -1256,8 +1508,17 @@ static int transport_default_write(rdpTransport* transport, wStream* s)
  				/* non-blocking can live with blocked IOs */
  				if (!transport->blocking)
  				{
@@ -531,7 +596,7 @@
  				}
  
  				if (BIO_wait_write(transport->frontBio, 100) < 0)
-@@ -1270,6 +1504,18 @@
+@@ -1270,6 +1531,18 @@ static int transport_default_write(rdpTransport* transport, wStream* s)
  				continue;
  			}
  
@@ -550,7 +615,7 @@
  			WINPR_ASSERT(context->settings);
  			if (transport->blocking || context->settings->WaitForOutputBufferFlush)
  			{
-@@ -1290,18 +1536,21 @@
+@@ -1290,18 +1563,21 @@ static int transport_default_write(rdpTransport* transport, wStream* s)
  					}
  				}
  			}
@@ -580,7 +645,7 @@
  		transport->written += writtenlength;
  	}
  out_cleanup:
-@@ -1448,26 +1697,61 @@
+@@ -1448,26 +1724,61 @@ void transport_get_fds(rdpTransport* transport, void** rfds, int* rcount)
  
  BOOL transport_is_write_blocked(rdpTransport* transport)
  {
@@ -639,10 +704,10 @@
 +			goto out;
 +		}
  	}
-+
+ 
 +	status = transport->writeQueueHead != nullptr || BIO_write_blocked(transport->frontBio);
 +	goto out;
- 
++
 +fail:
 +	status = -1;
 +out:
@@ -651,7 +716,7 @@
  	return status;
  }
  
-@@ -1672,6 +1956,7 @@
+@@ -1672,6 +1983,7 @@ static BOOL transport_default_disconnect(rdpTransport* transport)
  
  	EnterCriticalSection(&(transport->ReadLock));
  	EnterCriticalSection(&(transport->WriteLock));
@@ -659,9 +724,43 @@
  	if (transport->tls)
  	{
  		freerdp_tls_free(transport->tls);
+diff --git a/server/shadow/shadow_channels.c b/server/shadow/shadow_channels.c
+index 1e2cd8d..f94348e 100644
+--- a/server/shadow/shadow_channels.c
++++ b/server/shadow/shadow_channels.c
+@@ -18,12 +18,20 @@
+ 
+ #include <freerdp/config.h>
+ 
++#include <macrdp/cliprdr_adapter.h>
++
+ #include "shadow.h"
+ 
+ #include "shadow_channels.h"
+ 
+ UINT shadow_client_channels_post_connect(rdpShadowClient* client)
+ {
++	if (WTSVirtualChannelManagerIsChannelJoined(client->vcm, CLIPRDR_SVC_CHANNEL_NAME))
++	{
++		if (!macrdp_shadow_cliprdr_init(client))
++			return ERROR_NOT_READY;
++	}
++
+ 	if (WTSVirtualChannelManagerIsChannelJoined(client->vcm, ENCOMSP_SVC_CHANNEL_NAME))
+ 	{
+ 		if (shadow_client_encomsp_init(client) < 0)
+@@ -58,4 +66,6 @@ void shadow_client_channels_free(rdpShadowClient* client)
+ 	shadow_client_rdpsnd_uninit(client);
+ 	shadow_client_remdesk_uninit(client);
+ 	shadow_client_encomsp_uninit(client);
++	macrdp_shadow_cliprdr_uninit(client);
++	/* MACRDP_CLIPRDR_CHANNEL */
+ }
+diff --git a/server/shadow/shadow_client.c b/server/shadow/shadow_client.c
+index 5aa3ab2..8494577 100644
 --- a/server/shadow/shadow_client.c
 +++ b/server/shadow/shadow_client.c
-@@ -35,11 +35,27 @@
+@@ -35,9 +35,25 @@
  #include <freerdp/channels/drdynvc.h>
  
  #include "shadow.h"
@@ -669,8 +768,8 @@
  
  #define TAG CLIENT_TAG("shadow")
  
- typedef struct
- {
++typedef struct
++{
 +	RDPGFX_SURFACE_COMMAND command;
 +	RDPGFX_START_FRAME_PDU start;
 +	RDPGFX_END_FRAME_PDU end;
@@ -684,12 +783,30 @@
 +} MACRDP_H264_PENDING;
 +
 +static BOOL shadow_client_h264_wait_idle(rdpShadowClient* client);
-+typedef struct
-+{
+ typedef struct
+ {
  	BOOL gfxOpened;
- 	BOOL gfxSurfaceCreated;
- } SHADOW_GFX_STATUS;
-@@ -241,7 +257,18 @@
+@@ -202,8 +218,17 @@ static inline BOOL shadow_client_rdpgfx_reset_graphic(rdpShadowClient* client)
+ 
+ 	pdu.width = freerdp_settings_get_uint32(settings, FreeRDP_DesktopWidth);
+ 	pdu.height = freerdp_settings_get_uint32(settings, FreeRDP_DesktopHeight);
+-	pdu.monitorCount = client->subsystem->numMonitors;
+-	pdu.monitorDefArray = client->subsystem->monitors;
++	MONITOR_DEF monitor_snapshot[16] = { 0 };
++	UINT32 monitor_count = 0;
++	if (client->subsystem->macrdpMonitorLockInitialized)
++		EnterCriticalSection(&(client->subsystem->macrdpMonitorLock));
++	monitor_count = MIN(client->subsystem->numMonitors, ARRAYSIZE(monitor_snapshot));
++	CopyMemory(monitor_snapshot, client->subsystem->monitors,
++	           monitor_count * sizeof(monitor_snapshot[0]));
++	if (client->subsystem->macrdpMonitorLockInitialized)
++		LeaveCriticalSection(&(client->subsystem->macrdpMonitorLock));
++	pdu.monitorCount = monitor_count;
++	pdu.monitorDefArray = monitor_snapshot;
+ 	IFCALLRET(context->ResetGraphics, error, context, &pdu);
+ 
+ 	if (error)
+@@ -241,7 +266,18 @@ static void shadow_client_context_free(freerdp_peer* peer, rdpContext* context)
  	if (server && server->clients)
  		ArrayList_Remove(server->clients, (void*)client);
  
@@ -708,7 +825,7 @@
  
  	/* Clear queued messages and free resource */
  	MessageQueue_Free(client->MsgQueue);
-@@ -346,6 +373,10 @@
+@@ -346,6 +382,10 @@ static BOOL shadow_client_context_new(freerdp_peer* peer, rdpContext* context)
  	if (!(client->encoder = shadow_encoder_new(client)))
  		goto fail;
  
@@ -719,7 +836,7 @@
  	if (!ArrayList_Append(server->clients, (void*)client))
  		goto fail;
  
-@@ -414,10 +445,15 @@
+@@ -414,10 +454,15 @@ static inline BOOL shadow_client_recalc_desktop_size(rdpShadowClient* client)
  	WINPR_ASSERT(server->surface);
  	WINPR_ASSERT(settings);
  
@@ -739,7 +856,7 @@
  
  	if (server->shareSubRect)
  	{
-@@ -482,8 +518,11 @@
+@@ -482,8 +527,11 @@ static BOOL shadow_send_desktop_resize(rdpShadowClient* client)
  	WINPR_ASSERT(client->server);
  	WINPR_ASSERT(client->server->surface);
  
@@ -751,7 +868,7 @@
  
  	if (client->resizeRequested)
  	{
-@@ -730,6 +769,12 @@
+@@ -730,6 +778,12 @@ static BOOL shadow_client_activate(freerdp_peer* peer)
  	client->activated = TRUE;
  	client->inLobby = !(client->mayView);
  
@@ -764,18 +881,17 @@
  	if (shadow_encoder_reset(client->encoder) < 0)
  	{
  		WLog_ERR(TAG, "Failed to reset encoder");
-@@ -1299,11 +1344,137 @@
- 	return TRUE;
+@@ -1300,10 +1354,136 @@ static BOOL shadow_client_send_av1(rdpShadowClient* client, const BYTE* pSrcData
  }
  #endif
-+
+ 
 +static void shadow_client_h264_defer(MACRDP_H264_PENDING* pending, const BYTE* pSrcData,
 +                                    UINT32 nSrcStep, UINT32 SrcFormat, UINT16 nWidth,
 +                                    UINT16 nHeight, const RECTANGLE_16* encodeRegion)
 +{
 +    if (!pending || !encodeRegion)
 +        return;
- 
++
 +    if (!pending->retry)
 +        pending->retryRegion = *encodeRegion;
 +    else
@@ -903,7 +1019,7 @@
                                        const RDPGFX_START_FRAME_PDU* cmdstart,
                                        const RDPGFX_END_FRAME_PDU* cmdend)
  {
-@@ -1324,15 +1493,14 @@
+@@ -1324,15 +1504,14 @@ static BOOL shadow_client_send_avc444(rdpShadowClient* client, const BYTE* pSrcD
  		WLog_ERR(TAG, "Failed to prepare encoder FREERDP_CODEC_AVC444");
  		return FALSE;
  	}
@@ -926,7 +1042,7 @@
  	rc = avc444_compress(encoder->h264, pSrcData, SrcFormat, nSrcStep, nWidth, nHeight, version,
  	                     &regionRect, &avc444.LC, &avc444.bitstream[0].data,
  	                     &avc444.bitstream[0].length, &avc444.bitstream[1].data,
-@@ -1367,7 +1535,8 @@
+@@ -1367,7 +1546,8 @@ static BOOL shadow_client_send_avc444(rdpShadowClient* client, const BYTE* pSrcD
  WINPR_ATTR_NODISCARD
  static BOOL shadow_client_send_avc420(rdpShadowClient* client, const BYTE* pSrcData,
                                        UINT32 nSrcStep, UINT32 SrcFormat, UINT16 nWidth,
@@ -936,7 +1052,7 @@
                                        const RDPGFX_START_FRAME_PDU* cmdstart,
                                        const RDPGFX_END_FRAME_PDU* cmdend)
  {
-@@ -1386,17 +1555,22 @@
+@@ -1386,17 +1566,22 @@ static BOOL shadow_client_send_avc420(rdpShadowClient* client, const BYTE* pSrcD
  		WLog_ERR(TAG, "Failed to prepare encoder FREERDP_CODEC_AVC420");
  		return FALSE;
  	}
@@ -967,7 +1083,7 @@
  	if (rc < 0)
  	{
  		WLog_ERR(TAG, "avc420_compress failed");
-@@ -1408,8 +1582,14 @@
+@@ -1408,8 +1593,14 @@ static BOOL shadow_client_send_avc420(rdpShadowClient* client, const BYTE* pSrcD
  	{
  		cmd->codecId = RDPGFX_CODECID_AVC420;
  		cmd->extra = (void*)&avc420;
@@ -982,7 +1098,7 @@
  		cmd->extra = nullptr;
  	}
  	free_h264_metablock(&avc420.meta);
-@@ -1685,6 +1865,52 @@
+@@ -1685,6 +1876,52 @@ static BOOL shadow_avc420_enabled(const rdpShadowClient* client)
  	return (client->confirmedCaps.flags & RDPGFX_CAPS_FLAG_AVC420_ENABLED) != 0;
  }
  
@@ -1035,7 +1151,7 @@
  /**
   * Function description
   *
-@@ -1693,12 +1919,14 @@
+@@ -1693,12 +1930,14 @@ static BOOL shadow_avc420_enabled(const rdpShadowClient* client)
  WINPR_ATTR_NODISCARD
  static BOOL shadow_client_send_surface_gfx(rdpShadowClient* client, const BYTE* pSrcData,
                                             UINT32 nSrcStep, UINT32 SrcFormat, UINT16 nXSrc,
@@ -1051,7 +1167,7 @@
  	SYSTEMTIME sTime = WINPR_C_ARRAY_INIT;
  
  	if (!context || !pSrcData)
-@@ -1710,6 +1938,11 @@
+@@ -1710,6 +1949,11 @@ static BOOL shadow_client_send_surface_gfx(rdpShadowClient* client, const BYTE*
  	if (!settings || !encoder)
  		return FALSE;
  
@@ -1063,7 +1179,7 @@
  	if (client->first_frame)
  	{
  		if (encoder->rfx)
-@@ -1756,14 +1989,14 @@
+@@ -1756,14 +2000,14 @@ static BOOL shadow_client_send_surface_gfx(rdpShadowClient* client, const BYTE*
  		{
  			cmd.codecId = GfxAVC444v2 ? RDPGFX_CODECID_AVC444v2 : RDPGFX_CODECID_AVC444;
  			return shadow_client_send_avc444(client, pSrcData, nSrcStep, SrcFormat, nWidth, nHeight,
@@ -1080,12 +1196,10 @@
  	}
  
  #endif
-@@ -1787,6 +2020,105 @@
- 
- 	return shadow_client_send_uncompressed(client, pSrcData, nSrcStep, SrcFormat, &cmd, &cmdstart,
+@@ -1789,6 +2033,105 @@ static BOOL shadow_client_send_surface_gfx(rdpShadowClient* client, const BYTE*
  	                                       &cmdend);
-+}
-+
+ }
+ 
 +static BOOL shadow_client_send_h264_completion(rdpShadowClient* client)
 +{
 +    MACRDP_H264_PENDING* pending = nullptr;
@@ -1183,10 +1297,12 @@
 +        return shadow_client_send_surface_gfx(client, retrySource, retryStride, retryFormat,
 +                                               0, 0, retryWidth, retryHeight, &retryRegion);
 +    return TRUE;
- }
- 
++}
++
  WINPR_ATTR_NODISCARD
-@@ -2205,10 +2516,70 @@
+ static BOOL stream_surface_bits_supported(const rdpSettings* settings)
+ {
+@@ -2205,10 +2548,70 @@ out:
   *
   * @return TRUE on success (or nothing need to be updated)
   */
@@ -1258,7 +1374,7 @@
  	INT64 nXSrc = 0;
  	INT64 nYSrc = 0;
  	INT64 nWidth = 0;
-@@ -2219,6 +2590,7 @@
+@@ -2219,6 +2622,7 @@ static BOOL shadow_client_send_surface_update(rdpShadowClient* client, SHADOW_GF
  	rdpShadowSurface* surface = nullptr;
  	REGION16 invalidRegion;
  	RECTANGLE_16 surfaceRect;
@@ -1266,7 +1382,7 @@
  	const RECTANGLE_16* extents = nullptr;
  	BYTE* pSrcData = nullptr;
  	UINT32 nSrcStep = 0;
-@@ -2227,37 +2599,53 @@
+@@ -2227,37 +2631,53 @@ static BOOL shadow_client_send_surface_update(rdpShadowClient* client, SHADOW_GF
  	const RECTANGLE_16* rects = nullptr;
  
  	if (!context || !pStatus)
@@ -1329,7 +1445,7 @@
  	}
  
  	surfaceRect.left = 0;
-@@ -2267,27 +2655,40 @@
+@@ -2267,27 +2687,40 @@ static BOOL shadow_client_send_surface_update(rdpShadowClient* client, SHADOW_GF
  	surfaceRect.right = (UINT16)surface->width;
  	surfaceRect.bottom = (UINT16)surface->height;
  	if (!region16_intersect_rect(&invalidRegion, &invalidRegion, &surfaceRect))
@@ -1375,7 +1491,7 @@
  	SrcFormat = surface->format;
  
  	/* Move to new pSrcData / nXSrc / nYSrc according to sub rect */
-@@ -2299,6 +2700,14 @@
+@@ -2299,6 +2732,14 @@ static BOOL shadow_client_send_surface_update(rdpShadowClient* client, SHADOW_GF
  		subY = server->subRect.top;
  		nXSrc -= subX;
  		nYSrc -= subY;
@@ -1390,7 +1506,7 @@
  		WINPR_ASSERT(nXSrc >= 0);
  		WINPR_ASSERT(nXSrc <= UINT16_MAX);
  		WINPR_ASSERT(nYSrc >= 0);
-@@ -2306,6 +2715,21 @@
+@@ -2306,6 +2747,21 @@ static BOOL shadow_client_send_surface_update(rdpShadowClient* client, SHADOW_GF
  		pSrcData = &pSrcData[((UINT16)subY * nSrcStep) + ((UINT16)subX * 4U)];
  	}
  
@@ -1412,7 +1528,7 @@
  	// WLog_INFO(TAG, "shadow_client_send_surface_update: x: %" PRId64 " y: %" PRId64 " width: %"
  	// PRId64 " height: %" PRId64 " right: %" PRId64 " bottom: %" PRId64, 	nXSrc, nYSrc, nWidth,
  	// nHeight, nXSrc + nWidth, nYSrc + nHeight);
-@@ -2314,7 +2738,8 @@
+@@ -2314,7 +2770,8 @@ static BOOL shadow_client_send_surface_update(rdpShadowClient* client, SHADOW_GF
  	{
  		if (pStatus->gfxOpened && client->areGfxCapsReady)
  		{
@@ -1422,7 +1538,7 @@
  			nWidth = freerdp_settings_get_uint32(settings, FreeRDP_DesktopWidth);
  			nHeight = freerdp_settings_get_uint32(settings, FreeRDP_DesktopHeight);
  
-@@ -2323,10 +2748,10 @@
+@@ -2323,10 +2780,10 @@ static BOOL shadow_client_send_surface_update(rdpShadowClient* client, SHADOW_GF
  			{
  				/* Only init surface when we have h264 supported */
  				if (!(ret = shadow_client_rdpgfx_reset_graphic(client)))
@@ -1435,7 +1551,7 @@
  
  				pStatus->gfxSurfaceCreated = TRUE;
  			}
-@@ -2336,7 +2761,7 @@
+@@ -2336,7 +2793,7 @@ static BOOL shadow_client_send_surface_update(rdpShadowClient* client, SHADOW_GF
  			WINPR_ASSERT(nHeight >= 0);
  			WINPR_ASSERT(nHeight <= UINT16_MAX);
  			ret = shadow_client_send_surface_gfx(client, pSrcData, nSrcStep, SrcFormat, 0, 0,
@@ -1444,7 +1560,7 @@
  		}
  		else
  		{
-@@ -2370,9 +2795,6 @@
+@@ -2370,9 +2827,6 @@ static BOOL shadow_client_send_surface_update(rdpShadowClient* client, SHADOW_GF
  		                                       (UINT16)nYSrc, (UINT16)nWidth, (UINT16)nHeight);
  	}
  
@@ -1454,7 +1570,7 @@
  	return ret;
  }
  
-@@ -2399,6 +2821,11 @@
+@@ -2399,6 +2853,11 @@ static BOOL shadow_client_send_resize(rdpShadowClient* client, SHADOW_GFX_STATUS
  	if (!peer || !settings)
  		return FALSE;
  
@@ -1466,7 +1582,7 @@
  	/**
  	 * Unset client activated flag to avoid sending update message during
  	 * resize. DesktopResize will reactive the client and
-@@ -2451,17 +2878,23 @@
+@@ -2451,17 +2910,23 @@ static BOOL shadow_client_surface_update(rdpShadowClient* client, REGION16* regi
   */
  WINPR_ATTR_NODISCARD
  static inline BOOL shadow_client_no_surface_update(rdpShadowClient* client,
@@ -1491,15 +1607,17 @@
  	LeaveCriticalSection(&surface->lock);
  	return rc;
  }
-@@ -2614,6 +3047,7 @@
+@@ -2613,7 +3078,9 @@ static DWORD WINAPI shadow_client_thread(LPVOID arg)
+ 	wMessage pointerPositionMsg = WINPR_C_ARRAY_INIT;
  	wMessage pointerAlphaMsg = WINPR_C_ARRAY_INIT;
  	wMessage audioVolumeMsg = WINPR_C_ARRAY_INIT;
++	wMessage audioSamplesMsg = WINPR_C_ARRAY_INIT;
  	HANDLE ChannelEvent = nullptr;
 +	HANDLE H264WorkerEvent = nullptr;
  	void* UpdateSubscriber = nullptr;
  	HANDLE UpdateEvent = nullptr;
  	freerdp_peer* peer = nullptr;
-@@ -2652,6 +3086,12 @@
+@@ -2652,6 +3119,12 @@ static DWORD WINAPI shadow_client_thread(LPVOID arg)
  	if (!rc)
  		goto out;
  
@@ -1512,7 +1630,21 @@
  	update = peer->context->update;
  	WINPR_ASSERT(update);
  
-@@ -2699,6 +3139,13 @@
+@@ -2685,6 +3158,7 @@ static DWORD WINAPI shadow_client_thread(LPVOID arg)
+ 	{
+ 		HANDLE events[MAXIMUM_WAIT_OBJECTS] = WINPR_C_ARRAY_INIT;
+ 		DWORD nCount = 0;
++		DWORD peerHandleCount = 0;
+ 		events[nCount++] = UpdateEvent;
+ 		{
+ 			DWORD tmp = peer->GetEventHandles(peer, &events[nCount], 64 - nCount);
+@@ -2694,11 +3168,19 @@ static DWORD WINAPI shadow_client_thread(LPVOID arg)
+ 				WLog_ERR(TAG, "Failed to get FreeRDP transport event handles");
+ 				goto fail;
+ 			}
++			peerHandleCount = tmp;
+ 
+ 			nCount += tmp;
  		}
  		events[nCount++] = ChannelEvent;
  		events[nCount++] = MessageQueue_Event(MsgQueue);
@@ -1526,13 +1658,16 @@
  
  #if defined(CHANNEL_RDPGFX_SERVER)
  		HANDLE gfxevent = rdpgfx_server_get_event_handle(client->rdpgfx);
-@@ -2707,13 +3154,34 @@
+@@ -2707,12 +3189,36 @@ static DWORD WINAPI shadow_client_thread(LPVOID arg)
  			events[nCount++] = gfxevent;
  #endif
  
 -		status = WaitForMultipleObjects(nCount, events, FALSE, INFINITE);
 +		const DWORD waitTimeout = outputBlocked ? 16 : INFINITE;
 +		status = WaitForMultipleObjects(nCount, events, FALSE, waitTimeout);
++		const BOOL peerEventReady =
++			status >= WAIT_OBJECT_0 + 1
++			&& status < WAIT_OBJECT_0 + 1 + peerHandleCount;
  
  		if (status == WAIT_FAILED)
  			goto fail;
@@ -1540,7 +1675,7 @@
 -		if (WaitForSingleObject(UpdateEvent, 0) == WAIT_OBJECT_0)
 +		outputBlocked = FALSE;
 +		if (peer->IsWriteBlocked && peer->IsWriteBlocked(peer))
- 		{
++		{
 +			const int drainStatus =
 +				peer->DrainOutputBuffer ? peer->DrainOutputBuffer(peer) : -1;
 +			if (drainStatus < 0)
@@ -1559,11 +1694,10 @@
 +		const BOOL retryDeferred = frameDeferred && !outputBlocked;
 +
 +		if (updatePending || retryDeferred)
-+		{
+ 		{
  			/* The UpdateEvent means to start sending current frame. It is
  			 * triggered from subsystem implementation and it should ensure
- 			 * that the screen and primary surface meta data (width, height,
-@@ -2721,7 +3195,21 @@
+@@ -2721,7 +3227,21 @@ static DWORD WINAPI shadow_client_thread(LPVOID arg)
  			 * (at shadow_multiclient_consume). As best practice, subsystem
  			 * implementation should invoke shadow_subsystem_frame_update which
  			 * triggers the event and then wait for completion */
@@ -1586,7 +1720,7 @@
  			{
  				/* Send screen update or resize to this client */
  
-@@ -2731,41 +3219,53 @@
+@@ -2731,43 +3251,59 @@ static DWORD WINAPI shadow_client_thread(LPVOID arg)
  					/* Screen size changed, do resize */
  					if (!shadow_client_send_resize(client, &gfxstatus))
  					{
@@ -1635,26 +1769,34 @@
 -			(void)shadow_multiclient_consume(UpdateSubscriber);
  		}
  
--		WINPR_ASSERT(peer->CheckFileDescriptor);
--		if (!peer->CheckFileDescriptor(peer))
 +		if (!shadow_client_send_h264_completion(client))
- 		{
--			WLog_ERR(TAG, "Failed to check FreeRDP file descriptor");
-+			WLog_ERR(TAG, "Failed to send H.264 worker completion");
- 			goto fail;
- 		}
-+		WINPR_ASSERT(peer->CheckFileDescriptor);
-+		if (!peer->CheckFileDescriptor(peer))
 +		{
-+			WLog_ERR(TAG, "Failed to check FreeRDP input after frame update");
++			WLog_ERR(TAG, "Failed to send H.264 worker completion");
 +			goto fail;
 +		}
+ 		WINPR_ASSERT(peer->CheckFileDescriptor);
+-		if (!peer->CheckFileDescriptor(peer))
++		if (peerEventReady && !peer->CheckFileDescriptor(peer))
+ 		{
+-			WLog_ERR(TAG, "Failed to check FreeRDP file descriptor");
++			const UINT32 lastError = freerdp_get_last_error(peer->context);
++			if (lastError == FREERDP_ERROR_CONNECT_TRANSPORT_FAILED)
++				WLog_INFO(TAG, "Client transport closed");
++			else
++				WLog_ERR(TAG, "Failed to check FreeRDP input after frame update");
+ 			goto fail;
+ 		}
 +		if (peer->IsWriteBlocked && peer->IsWriteBlocked(peer))
 +			outputBlocked = TRUE;
  
-@@ -2857,6 +3349,8 @@
+ 		if (client->activated &&
+ 		    WTSVirtualChannelManagerIsChannelJoined(client->vcm, DRDYNVC_SVC_CHANNEL_NAME))
+@@ -2856,8 +3388,12 @@ static DWORD WINAPI shadow_client_thread(LPVOID arg)
+ 			pointerAlphaMsg.Free = nullptr;
  			audioVolumeMsg.id = 0;
  			audioVolumeMsg.Free = nullptr;
++			audioSamplesMsg.id = 0;
++			audioSamplesMsg.Free = nullptr;
  
 -			while (MessageQueue_Peek(MsgQueue, &message, TRUE))
 +			size_t messageBudget = 64;
@@ -1663,19 +1805,43 @@
  			{
  				if (message.id == WMQ_QUIT)
  				{
---- a/libfreerdp/core/server.c
-+++ b/libfreerdp/core/server.c
-@@ -628,7 +628,9 @@
- 			return FALSE;
- 	}
+@@ -2884,6 +3420,13 @@ static DWORD WINAPI shadow_client_thread(LPVOID arg)
+ 						audioVolumeMsg = message;
+ 						break;
  
--	while (MessageQueue_Peek(vcm->queue, &message, TRUE))
-+	/* MACRDP_CHANNEL_MESSAGE_BUDGET: keep channel draining from starving input. */
-+	size_t messageBudget = 8;
-+	while (messageBudget-- > 0 && MessageQueue_Peek(vcm->queue, &message, TRUE))
- 	{
- 		BYTE* buffer = nullptr;
- 		UINT32 length = 0;
++					case SHADOW_MSG_OUT_AUDIO_OUT_SAMPLES_ID:
++						/* MACRDP_AUDIO_MESSAGE_COALESCING */
++						/* Audio is real-time; discard older samples when this client is behind. */
++						shadow_client_free_queued_message(&audioSamplesMsg);
++						audioSamplesMsg = message;
++						break;
++
+ 					default:
+ 						if (!shadow_client_subsystem_process_message(client, &message))
+ 							goto fail;
+@@ -2897,6 +3440,7 @@ static DWORD WINAPI shadow_client_thread(LPVOID arg)
+ 				shadow_client_free_queued_message(&pointerPositionMsg);
+ 				shadow_client_free_queued_message(&pointerAlphaMsg);
+ 				shadow_client_free_queued_message(&audioVolumeMsg);
++				shadow_client_free_queued_message(&audioSamplesMsg);
+ 				goto fail;
+ 			}
+ 			else
+@@ -2919,6 +3463,12 @@ static DWORD WINAPI shadow_client_thread(LPVOID arg)
+ 					if (!shadow_client_subsystem_process_message(client, &audioVolumeMsg))
+ 						goto fail;
+ 				}
++
++				if (audioSamplesMsg.id)
++				{
++					if (!shadow_client_subsystem_process_message(client, &audioSamplesMsg))
++						goto fail;
++				}
+ 			}
+ 		}
+ 	}
+diff --git a/server/shadow/shadow_mcevent.c b/server/shadow/shadow_mcevent.c
+index f4c9dc2..71f35a4 100644
 --- a/server/shadow/shadow_mcevent.c
 +++ b/server/shadow/shadow_mcevent.c
 @@ -19,6 +19,8 @@
@@ -1687,7 +1853,7 @@
  #include <freerdp/log.h>
  #include "shadow.h"
  
-@@ -33,6 +35,7 @@
+@@ -33,6 +35,7 @@ struct rdp_shadow_multiclient_event
  	CRITICAL_SECTION lock;
  	int consuming;
  	int waiting;
@@ -1695,7 +1861,7 @@
  
  	/* For debug */
  	int eventid;
-@@ -111,7 +114,14 @@
+@@ -111,7 +114,14 @@ static void Publish(rdpShadowMultiClientEvent* event)
  
  	subscribers = event->subscribers;
  
@@ -1711,7 +1877,7 @@
  
  	/* Count subscribing clients */
  	ArrayList_Lock(subscribers);
-@@ -139,10 +149,17 @@
+@@ -139,10 +149,17 @@ static void WaitForSubscribers(rdpShadowMultiClientEvent* event)
  	{
  		/* Wait for clients done */
  		WLog_VRB(TAG, "Server wait event %d. %d clients.\n", event->eventid, event->consuming);
@@ -1729,7 +1895,7 @@
  	}
  
  	/* Last subscriber should have already reset the event */
-@@ -178,6 +195,9 @@
+@@ -178,6 +195,9 @@ void shadow_multiclient_publish_and_wait(rdpShadowMultiClientEvent* event)
  	LeaveCriticalSection(&(event->lock));
  }
  
@@ -1739,7 +1905,7 @@
  static BOOL Consume(struct rdp_shadow_multiclient_subscriber* subscriber, BOOL wait)
  {
  	rdpShadowMultiClientEvent* event = subscriber->ref;
-@@ -187,6 +207,7 @@
+@@ -187,6 +207,7 @@ static BOOL Consume(struct rdp_shadow_multiclient_subscriber* subscriber, BOOL w
  	{
  		/* Consume my share. Server is waiting for us */
  		event->consuming--;
@@ -1747,7 +1913,7 @@
  		ret = TRUE;
  	}
  
-@@ -235,6 +256,9 @@
+@@ -235,6 +256,9 @@ static BOOL Consume(struct rdp_shadow_multiclient_subscriber* subscriber, BOOL w
  		}
  	}
  
@@ -1757,7 +1923,7 @@
  	return ret;
  }
  
-@@ -296,12 +320,11 @@
+@@ -296,12 +320,11 @@ void shadow_multiclient_release_subscriber(void* subscriber)
  
  	WLog_VRB(TAG, "Release Subscriber %p. Drop event %d. %d clients.\n", subscriber, event->eventid,
  	         event->consuming);
@@ -1771,7 +1937,7 @@
  	LeaveCriticalSection(&(event->lock));
  
  	free(subscriber);
-@@ -339,3 +362,65 @@
+@@ -339,3 +362,65 @@ HANDLE shadow_multiclient_getevent(void* subscriber)
  
  	return ((struct rdp_shadow_multiclient_subscriber*)subscriber)->ref->event;
  }
@@ -1837,9 +2003,11 @@
 +
 +	return pending;
 +}
+diff --git a/server/shadow/shadow_mcevent.h b/server/shadow/shadow_mcevent.h
+index 4c0322d..85aaff1 100644
 --- a/server/shadow/shadow_mcevent.h
 +++ b/server/shadow/shadow_mcevent.h
-@@ -48,6 +48,8 @@
+@@ -48,6 +48,8 @@ extern "C"
  	WINPR_ATTR_NODISCARD void* shadow_multiclient_get_subscriber(rdpShadowMultiClientEvent* event);
  	void shadow_multiclient_release_subscriber(void* subscriber);
  	BOOL shadow_multiclient_consume(void* subscriber);
@@ -1848,9 +2016,55 @@
  	WINPR_ATTR_NODISCARD HANDLE shadow_multiclient_getevent(void* subscriber);
  
  #ifdef __cplusplus
+diff --git a/server/shadow/shadow_screen.c b/server/shadow/shadow_screen.c
+index 16c942e..4d9dd8b 100644
+--- a/server/shadow/shadow_screen.c
++++ b/server/shadow/shadow_screen.c
+@@ -25,6 +25,19 @@
+ #include "shadow_screen.h"
+ #include "shadow_lobby.h"
+ 
++static MONITOR_DEF macrdp_primary_monitor(rdpShadowSubsystem* subsystem)
++{
++	MONITOR_DEF primary = { 0 };
++	if (subsystem->macrdpMonitorLockInitialized)
++		EnterCriticalSection(&(subsystem->macrdpMonitorLock));
++	WINPR_ASSERT(subsystem->selectedMonitor < ARRAYSIZE(subsystem->monitors));
++	primary = subsystem->monitors[subsystem->selectedMonitor];
++	if (subsystem->macrdpMonitorLockInitialized)
++		LeaveCriticalSection(&(subsystem->macrdpMonitorLock));
++	return primary;
++}
++/* MACRDP_MONITOR_STATE_READ */
++
+ rdpShadowScreen* shadow_screen_new(rdpShadowServer* server)
+ {
+ 	WINPR_ASSERT(server);
+@@ -46,7 +59,8 @@ rdpShadowScreen* shadow_screen_new(rdpShadowServer* server)
+ 
+ 		{
+ 			WINPR_ASSERT(subsystem->selectedMonitor < ARRAYSIZE(subsystem->monitors));
+-			const MONITOR_DEF* primary = &(subsystem->monitors[subsystem->selectedMonitor]);
++			MONITOR_DEF primary_storage = macrdp_primary_monitor(subsystem);
++			const MONITOR_DEF* primary = &primary_storage;
+ 			WINPR_ASSERT(primary);
+ 
+ 			const INT64 x = primary->left;
+@@ -133,7 +147,8 @@ BOOL shadow_screen_resize(rdpShadowScreen* screen)
+ 	WINPR_ASSERT(subsystem);
+ 	WINPR_ASSERT(subsystem->monitors);
+ 
+-	MONITOR_DEF* primary = &(subsystem->monitors[subsystem->selectedMonitor]);
++	MONITOR_DEF primary_storage = macrdp_primary_monitor(subsystem);
++	const MONITOR_DEF* primary = &primary_storage;
+ 	WINPR_ASSERT(primary);
+ 
+ 	const INT32 x = primary->left;
+diff --git a/server/shadow/shadow_server.c b/server/shadow/shadow_server.c
+index 279f7dd..87a368b 100644
 --- a/server/shadow/shadow_server.c
 +++ b/server/shadow/shadow_server.c
-@@ -709,10 +709,9 @@
+@@ -709,10 +709,9 @@ static DWORD WINAPI shadow_server_thread(LPVOID arg)
  	}
  
  	listener->Close(listener);
@@ -1863,7 +2077,7 @@
  	if (shadow_client_boardcast_quit(server, 0))
  	{
  		while (ArrayList_Count(server->clients) > 0)
-@@ -721,6 +720,9 @@
+@@ -721,6 +720,9 @@ static DWORD WINAPI shadow_server_thread(LPVOID arg)
  		}
  	}
  
@@ -1873,9 +2087,11 @@
  	ExitThread(0);
  	return 0;
  }
+diff --git a/server/shadow/shadow_subsystem.c b/server/shadow/shadow_subsystem.c
+index fde2180..a2e6342 100644
 --- a/server/shadow/shadow_subsystem.c
 +++ b/server/shadow/shadow_subsystem.c
-@@ -292,5 +292,6 @@
+@@ -292,5 +292,6 @@ int shadow_subsystem_pointer_convert_alpha_pointer_data_to_format(
  
  void shadow_subsystem_frame_update(rdpShadowSubsystem* subsystem)
  {
@@ -1883,9 +2099,11 @@
 +	/* MACRDP_NONBLOCKING_FRAME_UPDATE */
 +	shadow_multiclient_publish(subsystem->updateEvent);
  }
+diff --git a/server/shadow/shadow_surface.c b/server/shadow/shadow_surface.c
+index 190cac7..3d9e467 100644
 --- a/server/shadow/shadow_surface.c
 +++ b/server/shadow/shadow_surface.c
-@@ -79,11 +79,14 @@
+@@ -79,11 +79,14 @@ BOOL shadow_surface_resize(rdpShadowSurface* surface, UINT16 x, UINT16 y, UINT32
  	if (!surface)
  		return FALSE;
  
@@ -1900,10 +2118,10 @@
  		return TRUE;
  	}
  
-@@ -97,8 +100,25 @@
-		surface->height = height;
-		surface->scanline = scanline;
-		surface->data = buffer;
+@@ -97,8 +100,25 @@ BOOL shadow_surface_resize(rdpShadowSurface* surface, UINT16 x, UINT16 y, UINT32
+ 		surface->height = height;
+ 		surface->scanline = scanline;
+ 		surface->data = buffer;
 +		region16_clear(&(surface->invalidRegion));
 +		if ((width > 0) && (height > 0))
 +		{
@@ -1926,157 +2144,3 @@
  }
 +
 +/* MACRDP_SURFACE_RESIZE_LOCK */
---- a/libfreerdp/codec/h264.c
-+++ b/libfreerdp/codec/h264.c
-@@ -301,9 +301,10 @@
- 	}
- 	else
- 	{
--		for (size_t y = regionRect->top; y < regionRect->bottom; y += 64)
-+		/* MACRDP_H264_REGION_FIX */
-+		for (size_t y = 0; y < regionRect->bottom - regionRect->top; y += 64)
- 		{
--			for (size_t x = regionRect->left; x < regionRect->right; x += 64)
-+			for (size_t x = 0; x < regionRect->right - regionRect->left; x += 64)
- 			{
- 				RECTANGLE_16 rect;
- 				rect.left = (UINT16)MIN(UINT16_MAX, regionRect->left + x);
---- a/server/shadow/shadow_screen.c
-+++ b/server/shadow/shadow_screen.c
-@@ -25,4 +25,17 @@
- #include "shadow_screen.h"
- #include "shadow_lobby.h"
- 
-+static MONITOR_DEF macrdp_primary_monitor(rdpShadowSubsystem* subsystem)
-+{
-+	MONITOR_DEF primary = { 0 };
-+	if (subsystem->macrdpMonitorLockInitialized)
-+		EnterCriticalSection(&(subsystem->macrdpMonitorLock));
-+	WINPR_ASSERT(subsystem->selectedMonitor < ARRAYSIZE(subsystem->monitors));
-+	primary = subsystem->monitors[subsystem->selectedMonitor];
-+	if (subsystem->macrdpMonitorLockInitialized)
-+		LeaveCriticalSection(&(subsystem->macrdpMonitorLock));
-+	return primary;
-+}
-+/* MACRDP_MONITOR_STATE_READ */
-+
- rdpShadowScreen* shadow_screen_new(rdpShadowServer* server)
-@@ -47,5 +47,6 @@
- 		{
- 			WINPR_ASSERT(subsystem->selectedMonitor < ARRAYSIZE(subsystem->monitors));
--			const MONITOR_DEF* primary = &(subsystem->monitors[subsystem->selectedMonitor]);
-+			MONITOR_DEF primary_storage = macrdp_primary_monitor(subsystem);
-+			const MONITOR_DEF* primary = &primary_storage;
- 			WINPR_ASSERT(primary);
-
-@@ -132,6 +132,7 @@
- 	rdpShadowSubsystem* subsystem = screen->server->subsystem;
- 	WINPR_ASSERT(subsystem);
- 	WINPR_ASSERT(subsystem->monitors);
- 
--	MONITOR_DEF* primary = &(subsystem->monitors[subsystem->selectedMonitor]);
-+	MONITOR_DEF primary_storage = macrdp_primary_monitor(subsystem);
-+	const MONITOR_DEF* primary = &primary_storage;
- 	WINPR_ASSERT(primary);
---- a/include/freerdp/server/shadow.h
-+++ b/include/freerdp/server/shadow.h
-@@ -33,6 +33,7 @@
- #include <freerdp/server/encomsp.h>
- #include <freerdp/server/remdesk.h>
- #include <freerdp/server/rdpsnd.h>
-+#include <freerdp/server/cliprdr.h>
- #if defined(CHANNEL_AUDIN_SERVER)
- #include <freerdp/server/audin.h>
- #endif
-@@ -139,6 +140,7 @@
- 		EncomspServerContext* encomsp;
- 		RemdeskServerContext* remdesk;
- 		RdpsndServerContext* rdpsnd;
-+		CliprdrServerContext* cliprdr;
- #if defined(CHANNEL_AUDIN_SERVER)
- 		audin_server_context* audin;
- #endif
---- a/server/shadow/shadow_client.c
-+++ b/server/shadow/shadow_client.c
-@@ -3078,6 +3078,7 @@
- 	wMessage pointerPositionMsg = WINPR_C_ARRAY_INIT;
- 	wMessage pointerAlphaMsg = WINPR_C_ARRAY_INIT;
- 	wMessage audioVolumeMsg = WINPR_C_ARRAY_INIT;
-+	wMessage audioSamplesMsg = WINPR_C_ARRAY_INIT;
- 	HANDLE ChannelEvent = nullptr;
- 	HANDLE H264WorkerEvent = nullptr;
- 	void* UpdateSubscriber = nullptr;
-@@ -3382,6 +3382,8 @@
- 			pointerAlphaMsg.Free = nullptr;
- 			audioVolumeMsg.id = 0;
- 			audioVolumeMsg.Free = nullptr;
-+			audioSamplesMsg.id = 0;
-+			audioSamplesMsg.Free = nullptr;
- 
- 			size_t messageBudget = 64;
- 			/* MACRDP_MESSAGE_BUDGET */
-@@ -3412,6 +3415,13 @@
- 						/* Abandon previous message */
- 						shadow_client_free_queued_message(&audioVolumeMsg);
- 						audioVolumeMsg = message;
-+						break;
-+
-+					case SHADOW_MSG_OUT_AUDIO_OUT_SAMPLES_ID:
-+						/* MACRDP_AUDIO_MESSAGE_COALESCING */
-+						/* Audio is real-time; discard older samples when this client is behind. */
-+						shadow_client_free_queued_message(&audioSamplesMsg);
-+						audioSamplesMsg = message;
- 						break;
- 
- 					default:
-@@ -3425,6 +3435,7 @@
- 				shadow_client_free_queued_message(&pointerPositionMsg);
- 				shadow_client_free_queued_message(&pointerAlphaMsg);
- 				shadow_client_free_queued_message(&audioVolumeMsg);
-+				shadow_client_free_queued_message(&audioSamplesMsg);
- 				goto fail;
- 			}
- 			else
-@@ -3447,6 +3458,12 @@
- 					if (!shadow_client_subsystem_process_message(client, &audioVolumeMsg))
- 						goto fail;
- 				}
-+
-+				if (audioSamplesMsg.id)
-+				{
-+					if (!shadow_client_subsystem_process_message(client, &audioSamplesMsg))
-+						goto fail;
-+				}
- 			}
- 		}
- 	}
---- a/server/shadow/shadow_channels.c
-+++ b/server/shadow/shadow_channels.c
-@@ -18,12 +18,20 @@
- 
- #include <freerdp/config.h>
- 
-+#include <macrdp/cliprdr_adapter.h>
-+
- #include "shadow.h"
- 
- #include "shadow_channels.h"
- 
- UINT shadow_client_channels_post_connect(rdpShadowClient* client)
- {
-+	if (WTSVirtualChannelManagerIsChannelJoined(client->vcm, CLIPRDR_SVC_CHANNEL_NAME))
-+	{
-+		if (!macrdp_shadow_cliprdr_init(client))
-+			return ERROR_NOT_READY;
-+	}
-+
- 	if (WTSVirtualChannelManagerIsChannelJoined(client->vcm, ENCOMSP_SVC_CHANNEL_NAME))
- 	{
- 		if (shadow_client_encomsp_init(client) < 0)
-@@ -58,4 +66,6 @@
- 	shadow_client_rdpsnd_uninit(client);
- 	shadow_client_remdesk_uninit(client);
- 	shadow_client_encomsp_uninit(client);
-+	macrdp_shadow_cliprdr_uninit(client);
-+	/* MACRDP_CLIPRDR_CHANNEL */
- }
