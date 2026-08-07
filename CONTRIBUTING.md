@@ -43,6 +43,14 @@ test artifacts when diagnosing a failure:
 MACRDP_LOOPBACK_KEEP_TEMP=1 tools/run_loopback_smoke.sh
 ```
 
+To create the compatible client build from the main build's pinned source:
+
+```bash
+tools/build_loopback_freerdp.sh build/_deps/freerdp-src build/freerdp-client
+tools/build_loopback_client.sh \
+  build/freerdp-client build/_deps/freerdp-src /tmp/macrdp-loopback-client
+```
+
 Do not include screen captures, credentials, pasteboard contents, or generated
 build trees in a pull request.
 

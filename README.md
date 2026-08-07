@@ -257,14 +257,25 @@ an `Output pipeline` line reports blocked intervals, drain attempts, and
 recovery. No third-party source is copied or modified by this test.
 
 The normal macrdp build intentionally does not build a FreeRDP client, so
-build the test client against a separate FreeRDP client build:
+configure a separate client build from the generated, pinned FreeRDP source:
 
 ```bash
+tools/build_loopback_freerdp.sh \
+  build/_deps/freerdp-src \
+  build/freerdp-client
+
 tools/build_loopback_client.sh \
-  /path/to/freerdp-client-build \
-  /path/to/FreeRDP-3.30.0 \
+  build/freerdp-client \
+  build/_deps/freerdp-src \
   /tmp/macrdp-loopback-client
 ```
+
+The client configuration is shared and Release-built so loopback timing
+results do not depend on a historical local FreeRDP build. Override
+`MACRDP_FREERDP_CLIENT_JOBS`, `MACRDP_FREERDP_CLIENT_ARCH`, or
+`MACRDP_FREERDP_CLIENT_DEPLOYMENT_TARGET` for a cross-architecture developer
+build. `tools/build_loopback_client.sh` remains available for an existing
+compatible FreeRDP client build.
 
 Run it from the logged-in graphical session using the current server binary:
 

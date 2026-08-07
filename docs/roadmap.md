@@ -10,8 +10,6 @@ release dates.
   measured test matrix.
 - Improve automated tests for repeated reconnects, resolution changes, and
   clipboard changes while the network is shaped.
-- Add a reproducible developer build configuration for the FreeRDP client used
-  by the loopback tests.
 
 ## Protocol and platform work
 

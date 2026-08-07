@@ -21,15 +21,27 @@ Screen Recording permission for the synthetic encoder tests.
 
 ## Loopback client
 
-The normal build disables FreeRDP's client targets. Build the test client from a
-separate FreeRDP client build:
+The normal build disables FreeRDP's client targets. Configure a separate
+shared client build from the generated pinned source, then compile the small
+loopback client:
 
 ```bash
+tools/build_loopback_freerdp.sh \
+  build/_deps/freerdp-src \
+  build/freerdp-client
+
 tools/build_loopback_client.sh \
-  /path/to/freerdp-client-build \
-  /path/to/FreeRDP-3.30.0 \
+  build/freerdp-client \
+  build/_deps/freerdp-src \
   /tmp/macrdp-loopback-client
 ```
+
+The configuration uses Release, shared libraries, FFmpeg H.264 support, and
+only the client channels exercised by the loopback test. Set
+`MACRDP_FREERDP_CLIENT_JOBS`, `MACRDP_FREERDP_CLIENT_ARCH`, or
+`MACRDP_FREERDP_CLIENT_DEPLOYMENT_TARGET` to override the local developer
+defaults. The existing client build helper still accepts any compatible
+preconfigured FreeRDP build.
 
 The smoke script uses a real TCP connection to the server and checks:
 
