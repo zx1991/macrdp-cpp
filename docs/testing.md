@@ -94,6 +94,25 @@ MACRDP_LOOPBACK_PROXY=/tmp/macrdp-loopback-proxy \
 tools/run_loopback_smoke.sh --profile wifi
 ```
 
+The smoke script can pass the server's video settings through unchanged so
+different quality profiles use the same network conditions:
+
+```bash
+tools/run_loopback_smoke.sh --profile wifi --bitrate 4M --fps 20
+```
+
+The same settings can be supplied with `MACRDP_LOOPBACK_SERVER_BITRATE` and
+`MACRDP_LOOPBACK_SERVER_FPS`. The script prints the selected values in its
+header; this makes low-bandwidth comparisons reproducible instead of relying
+on the server's default 16 Mbps/30 FPS configuration.
+
+In the checked-in Wi-Fi profile (1 Mbps, 75 ms delay, 40 ms jitter), a local
+comparison of `4M/20FPS` reduced first-frame latency from about 3.37 s to
+2.97 s and the largest observed frame gap from 1.85 s to 1.45 s. A `2M/15FPS`
+run did not improve first-frame latency and reduced the normal frame cadence.
+These are tuning observations for this deterministic proxy profile, not an
+automatic bitrate-selection rule.
+
 The `bad` profile intentionally allows a 30-second GFX window. A full-screen
 keyframe can take roughly 20 seconds at 256 Kbps before later frames can be
 observed. Passing this profile demonstrates eventual TCP/RDP progress and

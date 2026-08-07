@@ -15,6 +15,8 @@ proxy_port=${MACRDP_LOOPBACK_PROXY_PORT:-3391}
 keep_temp=${MACRDP_LOOPBACK_KEEP_TEMP:-0}
 client_log_level=${MACRDP_LOOPBACK_CLIENT_LOG_LEVEL:-WARN}
 server_log_level=${MACRDP_LOOPBACK_SERVER_LOG_LEVEL:-DEBUG}
+server_bitrate=${MACRDP_LOOPBACK_SERVER_BITRATE:-}
+server_fps=${MACRDP_LOOPBACK_SERVER_FPS:-}
 synthetic_audio=${MACRDP_LOOPBACK_SYNTHETIC_AUDIO:-1}
 clipboard_client_text=${MACRDP_LOOPBACK_CLIENT_CLIPBOARD_TEXT:-macrdp\ loopback\ client\ clipboard\ text}
 clipboard_server_text=${MACRDP_LOOPBACK_SERVER_CLIPBOARD_TEXT:-macrdp\ loopback\ server\ clipboard\ text}
@@ -33,6 +35,8 @@ Options:
   --profile NAME  Use direct, wan, wifi, outage, or bad network shaping.
   --server PATH   Use this macrdp-server executable.
   --client PATH   Use this FreeRDP loopback client executable.
+  --bitrate RATE  Pass --bitrate RATE to the server for reproducible tuning.
+  --fps NUMBER    Pass --fps NUMBER to the server for reproducible tuning.
   -h, --help      Show this help.
 
 The positional SERVER and CLIENT form is retained for compatibility. The
@@ -93,6 +97,32 @@ while [ "$#" -gt 0 ]; do
 			;;
 		--client=*)
 			client=${1#--client=}
+			shift
+			;;
+		--bitrate)
+			if [ "$#" -lt 2 ]; then
+				echo "--bitrate requires a value" >&2
+				usage >&2
+				exit 2
+			fi
+			server_bitrate=$2
+			shift 2
+			;;
+		--bitrate=*)
+			server_bitrate=${1#--bitrate=}
+			shift
+			;;
+		--fps)
+			if [ "$#" -lt 2 ]; then
+				echo "--fps requires a value" >&2
+				usage >&2
+				exit 2
+			fi
+			server_fps=$2
+			shift 2
+			;;
+		--fps=*)
+			server_fps=${1#--fps=}
 			shift
 			;;
 		-h|--help)
@@ -421,27 +451,30 @@ start_server() {
 	case_name=$1
 	case_dir="$temp_dir/$case_name"
 	server_log="$case_dir/server.log"
+	server_command=(
+		"$server"
+		--port "$port"
+		--bind-address 127.0.0.1
+		--user "$user"
+		--config-dir "$case_dir/config"
+		--log-level "$server_log_level"
+	)
+	if [ -n "$server_bitrate" ]; then
+		server_command+=(--bitrate "$server_bitrate")
+	fi
+	if [ -n "$server_fps" ]; then
+		server_command+=(--fps "$server_fps")
+	fi
 	mkdir -p "$case_dir/config"
 	if ! set_test_clipboard; then
 		return 1
 	fi
 
 	if [ "$case_name" = "nogfx" ]; then
-		MACRDP_AUDIO_TEST_TONE="$synthetic_audio" MACRDP_PASSWORD="$password" "$server" \
-			--port "$port" \
-			--bind-address 127.0.0.1 \
-			--no-gfx \
-			--user "$user" \
-			--config-dir "$case_dir/config" \
-			--log-level "$server_log_level" >"$server_log" 2>&1 &
-	else
-		MACRDP_AUDIO_TEST_TONE="$synthetic_audio" MACRDP_PASSWORD="$password" "$server" \
-			--port "$port" \
-			--bind-address 127.0.0.1 \
-			--user "$user" \
-			--config-dir "$case_dir/config" \
-			--log-level "$server_log_level" >"$server_log" 2>&1 &
+		server_command+=(--no-gfx)
 	fi
+	MACRDP_AUDIO_TEST_TONE="$synthetic_audio" MACRDP_PASSWORD="$password" \
+		"${server_command[@]}" >"$server_log" 2>&1 &
 	server_pid=$!
 	if ! wait_for_server "$case_name" "$server_log"; then
 		return 1
@@ -765,6 +798,7 @@ run_bad_password() {
 echo "loopback smoke test: server=$server client=$client profile=$network_profile "\
 	"duration=${duration_ms}ms delay=${proxy_delay_ms}ms jitter=${proxy_jitter_ms}ms "\
 	"bandwidth=${proxy_bandwidth_bps}bps outage=${proxy_outage_period_ms}/${proxy_outage_duration_ms}ms "\
+	"bitrate=${server_bitrate:-default} fps=${server_fps:-default} "\
 	"nogfx_duration=${nogfx_duration_ms}ms"
 
 if start_server gfx; then
