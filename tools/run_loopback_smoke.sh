@@ -400,6 +400,10 @@ run_client() {
 	input_keyboard=$(metric input_keyboard_events_sent "$summary")
 	input_unicode=$(metric input_unicode_events_sent "$summary")
 	input_wheel=$(metric input_wheel_events_sent "$summary")
+	input_right_button=$(metric input_right_button_events_sent "$summary")
+	input_middle_button=$(metric input_middle_button_events_sent "$summary")
+	input_extended_mouse=$(metric input_extended_mouse_events_sent "$summary")
+	input_drag=$(metric input_drag_events_sent "$summary")
 	input_failures=$(metric input_send_failures "$summary")
 	clipboard_server_lists=$(metric clipboard_server_format_lists_received "$summary")
 	clipboard_server_list_responses=$(metric clipboard_server_format_list_responses_sent "$summary")
@@ -560,6 +564,22 @@ check_input_pipeline() {
 	fi
 	if [ "${input_wheel:-0}" -lt 4 ] || [ "${server_wheel:-0}" -lt 4 ]; then
 		fail "$case_name vertical/horizontal wheel input did not reach the server"
+	fi
+	server_right_button=$(metric_max right_button "$input_pipeline")
+	server_middle_button=$(metric_max middle_button "$input_pipeline")
+	server_drag=$(metric_max drag "$input_pipeline")
+	server_extended_mouse=$(metric_max extended_mouse "$input_pipeline")
+	if [ "${input_right_button:-0}" -lt 2 ] || [ "${server_right_button:-0}" -lt 2 ]; then
+		fail "$case_name right-button input did not reach the server"
+	fi
+	if [ "${input_middle_button:-0}" -lt 2 ] || [ "${server_middle_button:-0}" -lt 2 ]; then
+		fail "$case_name middle-button input did not reach the server"
+	fi
+	if [ "${input_extended_mouse:-0}" -lt 4 ] || [ "${server_extended_mouse:-0}" -lt 4 ]; then
+		fail "$case_name extended mouse input did not reach the server"
+	fi
+	if [ "${input_drag:-0}" -lt 1 ] || [ "${server_drag:-0}" -lt 1 ]; then
+		fail "$case_name drag input did not reach the server"
 	fi
 	if [ "${server_failures:-0}" -ne 0 ]; then
 		fail "$case_name server reported $server_failures input injection failures"

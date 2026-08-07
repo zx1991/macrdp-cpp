@@ -226,9 +226,10 @@ install to other Macs.
 
 The repository includes a small FreeRDP client used only for protocol testing.
 It connects over `127.0.0.1`, records decoded frame timing and negotiated GFX
-codec counts, sends mouse clicks plus harmless keyboard, Unicode, and vertical/
-horizontal wheel events, checks the server's aggregated input counters, verifies
-bidirectional text clipboard transfer, tests a wrong NLA password, and compares
+codec counts, sends left/right/middle clicks, a drag, X1/X2 extended mouse
+events, plus harmless keyboard, Unicode, and vertical/horizontal wheel events,
+checks the server's aggregated input counters, verifies bidirectional text
+clipboard transfer, tests a wrong NLA password, and compares
 GFX/AVC420 with the `--no-gfx` SurfaceBits path. The direct profile also checks
 reconnects, requested desktop sizes, and a deliberately slow client event loop.
 The client-reported frame pacing is the primary slow-client metric; server slow

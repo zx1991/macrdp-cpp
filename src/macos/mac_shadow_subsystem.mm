@@ -157,6 +157,10 @@ struct mac_shadow_subsystem {
     std::atomic<std::uint64_t> input_unicode_events{0};
     std::atomic<std::uint64_t> input_mouse_events{0};
     std::atomic<std::uint64_t> input_wheel_events{0};
+    std::atomic<std::uint64_t> input_left_button_events{0};
+    std::atomic<std::uint64_t> input_right_button_events{0};
+    std::atomic<std::uint64_t> input_middle_button_events{0};
+    std::atomic<std::uint64_t> input_drag_events{0};
     std::atomic<std::uint64_t> input_extended_mouse_events{0};
     std::atomic<std::uint64_t> input_injection_failures{0};
 };
@@ -648,9 +652,15 @@ bool inject_mouse_event(
     if ((flags & (PTR_FLAGS_WHEEL | PTR_FLAGS_HWHEEL)) != 0) {
         return post_mouse_event(subsystem, flags, x, y);
     }
-    if ((flags & PTR_FLAGS_MOVE) != 0
-        && !post_mouse_event(subsystem, PTR_FLAGS_MOVE, x, y)) {
-        success = false;
+    if ((flags & PTR_FLAGS_MOVE) != 0) {
+        const bool dragging = subsystem->left_button_down
+            || subsystem->right_button_down
+            || subsystem->other_button_down;
+        if (!post_mouse_event(subsystem, PTR_FLAGS_MOVE, x, y)) {
+            success = false;
+        } else if (dragging) {
+            subsystem->input_drag_events.fetch_add(1, std::memory_order_relaxed);
+        }
     }
 
     macrdp::InputButton button = macrdp::InputButton::left;
@@ -914,6 +924,15 @@ bool queue_mouse_event(
     if ((flags & (PTR_FLAGS_WHEEL | PTR_FLAGS_HWHEEL)) != 0) {
         subsystem->input_wheel_events.fetch_add(1, std::memory_order_relaxed);
     }
+    if ((flags & PTR_FLAGS_BUTTON1) != 0) {
+        subsystem->input_left_button_events.fetch_add(1, std::memory_order_relaxed);
+    }
+    if ((flags & PTR_FLAGS_BUTTON2) != 0) {
+        subsystem->input_right_button_events.fetch_add(1, std::memory_order_relaxed);
+    }
+    if ((flags & PTR_FLAGS_BUTTON3) != 0) {
+        subsystem->input_middle_button_events.fetch_add(1, std::memory_order_relaxed);
+    }
     return enqueue_input_event(subsystem, event);
 }
 
@@ -1076,12 +1095,18 @@ void log_input_pipeline(MacShadowSubsystem* subsystem, bool force) {
         TAG,
         "Input pipeline: synchronize=%" PRIu64 " keyboard=%" PRIu64
         " unicode=%" PRIu64 " mouse=%" PRIu64 " wheel=%" PRIu64
+        " left_button=%" PRIu64 " right_button=%" PRIu64
+        " middle_button=%" PRIu64 " drag=%" PRIu64
         " extended_mouse=%" PRIu64 " injection_failures=%" PRIu64,
         subsystem->input_synchronize_events.load(std::memory_order_relaxed),
         subsystem->input_keyboard_events.load(std::memory_order_relaxed),
         subsystem->input_unicode_events.load(std::memory_order_relaxed),
         subsystem->input_mouse_events.load(std::memory_order_relaxed),
         subsystem->input_wheel_events.load(std::memory_order_relaxed),
+        subsystem->input_left_button_events.load(std::memory_order_relaxed),
+        subsystem->input_right_button_events.load(std::memory_order_relaxed),
+        subsystem->input_middle_button_events.load(std::memory_order_relaxed),
+        subsystem->input_drag_events.load(std::memory_order_relaxed),
         subsystem->input_extended_mouse_events.load(std::memory_order_relaxed),
         subsystem->input_injection_failures.load(std::memory_order_relaxed));
 }

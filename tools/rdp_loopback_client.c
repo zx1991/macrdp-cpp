@@ -58,6 +58,10 @@ typedef struct
 	uint64_t input_keyboard_events_sent;
 	uint64_t input_unicode_events_sent;
 	uint64_t input_wheel_events_sent;
+	uint64_t input_right_button_events_sent;
+	uint64_t input_middle_button_events_sent;
+	uint64_t input_extended_mouse_events_sent;
+	uint64_t input_drag_events_sent;
 	uint64_t input_send_failures;
 	uint64_t clipboard_server_format_lists_received;
 	uint64_t clipboard_server_format_list_responses_sent;
@@ -695,6 +699,31 @@ static void loopback_record_input_result(
 		loop->input_send_failures++;
 }
 
+static BOOL loopback_send_mouse_event(
+    loopback_context* loop,
+    UINT16 flags,
+    UINT16 x,
+    UINT16 y)
+{
+	const BOOL result = freerdp_input_send_mouse_event(
+	    loop->common.context.input, flags, x, y);
+	if (!result)
+		loop->input_send_failures++;
+	return result;
+}
+
+static BOOL loopback_send_extended_mouse_event(
+	loopback_context* loop,
+	UINT16 flags,
+	UINT16 x,
+	UINT16 y)
+{
+	const BOOL result = freerdp_input_send_extended_mouse_event(
+	    loop->common.context.input, flags, x, y);
+	loopback_record_input_result(loop, &loop->input_extended_mouse_events_sent, result);
+	return result;
+}
+
 static void loopback_send_input(loopback_context* loop)
 {
 	rdpInput* input = loop->common.context.input;
@@ -712,6 +741,9 @@ static void loopback_send_input(loopback_context* loop)
 		const UINT16 wheel_negative = PTR_FLAGS_WHEEL | PTR_FLAGS_WHEEL_NEGATIVE | 0x0088;
 		const UINT16 horizontal_positive = PTR_FLAGS_HWHEEL | 0x0078;
 		const UINT16 horizontal_negative = PTR_FLAGS_HWHEEL | PTR_FLAGS_WHEEL_NEGATIVE | 0x0088;
+		const UINT16 drag_x = x + 80;
+		const UINT16 drag_y = y + 80;
+		BOOL drag_succeeded = TRUE;
 
 		loopback_record_input_result(
 		    loop,
@@ -751,14 +783,45 @@ static void loopback_send_input(loopback_context* loop)
 		    loop,
 		    &loop->input_wheel_events_sent,
 		    freerdp_input_send_mouse_event(input, horizontal_negative, x, y));
+
+		loopback_record_input_result(
+		    loop,
+		    &loop->input_right_button_events_sent,
+		    freerdp_input_send_mouse_event(input, PTR_FLAGS_BUTTON2 | PTR_FLAGS_DOWN, x, y));
+		loopback_record_input_result(
+		    loop,
+		    &loop->input_right_button_events_sent,
+		    freerdp_input_send_mouse_event(input, PTR_FLAGS_BUTTON2, x, y));
+		loopback_record_input_result(
+		    loop,
+		    &loop->input_middle_button_events_sent,
+		    freerdp_input_send_mouse_event(input, PTR_FLAGS_BUTTON3 | PTR_FLAGS_DOWN, x, y));
+		loopback_record_input_result(
+		    loop,
+		    &loop->input_middle_button_events_sent,
+		    freerdp_input_send_mouse_event(input, PTR_FLAGS_BUTTON3, x, y));
+		loopback_send_extended_mouse_event(loop, PTR_XFLAGS_DOWN | PTR_XFLAGS_BUTTON1, x, y);
+		loopback_send_extended_mouse_event(loop, PTR_XFLAGS_BUTTON1, x, y);
+		loopback_send_extended_mouse_event(loop, PTR_XFLAGS_DOWN | PTR_XFLAGS_BUTTON2, x, y);
+		loopback_send_extended_mouse_event(loop, PTR_XFLAGS_BUTTON2, x, y);
+
+		const BOOL drag_start = loopback_send_mouse_event(loop, PTR_FLAGS_MOVE, x, y);
+		const BOOL drag_down = loopback_send_mouse_event(
+		    loop, PTR_FLAGS_BUTTON1 | PTR_FLAGS_DOWN, x, y);
+		const BOOL drag_move = loopback_send_mouse_event(loop, PTR_FLAGS_MOVE, drag_x, drag_y);
+		const BOOL drag_up = loopback_send_mouse_event(loop, PTR_FLAGS_BUTTON1, drag_x, drag_y);
+		drag_succeeded = drag_start && drag_down && drag_move && drag_up;
+		if (drag_succeeded)
+			loop->input_drag_events_sent = 1;
+		else
+			loop->input_drag_events_sent = 0;
 	}
-	if (!freerdp_input_send_mouse_event(input, PTR_FLAGS_MOVE, x, y))
-		loop->input_send_failures++;
-	if (!freerdp_input_send_mouse_event(input, PTR_FLAGS_BUTTON1 | PTR_FLAGS_DOWN, x, y))
-		loop->input_send_failures++;
-	if (!freerdp_input_send_mouse_event(input, PTR_FLAGS_BUTTON1, x, y))
-		loop->input_send_failures++;
-	loop->input_clicks_sent++;
+	const BOOL click_move = loopback_send_mouse_event(loop, PTR_FLAGS_MOVE, x, y);
+	const BOOL click_down = loopback_send_mouse_event(
+	    loop, PTR_FLAGS_BUTTON1 | PTR_FLAGS_DOWN, x, y);
+	const BOOL click_up = loopback_send_mouse_event(loop, PTR_FLAGS_BUTTON1, x, y);
+	if (click_move && click_down && click_up)
+		loop->input_clicks_sent++;
 	WLog_INFO(TAG, "sent mouse click=%" PRIu64 " x=%" PRIu16 " y=%" PRIu16,
 	          loop->input_sequence, x, y);
 }
@@ -890,6 +953,10 @@ int main(int argc, char** argv)
 	       " input_keyboard_events_sent=%" PRIu64
 	       " input_unicode_events_sent=%" PRIu64
 	       " input_wheel_events_sent=%" PRIu64
+	       " input_right_button_events_sent=%" PRIu64
+	       " input_middle_button_events_sent=%" PRIu64
+	       " input_extended_mouse_events_sent=%" PRIu64
+	       " input_drag_events_sent=%" PRIu64
 	       " input_send_failures=%" PRIu64
 	       " clipboard_server_format_lists_received=%" PRIu64
 	       " clipboard_server_format_list_responses_sent=%" PRIu64
@@ -926,6 +993,10 @@ int main(int argc, char** argv)
 	       loop->input_keyboard_events_sent,
 	       loop->input_unicode_events_sent,
 	       loop->input_wheel_events_sent,
+	       loop->input_right_button_events_sent,
+	       loop->input_middle_button_events_sent,
+	       loop->input_extended_mouse_events_sent,
+	       loop->input_drag_events_sent,
 	       loop->input_send_failures,
 	       loop->clipboard_server_format_lists_received,
 	       loop->clipboard_server_format_list_responses_sent,
