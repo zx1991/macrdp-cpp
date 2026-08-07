@@ -10,7 +10,7 @@ index 027bad9..2645248 100644
  #if defined(CHANNEL_AUDIN_SERVER)
  #include <freerdp/server/audin.h>
  #endif
-@@ -120,6 +121,16 @@ extern "C"
+@@ -120,6 +121,18 @@ extern "C"
  		wMessageQueue* MsgQueue;
  		CRITICAL_SECTION lock;
  		REGION16 invalidRegion;
@@ -22,6 +22,8 @@ index 027bad9..2645248 100644
 +		void* macrdpH264Worker;
 +		void* macrdpH264Pending;
 +		UINT64 macrdpH264DeferredFrames;
++		UINT64 macrdpH264OutputDeferredFrames;
++		BOOL macrdpH264CompletionDeferred;
 +		UINT64 macrdpH264LastDiagnostics;
 +		/* MACRDP_CLIENT_FRAME_SNAPSHOT */
  		rdpShadowServer* server;
@@ -258,11 +260,24 @@ index a46be5c..8215c0b 100644
  	{
  		BYTE* buffer = nullptr;
  		UINT32 length = 0;
+diff --git a/libfreerdp/core/transport.h b/libfreerdp/core/transport.h
+index 1b0b68e..6d2a6d0 100644
+--- a/libfreerdp/core/transport.h
++++ b/libfreerdp/core/transport.h
+@@ -163,5 +163,8 @@ FREERDP_LOCAL void transport_set_aad_mode(rdpTransport* transport, BOOL AadMode);
+ WINPR_ATTR_NODISCARD
+ FREERDP_LOCAL BOOL transport_is_write_blocked(rdpTransport* transport);
+ 
++/* MACRDP_OUTPUT_PRIORITY: allow the shadow loop to classify control PDUs. */
++FREERDP_LOCAL void transport_set_output_priority(rdpTransport* transport, BOOL priority);
++
+ FREERDP_LOCAL int transport_drain_output_buffer(rdpTransport* transport);
+ 
 diff --git a/libfreerdp/core/transport.c b/libfreerdp/core/transport.c
 index 5a074df..1e13ee2 100644
 --- a/libfreerdp/core/transport.c
 +++ b/libfreerdp/core/transport.c
-@@ -64,6 +64,19 @@
+@@ -64,6 +64,21 @@
  #define TAG FREERDP_TAG("core.transport")
  
  #define BUFFER_SIZE 16384
@@ -277,22 +292,25 @@ index 5a074df..1e13ee2 100644
 +	BYTE* data;
 +	size_t offset;
 +	size_t length;
++	BOOL priority;
++	BOOL continuation;
 +	rdpTransportWriteItem* next;
 +};
  
  struct rdp_transport
  {
-@@ -89,6 +102,9 @@ struct rdp_transport
+@@ -89,6 +102,10 @@ struct rdp_transport
  	CRITICAL_SECTION ReadLock;
  	BOOL haveWriteLock;
  	CRITICAL_SECTION WriteLock;
 +	rdpTransportWriteItem* writeQueueHead;
 +	rdpTransportWriteItem* writeQueueTail;
 +	size_t writeQueueBytes;
++	BOOL outputPriority;
  	UINT64 written;
  	HANDLE rereadEvent;
  	BOOL haveMoreBytesToRead;
-@@ -105,6 +121,162 @@ typedef struct
+@@ -105,6 +121,199 @@ typedef struct
  	void* userContextShadowPtr;
  } rdpTransportLayerInt;
  
@@ -322,8 +340,23 @@ index 5a074df..1e13ee2 100644
 +	transport->writeQueueBytes = 0;
 +}
 +
++static int transport_mark_output_failure(rdpTransport* transport)
++{
++	rdpContext* context = transport_get_context(transport);
++	transport->layer = TRANSPORT_LAYER_CLOSED;
++	if (context)
++		freerdp_set_last_error_if_not(context, FREERDP_ERROR_CONNECT_TRANSPORT_FAILED);
++	return -1;
++}
++
++void transport_set_output_priority(rdpTransport* transport, BOOL priority)
++{
++	if (transport)
++		transport->outputPriority = priority;
++}
++
 +static BOOL transport_write_queue_append(rdpTransport* transport, wStream* stream, size_t offset,
-+                                         size_t length)
++                                         size_t length, BOOL priority, BOOL continuation)
 +{
 +	if (length == 0)
 +		return TRUE;
@@ -356,11 +389,33 @@ index 5a074df..1e13ee2 100644
 +	memcpy(item->data, Stream_Buffer(stream) + offset, length);
 +	item->offset = 0;
 +	item->length = length;
-+	if (transport->writeQueueTail)
-+		transport->writeQueueTail->next = item;
++	item->priority = priority;
++	item->continuation = continuation;
++	if (priority)
++	{
++		/* A control PDU may pass only an output PDU that has not started.
++		 * Never split an already submitted PDU on the byte stream. */
++		rdpTransportWriteItem** link = &transport->writeQueueHead;
++		rdpTransportWriteItem* current = transport->writeQueueHead;
++		while (current &&
++		       (current->priority || current->continuation || current->offset > 0))
++		{
++			link = &current->next;
++			current = current->next;
++		}
++		item->next = current;
++		*link = item;
++		if (!current)
++			transport->writeQueueTail = item;
++	}
 +	else
-+		transport->writeQueueHead = item;
-+	transport->writeQueueTail = item;
++	{
++		if (transport->writeQueueTail)
++			transport->writeQueueTail->next = item;
++		else
++			transport->writeQueueHead = item;
++		transport->writeQueueTail = item;
++	}
 +	transport->writeQueueBytes += length;
 +	return TRUE;
 +}
@@ -492,7 +547,7 @@ index 5a074df..1e13ee2 100644
  
  		if (length > 0)
  		{
-@@ -1235,10 +1415,82 @@ static int transport_default_write(rdpTransport* transport, wStream* s)
+@@ -1235,10 +1415,89 @@ static int transport_default_write(rdpTransport* transport, wStream* s)
  			WLog_Packet(transport->log, WLOG_TRACE, Stream_Buffer(s), length, WLOG_PACKET_OUTBOUND);
  		}
  
@@ -500,12 +555,16 @@ index 5a074df..1e13ee2 100644
 +		 * accepts the complete PDU. Finish that PDU before accepting a newer one. */
 +		if (transport->writeQueueHead)
 +		{
-+			const int queueStatus = transport_write_queue_drain(transport, transport->blocking);
-+			if (queueStatus < 0)
-+				goto out_cleanup;
++			if (!transport->outputPriority)
++			{
++				const int queueStatus = transport_write_queue_drain(transport, transport->blocking);
++				if (queueStatus < 0)
++					goto out_cleanup;
++			}
 +			if (transport->writeQueueHead)
 +			{
-+				if (!transport_write_queue_append(transport, s, 0, length))
++				if (!transport_write_queue_append(
++						transport, s, 0, length, transport->outputPriority, FALSE))
 +				{
 +					status = -1;
 +					goto out_cleanup;
@@ -530,7 +589,8 @@ index 5a074df..1e13ee2 100644
 +				}
 +				if (!transport->blocking)
 +				{
-+					if (!transport_write_queue_append(transport, s, 0, length))
++					if (!transport_write_queue_append(
++							transport, s, 0, length, transport->outputPriority, FALSE))
 +					{
 +						status = -1;
 +						goto out_cleanup;
@@ -558,7 +618,9 @@ index 5a074df..1e13ee2 100644
  		{
 +			if (nonBlockingWrite && writeBudget == 0)
 +			{
-+				if (!transport_write_queue_append(transport, s, writtenlength - length, length))
++				if (!transport_write_queue_append(
++						transport, s, writtenlength - length, length,
++						transport->outputPriority, (writtenlength - length) > 0))
 +				{
 +					status = -1;
 +					goto out_cleanup;
@@ -576,14 +638,15 @@ index 5a074df..1e13ee2 100644
  			status = BIO_write(transport->frontBio, Stream_ConstPointer(s), towrite);
  
  			if (status <= 0)
-@@ -1256,8 +1508,17 @@ static int transport_default_write(rdpTransport* transport, wStream* s)
+@@ -1256,8 +1508,18 @@ static int transport_default_write(rdpTransport* transport, wStream* s)
  				/* non-blocking can live with blocked IOs */
  				if (!transport->blocking)
  				{
 -					WLog_ERR_BIO(transport, "BIO_write", transport->frontBio);
 -					goto out_cleanup;
-+					if (!transport_write_queue_append(transport, s, writtenlength - length,
-+					                                  length))
++					if (!transport_write_queue_append(
++							transport, s, writtenlength - length, length,
++							transport->outputPriority, (writtenlength - length) > 0))
 +					{
 +						status = -1;
 +						goto out_cleanup;
@@ -615,7 +678,7 @@ index 5a074df..1e13ee2 100644
  			WINPR_ASSERT(context->settings);
  			if (transport->blocking || context->settings->WaitForOutputBufferFlush)
  			{
-@@ -1290,18 +1563,21 @@ static int transport_default_write(rdpTransport* transport, wStream* s)
+@@ -1290,18 +1563,23 @@ static int transport_default_write(rdpTransport* transport, wStream* s)
  					}
  				}
  			}
@@ -627,7 +690,9 @@ index 5a074df..1e13ee2 100644
 -				status = -1;
 -				goto out_cleanup;
 +				if (length > 0 &&
-+				    !transport_write_queue_append(transport, s, writtenlength - length, length))
++				    !transport_write_queue_append(
++							transport, s, writtenlength - length, length,
++							transport->outputPriority, (writtenlength - length) > 0))
 +				{
 +					status = -1;
 +					goto out_cleanup;
@@ -709,7 +774,7 @@ index 5a074df..1e13ee2 100644
 +	goto out;
 +
 +fail:
-+	status = -1;
++	status = transport_mark_output_failure(transport);
 +out:
 +	LeaveCriticalSection(&(transport->WriteLock));
 +
@@ -760,10 +825,11 @@ diff --git a/server/shadow/shadow_client.c b/server/shadow/shadow_client.c
 index 5aa3ab2..8494577 100644
 --- a/server/shadow/shadow_client.c
 +++ b/server/shadow/shadow_client.c
-@@ -35,9 +35,25 @@
+@@ -35,9 +35,41 @@
  #include <freerdp/channels/drdynvc.h>
  
  #include "shadow.h"
++#include "rdp.h"
 +#include <macrdp/rdp_h264_worker.h>
  
  #define TAG CLIENT_TAG("shadow")
@@ -783,6 +849,21 @@ index 5aa3ab2..8494577 100644
 +} MACRDP_H264_PENDING;
 +
 +static BOOL shadow_client_h264_wait_idle(rdpShadowClient* client);
++
++static BOOL shadow_client_check_channel_fd(rdpShadowClient* client)
++{
++	WINPR_ASSERT(client);
++	WINPR_ASSERT(client->vcm);
++	rdpTransport* transport = client->context.rdp ? client->context.rdp->transport : nullptr;
++	if (transport)
++		transport_set_output_priority(transport, TRUE);
++	const BOOL status = WTSVirtualChannelManagerCheckFileDescriptor(client->vcm);
++	if (transport)
++		transport_set_output_priority(transport, FALSE);
++	return status;
++}
++/* MACRDP_CONTROL_OUTPUT_PRIORITY */
++
  typedef struct
  {
  	BOOL gfxOpened;
@@ -881,7 +962,7 @@ index 5aa3ab2..8494577 100644
  	if (shadow_encoder_reset(client->encoder) < 0)
  	{
  		WLog_ERR(TAG, "Failed to reset encoder");
-@@ -1300,10 +1354,136 @@ static BOOL shadow_client_send_av1(rdpShadowClient* client, const BYTE* pSrcData
+@@ -1300,10 +1354,137 @@ static BOOL shadow_client_send_av1(rdpShadowClient* client, const BYTE* pSrcData
  }
  #endif
  
@@ -1007,6 +1088,7 @@ index 5aa3ab2..8494577 100644
 +    macrdp_h264_encoded_frame_free(&encoded);
 +    free(client->macrdpH264Pending);
 +    client->macrdpH264Pending = nullptr;
++    client->macrdpH264CompletionDeferred = FALSE;
 +    return waitStatus && takeStatus >= 0;
 +}
 +
@@ -1196,11 +1278,11 @@ index 5aa3ab2..8494577 100644
  	}
  
  #endif
-@@ -1789,6 +2033,105 @@ static BOOL shadow_client_send_surface_gfx(rdpShadowClient* client, const BYTE*
+@@ -1789,6 +2033,121 @@ static BOOL shadow_client_send_surface_gfx(rdpShadowClient* client, const BYTE*
  	                                       &cmdend);
  }
  
-+static BOOL shadow_client_send_h264_completion(rdpShadowClient* client)
++static BOOL shadow_client_send_h264_completion(rdpShadowClient* client, BOOL outputBlocked)
 +{
 +    MACRDP_H264_PENDING* pending = nullptr;
 +    macrdp_h264_encoded_frame encoded = { 0 };
@@ -1215,8 +1297,22 @@ index 5aa3ab2..8494577 100644
 +    int takeStatus = 0;
 +    macrdp_h264_worker_stats stats = { 0 };
 +
-+    if (!client || !client->macrdpH264Worker ||
-+        !macrdp_h264_worker_has_completion((macrdp_h264_worker*)client->macrdpH264Worker))
++    if (!client || !client->macrdpH264Worker)
++        return TRUE;
++    const BOOL hasCompletion = macrdp_h264_worker_has_completion(
++        (macrdp_h264_worker*)client->macrdpH264Worker);
++    if (outputBlocked)
++    {
++        if (hasCompletion)
++        {
++            if (!client->macrdpH264CompletionDeferred)
++                client->macrdpH264OutputDeferredFrames++;
++            client->macrdpH264CompletionDeferred = TRUE;
++        }
++        return TRUE;
++    }
++    client->macrdpH264CompletionDeferred = FALSE;
++    if (!hasCompletion)
 +        return TRUE;
 +
 +    pending = (MACRDP_H264_PENDING*)client->macrdpH264Pending;
@@ -1232,14 +1328,16 @@ index 5aa3ab2..8494577 100644
 +        const UINT64 averageEncodeMs = stats.encodeTimeMsTotal / stats.completed;
 +        WLog_INFO(TAG,
 +                  "H.264 pipeline: submitted=%llu completed=%llu coalesced=%llu "
-+                  "encode_last=%llums encode_avg=%llums encode_max=%llums output=%llu bytes",
++                  "encode_last=%llums encode_avg=%llums encode_max=%llums output=%llu bytes "
++                  "output_deferred=%llu",
 +                  (unsigned long long)stats.submitted,
 +                  (unsigned long long)stats.completed,
 +                  (unsigned long long)client->macrdpH264DeferredFrames,
 +                  (unsigned long long)stats.lastEncodeTimeMs,
 +                  (unsigned long long)averageEncodeMs,
 +                  (unsigned long long)stats.encodeTimeMsMax,
-+                  (unsigned long long)stats.outputBytes);
++                  (unsigned long long)stats.outputBytes,
++                  (unsigned long long)client->macrdpH264OutputDeferredFrames);
 +        client->macrdpH264LastDiagnostics = diagnosticsNow;
 +    }
 +    if (takeStatus < 0)
@@ -1617,7 +1715,7 @@ index 5aa3ab2..8494577 100644
  	void* UpdateSubscriber = nullptr;
  	HANDLE UpdateEvent = nullptr;
  	freerdp_peer* peer = nullptr;
-@@ -2652,6 +3119,12 @@ static DWORD WINAPI shadow_client_thread(LPVOID arg)
+@@ -2652,6 +3119,18 @@ static DWORD WINAPI shadow_client_thread(LPVOID arg)
  	if (!rc)
  		goto out;
  
@@ -1626,19 +1724,25 @@ index 5aa3ab2..8494577 100644
 +	/* MACRDP_NONBLOCKING_OUTPUT */
 +	BOOL outputBlocked = FALSE;
 +	BOOL frameDeferred = FALSE;
++	UINT64 outputBlockedEvents = 0;
++	UINT64 outputDrainAttempts = 0;
++	UINT64 outputBlockedTotalMs = 0;
++	UINT64 outputBlockedMaxMs = 0;
++	ULONGLONG outputBlockedSince = 0;
++	ULONGLONG outputLastDiagnostics = 0;
 +
  	update = peer->context->update;
  	WINPR_ASSERT(update);
  
-@@ -2685,6 +3158,7 @@ static DWORD WINAPI shadow_client_thread(LPVOID arg)
+@@ -2685,6 +3158,6 @@ static DWORD WINAPI shadow_client_thread(LPVOID arg)
  	{
  		HANDLE events[MAXIMUM_WAIT_OBJECTS] = WINPR_C_ARRAY_INIT;
  		DWORD nCount = 0;
 +		DWORD peerHandleCount = 0;
- 		events[nCount++] = UpdateEvent;
- 		{
+-		events[nCount++] = UpdateEvent;
+		{
  			DWORD tmp = peer->GetEventHandles(peer, &events[nCount], 64 - nCount);
-@@ -2694,11 +3168,19 @@ static DWORD WINAPI shadow_client_thread(LPVOID arg)
+@@ -2694,11 +3168,20 @@ static DWORD WINAPI shadow_client_thread(LPVOID arg)
  				WLog_ERR(TAG, "Failed to get FreeRDP transport event handles");
  				goto fail;
  			}
@@ -1646,6 +1750,7 @@ index 5aa3ab2..8494577 100644
  
  			nCount += tmp;
  		}
++	events[nCount++] = UpdateEvent;
  		events[nCount++] = ChannelEvent;
  		events[nCount++] = MessageQueue_Event(MsgQueue);
 +		if (client->macrdpH264Worker)
@@ -1658,36 +1763,95 @@ index 5aa3ab2..8494577 100644
  
  #if defined(CHANNEL_RDPGFX_SERVER)
  		HANDLE gfxevent = rdpgfx_server_get_event_handle(client->rdpgfx);
-@@ -2707,12 +3189,37 @@ static DWORD WINAPI shadow_client_thread(LPVOID arg)
+@@ -2707,12 +3189,96 @@ static DWORD WINAPI shadow_client_thread(LPVOID arg)
  			events[nCount++] = gfxevent;
  #endif
  
 -		status = WaitForMultipleObjects(nCount, events, FALSE, INFINITE);
 +		const DWORD waitTimeout = outputBlocked ? 16 : INFINITE;
 +		status = WaitForMultipleObjects(nCount, events, FALSE, waitTimeout);
-+		/* MACRDP_PATCH_VERSION_20260807 */
++		/* MACRDP_PATCH_VERSION_20260807_INPUT_OUTPUT_GATING_RESET_METRICS_TRANSPORT_ERRORS_CONTROL_OUTPUT_PRIORITY */
 +		const BOOL peerEventReady =
-+			status >= WAIT_OBJECT_0 + 1
-+			&& status < WAIT_OBJECT_0 + 1 + peerHandleCount;
++			status >= WAIT_OBJECT_0
++			&& status < WAIT_OBJECT_0 + peerHandleCount;
  
  		if (status == WAIT_FAILED)
  			goto fail;
  
 -		if (WaitForSingleObject(UpdateEvent, 0) == WAIT_OBJECT_0)
-+		outputBlocked = FALSE;
++		WINPR_ASSERT(peer->CheckFileDescriptor);
++		if (peerEventReady && !peer->CheckFileDescriptor(peer))
++		{
++			const UINT32 lastError = freerdp_get_last_error(peer->context);
++			if (lastError == FREERDP_ERROR_CONNECT_TRANSPORT_FAILED)
++				WLog_INFO(TAG, "Client transport closed");
++			else
++				WLog_ERR(TAG, "Failed to check FreeRDP input before frame update");
++			goto fail;
++		}
 +		if (peer->IsWriteBlocked && peer->IsWriteBlocked(peer))
 +		{
++			outputDrainAttempts++;
 +			const int drainStatus =
 +				peer->DrainOutputBuffer ? peer->DrainOutputBuffer(peer) : -1;
 +			if (drainStatus < 0)
 +			{
-+				WLog_ERR(TAG, "Failed to drain FreeRDP output buffer");
++				const UINT32 lastError = freerdp_get_last_error(peer->context);
++				if (lastError == FREERDP_ERROR_CONNECT_TRANSPORT_FAILED || !peer->connected)
++					WLog_INFO(TAG, "Client transport closed while draining output");
++				else
++					WLog_ERR(TAG, "Failed to drain FreeRDP output buffer");
 +				goto fail;
 +			}
 +		}
 +
-+		if (peer->IsWriteBlocked && peer->IsWriteBlocked(peer))
-+			outputBlocked = TRUE;
++		outputBlocked = peer->IsWriteBlocked && peer->IsWriteBlocked(peer);
++		const ULONGLONG outputNow = GetTickCount64();
++		if (outputBlocked && outputBlockedSince == 0)
++		{
++			outputBlockedEvents++;
++			outputBlockedSince = outputNow;
++		}
++		else if (!outputBlocked && outputBlockedSince != 0)
++		{
++			const ULONGLONG blockedDuration = outputNow - outputBlockedSince;
++			outputBlockedTotalMs += blockedDuration;
++			if (blockedDuration > outputBlockedMaxMs)
++				outputBlockedMaxMs = blockedDuration;
++			WLog_INFO(TAG,
++			          "Output pipeline recovered: blocked_ms=%llu blocked_max_ms=%llu "
++			          "blocked_events=%llu drain_attempts=%llu",
++			          (unsigned long long)outputBlockedTotalMs,
++			          (unsigned long long)outputBlockedMaxMs,
++			          (unsigned long long)outputBlockedEvents,
++			          (unsigned long long)outputDrainAttempts);
++			outputBlockedSince = 0;
++			outputLastDiagnostics = 0;
++		}
++		if (outputBlocked &&
++		    (outputLastDiagnostics == 0 || outputNow - outputLastDiagnostics >= 5000))
++		{
++			const ULONGLONG currentBlockedMs = outputNow - outputBlockedSince;
++			WLog_INFO(TAG,
++			          "Output pipeline blocked: blocked_ms=%llu blocked_max_ms=%llu "
++			          "blocked_events=%llu drain_attempts=%llu",
++			          (unsigned long long)(outputBlockedTotalMs + currentBlockedMs),
++			          (unsigned long long)outputBlockedMaxMs,
++			          (unsigned long long)outputBlockedEvents,
++			          (unsigned long long)outputDrainAttempts);
++			outputLastDiagnostics = outputNow;
++		}
++
++		/* MACRDP_CONTROL_CHANNEL_PRIORITY */
++		if (WaitForSingleObject(ChannelEvent, 0) == WAIT_OBJECT_0)
++		{
++			if (!shadow_client_check_channel_fd(client))
++			{
++				WLog_ERR(TAG, "Priority channel processing failed");
++				goto fail;
++			}
++			outputBlocked = peer->IsWriteBlocked && peer->IsWriteBlocked(peer);
++		}
 +
 +		const BOOL updatePending =
 +			WaitForSingleObject(UpdateEvent, 0) == WAIT_OBJECT_0 &&
@@ -1721,7 +1885,7 @@ index 5aa3ab2..8494577 100644
  			{
  				/* Send screen update or resize to this client */
  
-@@ -2731,43 +3251,59 @@ static DWORD WINAPI shadow_client_thread(LPVOID arg)
+@@ -2731,43 +3251,48 @@ static DWORD WINAPI shadow_client_thread(LPVOID arg)
  					/* Screen size changed, do resize */
  					if (!shadow_client_send_resize(client, &gfxstatus))
  					{
@@ -1770,28 +1934,39 @@ index 5aa3ab2..8494577 100644
 -			(void)shadow_multiclient_consume(UpdateSubscriber);
  		}
  
-+		if (!shadow_client_send_h264_completion(client))
++		if (!shadow_client_send_h264_completion(client, outputBlocked))
 +		{
 +			WLog_ERR(TAG, "Failed to send H.264 worker completion");
 +			goto fail;
 +		}
- 		WINPR_ASSERT(peer->CheckFileDescriptor);
+-		WINPR_ASSERT(peer->CheckFileDescriptor);
 -		if (!peer->CheckFileDescriptor(peer))
-+		if (peerEventReady && !peer->CheckFileDescriptor(peer))
- 		{
+-		{
 -			WLog_ERR(TAG, "Failed to check FreeRDP file descriptor");
-+			const UINT32 lastError = freerdp_get_last_error(peer->context);
-+			if (lastError == FREERDP_ERROR_CONNECT_TRANSPORT_FAILED)
-+				WLog_INFO(TAG, "Client transport closed");
-+			else
-+				WLog_ERR(TAG, "Failed to check FreeRDP input after frame update");
- 			goto fail;
- 		}
-+		if (peer->IsWriteBlocked && peer->IsWriteBlocked(peer))
-+			outputBlocked = TRUE;
+-			goto fail;
+-		}
++		outputBlocked = peer->IsWriteBlocked && peer->IsWriteBlocked(peer);
  
  		if (client->activated &&
  		    WTSVirtualChannelManagerIsChannelJoined(client->vcm, DRDYNVC_SVC_CHANNEL_NAME))
+@@ -2777,6 +3401,6 @@
+ 				/* Dynamic channel status may have been changed after processing */
+ 				case DRDYNVC_STATE_NONE:
+ 
+ 					/* Call this routine to Initialize drdynvc channel */
+-					if (!WTSVirtualChannelManagerCheckFileDescriptor(client->vcm))
++					if (!shadow_client_check_channel_fd(client))
+ 					{
+@@ -2829,8 +3453,8 @@ static DWORD WINAPI shadow_client_thread(LPVOID arg)
+ 		if (WaitForSingleObject(ChannelEvent, 0) == WAIT_OBJECT_0)
+ 		{
+-			if (!WTSVirtualChannelManagerCheckFileDescriptor(client->vcm))
++			if (!shadow_client_check_channel_fd(client))
+ 			{
+ 				WLog_ERR(TAG, "WTSVirtualChannelManagerCheckFileDescriptor failure");
+ 				goto fail;
+ 			}
+ 		}
 @@ -2856,8 +3388,12 @@ static DWORD WINAPI shadow_client_thread(LPVOID arg)
  			pointerAlphaMsg.Free = nullptr;
  			audioVolumeMsg.id = 0;
@@ -1828,7 +2003,9 @@ index 5aa3ab2..8494577 100644
  				goto fail;
  			}
  			else
-@@ -2919,6 +3463,12 @@ static DWORD WINAPI shadow_client_thread(LPVOID arg)
+@@ -2917,7 +3553,13 @@
+ 				if (audioVolumeMsg.id)
+ 				{
  					if (!shadow_client_subsystem_process_message(client, &audioVolumeMsg))
  						goto fail;
  				}
@@ -1840,7 +2017,7 @@ index 5aa3ab2..8494577 100644
 +				}
  			}
  		}
- 	}
+
 diff --git a/server/shadow/shadow_mcevent.c b/server/shadow/shadow_mcevent.c
 index f4c9dc2..71f35a4 100644
 --- a/server/shadow/shadow_mcevent.c

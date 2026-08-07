@@ -245,8 +245,11 @@ GFX/AVC420 with the `--no-gfx` SurfaceBits path. The direct profile also checks
 reconnects, requested desktop sizes, and a deliberately slow client event loop.
 The client-reported frame pacing is the primary slow-client metric; server slow
 stage diagnostics are supplementary observations. The server logs an `Input
-pipeline` line with received event counts and platform injection failures. No
-third-party source is copied or modified by this test.
+pipeline` line with received event counts and platform injection failures, and
+an `H.264 pipeline` line with encoder/coalescing statistics and completed
+encodes deferred by a blocked output socket. When output backpressure occurs,
+an `Output pipeline` line reports blocked intervals, drain attempts, and
+recovery. No third-party source is copied or modified by this test.
 
 The normal macrdp build intentionally does not build a FreeRDP client, so
 build the test client against a separate FreeRDP client build:
@@ -293,8 +296,7 @@ Then select a profile:
 MACRDP_SERVER=./build/macrdp-server \
 MACRDP_LOOPBACK_CLIENT=/tmp/macrdp-loopback-client \
 MACRDP_LOOPBACK_PROXY=/tmp/macrdp-loopback-proxy \
-MACRDP_LOOPBACK_NETWORK_PROFILE=wifi \
-tools/run_loopback_smoke.sh
+tools/run_loopback_smoke.sh --profile wifi
 ```
 
 Available profiles are `direct` (no proxy), `wan` (50 ms one-way delay,

@@ -41,6 +41,16 @@ The smoke script uses a real TCP connection to the server and checks:
 - PCM RDPSND negotiation and delivery;
 - reconnect, requested sizes, and an intentionally slow client event loop.
 
+The server's `Input pipeline` diagnostics also report the current and maximum
+input queue depth, coalesced or discarded pointer motion, and time spent
+waiting for queue capacity. A nonzero critical-event wait is input backpressure;
+it is distinct from a macOS injection failure. The `H.264 pipeline` diagnostic
+reports encoder time, coalesced frames, and `output_deferred`, the number of
+completed encodes held until the transport became writable. The `Output
+pipeline` diagnostic reports output-blocked intervals, drain attempts, and
+recovery; a normal disconnect while draining is logged as transport closure,
+not as a server-internal drain failure.
+
 Run the direct profile with:
 
 ```bash
@@ -79,8 +89,7 @@ tools/build_loopback_proxy.sh /tmp/macrdp-loopback-proxy
 MACRDP_SERVER=./build/macrdp-server \
 MACRDP_LOOPBACK_CLIENT=/tmp/macrdp-loopback-client \
 MACRDP_LOOPBACK_PROXY=/tmp/macrdp-loopback-proxy \
-MACRDP_LOOPBACK_NETWORK_PROFILE=wifi \
-tools/run_loopback_smoke.sh
+tools/run_loopback_smoke.sh --profile wifi
 ```
 
 The `bad` profile intentionally allows a 30-second GFX window. A full-screen
@@ -97,6 +106,7 @@ run nondeterministic.
 For a performance report, include the profile, requested size, `frames`,
 `first_frame_ms`, `avg_interval_ms`, `max_interval_ms`, GFX codec counters,
 input failure counters, audio callback counters, and the server's `Frame
-pipeline`/`Slow client frame handling` lines. A subjective report such as
+pipeline`, `H.264 pipeline`, `Output pipeline`, and `Slow client frame handling`
+lines. A subjective report such as
 "the screen is slow" is not enough to distinguish capture, encoding, network,
 client decode, and output backpressure.

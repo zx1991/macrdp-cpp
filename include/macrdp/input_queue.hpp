@@ -3,6 +3,7 @@
 #include "input_ownership.hpp"
 
 #include <algorithm>
+#include <cstddef>
 #include <deque>
 #include <utility>
 
@@ -20,6 +21,23 @@ bool replace_trailing_coalescible(
     }
     queue.back() = event;
     return true;
+}
+
+// Remove events that are safe to lose when a critical input event needs queue
+// capacity. The caller should use this only for events such as pointer motion
+// that do not represent a button or keyboard transition.
+template <typename Event, typename Predicate>
+std::size_t discard_coalescible(
+    std::deque<Event>& queue,
+    Predicate predicate) {
+    const auto previous_size = queue.size();
+    queue.erase(
+        std::remove_if(
+            queue.begin(),
+            queue.end(),
+            predicate),
+        queue.end());
+    return previous_size - queue.size();
 }
 
 // A disconnect reset is a barrier for one client's queued input. Discarding

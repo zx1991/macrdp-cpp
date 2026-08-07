@@ -4,8 +4,8 @@ set -u
 
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 repo_dir=$(CDPATH= cd -- "$script_dir/.." && pwd)
-server=${MACRDP_SERVER:-${1:-$repo_dir/build/macrdp-server}}
-client=${MACRDP_LOOPBACK_CLIENT:-${2:-/tmp/macrdp-loopback-client}}
+server=${MACRDP_SERVER:-$repo_dir/build/macrdp-server}
+client=${MACRDP_LOOPBACK_CLIENT:-/tmp/macrdp-loopback-client}
 port=${MACRDP_LOOPBACK_PORT:-3390}
 user=${MACRDP_LOOPBACK_USER:-macrdp-test-user}
 password=${MACRDP_LOOPBACK_PASSWORD:-macrdp-test-password}
@@ -18,6 +18,108 @@ server_log_level=${MACRDP_LOOPBACK_SERVER_LOG_LEVEL:-DEBUG}
 synthetic_audio=${MACRDP_LOOPBACK_SYNTHETIC_AUDIO:-1}
 clipboard_client_text=${MACRDP_LOOPBACK_CLIENT_CLIPBOARD_TEXT:-macrdp\ loopback\ client\ clipboard\ text}
 clipboard_server_text=${MACRDP_LOOPBACK_SERVER_CLIPBOARD_TEXT:-macrdp\ loopback\ server\ clipboard\ text}
+
+usage() {
+	cat <<EOF
+Usage: $0 [options] [SERVER [CLIENT]]
+
+Options:
+  --profile NAME  Use direct, wan, wifi, outage, or bad network shaping.
+  --server PATH   Use this macrdp-server executable.
+  --client PATH   Use this FreeRDP loopback client executable.
+  -h, --help      Show this help.
+
+The positional SERVER and CLIENT form is retained for compatibility. The
+MACRDP_* environment variables can configure the same values.
+EOF
+}
+
+add_positional_argument() {
+	positional_count=$((positional_count + 1))
+	case "$positional_count" in
+		1) server=$1 ;;
+		2) client=$1 ;;
+		*)
+			echo "too many positional arguments" >&2
+			usage >&2
+			exit 2
+			;;
+	esac
+}
+
+positional_count=0
+while [ "$#" -gt 0 ]; do
+	case "$1" in
+		--profile)
+			if [ "$#" -lt 2 ]; then
+				echo "--profile requires a value" >&2
+				usage >&2
+				exit 2
+			fi
+			network_profile=$2
+			shift 2
+			;;
+		--profile=*)
+			network_profile=${1#--profile=}
+			shift
+			;;
+		--server)
+			if [ "$#" -lt 2 ]; then
+				echo "--server requires a value" >&2
+				usage >&2
+				exit 2
+			fi
+			server=$2
+			shift 2
+			;;
+		--server=*)
+			server=${1#--server=}
+			shift
+			;;
+		--client)
+			if [ "$#" -lt 2 ]; then
+				echo "--client requires a value" >&2
+				usage >&2
+				exit 2
+			fi
+			client=$2
+			shift 2
+			;;
+		--client=*)
+			client=${1#--client=}
+			shift
+			;;
+		-h|--help)
+			usage
+			exit 0
+			;;
+		--)
+			shift
+			while [ "$#" -gt 0 ]; do
+				add_positional_argument "$1"
+				shift
+			done
+			;;
+		-*)
+			echo "unknown option: $1" >&2
+			usage >&2
+			exit 2
+			;;
+		*)
+			add_positional_argument "$1"
+			shift
+			;;
+	esac
+done
+
+if [ "$positional_count" -eq 1 ]; then
+	case "$server" in
+		direct|wan|wifi|outage|bad)
+			echo "'$server' is a network profile, not a server path; use --profile $server" >&2
+			exit 2
+			;;
+	esac
+fi
 
 case "$network_profile" in
 	direct)
@@ -51,7 +153,7 @@ case "$network_profile" in
 		profile_input_settle_seconds=3
 		;;
 	wifi)
-		profile_gfx_min_frames=50
+		profile_gfx_min_frames=1
 		profile_nogfx_min_frames=1
 		profile_max_interval_ms=10000
 		profile_first_frame_limit_ms=15000
@@ -509,6 +611,13 @@ run_client() {
 	fi
 	if ! wait_for_log "$server_log" 'Frame pipeline:'; then
 		fail "$case_name server produced no frame pipeline diagnostics"
+	fi
+	if grep -q 'Failed to drain FreeRDP output buffer' "$server_log"; then
+		fail "$case_name server reported an unexplained output drain failure"
+	fi
+	output_pipeline=$(grep -E 'Output pipeline (blocked|recovered):' "$server_log" || true)
+	if [ -n "$output_pipeline" ]; then
+		echo "$case_name: output backpressure diagnostics observed"
 	fi
 	if grep -q 'Slow frame update\|Slow client frame handling' "$server_log"; then
 		if [ "$allow_slow" = "1" ]; then

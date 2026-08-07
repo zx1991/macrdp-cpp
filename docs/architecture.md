@@ -41,17 +41,27 @@ format negotiation and data transfer under a channel lock.
 - A client receives the newest useful video state. Old video work may be
   coalesced when the client is slower than the capture rate.
 - H.264 work is per client, so a slow encoder or blocked client does not make
-  the capture thread wait for every connection.
+  the capture thread wait for every connection. The client loop handles
+  transport input and control-channel events before starting the next frame,
+  and keeps completed H.264 output pending until the transport is writable, so
+  video backpressure does not delay input or clipboard control traffic.
 - Input ownership is per RDP client. Disconnect cleanup releases only keys and
   buttons owned by that client; platform injection is serialized in the input
-  worker.
+  worker. When the bounded queue is full, obsolete pointer motion is discarded
+  before critical keyboard, button, wheel, and reset events are allowed to
+  wait for capacity.
 - Shutdown joins capture, audio, publish, input, and encoder workers in a
   defined order before FreeRDP state is released.
 
+The output scheduler records blocked intervals and drain attempts per client.
+This distinguishes network backpressure from capture or encoder delay without
+turning a normal client disconnect into an internal-error diagnostic.
+
 The exact backpressure behavior is part of the protocol adaptation patch. The
-patch adds bounded message budgets and a non-blocking output queue to the
-generated FreeRDP tree. It is kept as a source patch rather than a fork so the
-upstream version and the local adaptation remain reviewable.
+patch adds bounded message budgets, a non-blocking output queue, and input-first
+event scheduling to the generated FreeRDP tree. It is kept as a source patch
+rather than a fork so the upstream version and the local adaptation remain
+reviewable.
 
 ## C++ and Objective-C++
 

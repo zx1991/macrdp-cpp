@@ -171,6 +171,12 @@ struct mac_shadow_subsystem {
     std::atomic<std::uint64_t> input_drag_events{0};
     std::atomic<std::uint64_t> input_extended_mouse_events{0};
     std::atomic<std::uint64_t> input_injection_failures{0};
+    std::atomic<std::uint64_t> input_motion_coalesced{0};
+    std::atomic<std::uint64_t> input_motion_dropped{0};
+    std::atomic<std::uint64_t> input_queue_wait_events{0};
+    std::atomic<std::uint64_t> input_queue_wait_time_us_total{0};
+    std::atomic<std::uint64_t> input_queue_wait_time_us_max{0};
+    std::atomic<std::uint64_t> input_queue_max_depth{0};
 };
 
 using MacShadowSubsystem = struct mac_shadow_subsystem;
@@ -613,7 +619,7 @@ bool inject_keyboard_event(
             // old process left a platform key-down behind. Forward the
             // release as a best-effort recovery signal instead of silently
             // discarding it.
-            WLog_DBG(TAG, "Ignoring unknown keyboard release client=%" PRIu64
+            WLog_DBG(TAG, "Forwarding unknown keyboard release client=%" PRIu64
                      " flags=0x%04" PRIx16 " code=0x%02" PRIx8,
                      client_id,
                      flags,
@@ -629,9 +635,11 @@ bool inject_keyboard_event(
             if (!subsystem->input_ownership.release_key(client_id, release_identity)) {
                 continue;
             }
+            const auto release_code = static_cast<UINT8>(
+                release_identity & UINT8_MAX);
             const bool posted = post_keyboard_event(
                 release_flags_for_key_identity(release_identity),
-                code);
+                release_code);
             if (!posted) {
                 // Keep the ownership entry when the platform rejected the
                 // key-up. The next matching release or client reset can then
@@ -991,17 +999,36 @@ bool enqueue_input_event(MacShadowSubsystem* subsystem, InputEvent event) {
                 subsystem->input_queue,
                 event,
                 is_coalescible_mouse_move)) {
+            subsystem->input_motion_coalesced.fetch_add(1, std::memory_order_relaxed);
             lock.unlock();
             subsystem->input_queue_condition.notify_one();
             return true;
         }
         if (subsystem->input_queue.size() >= kInputQueueLimit) {
+            subsystem->input_motion_dropped.fetch_add(1, std::memory_order_relaxed);
             return true;
         }
     } else {
+        // Motion is disposable, so remove queued motion before applying
+        // backpressure to a click, wheel, keyboard, or reset event. This keeps
+        // control input responsive when the platform injector is temporarily
+        // slower than the RDP client.
+        if (subsystem->input_queue.size() >= kInputQueueLimit) {
+            const auto discarded = macrdp::discard_coalescible(
+                subsystem->input_queue,
+                is_coalescible_mouse_move);
+            if (discarded > 0) {
+                subsystem->input_motion_dropped.fetch_add(
+                    discarded,
+                    std::memory_order_relaxed);
+            }
+        }
+
         // Preserve clicks, button transitions, wheel events, and keyboard
         // input. Under pathological input pressure, briefly apply backpressure
         // to the protocol callback instead of silently losing a user action.
+        const auto wait_started = std::chrono::steady_clock::now();
+        const auto was_full = subsystem->input_queue.size() >= kInputQueueLimit;
         subsystem->input_queue_space_condition.wait(lock, [subsystem] {
             return subsystem->input_stop_requested.load()
                 || subsystem->input_queue.size() < kInputQueueLimit;
@@ -1009,8 +1036,22 @@ bool enqueue_input_event(MacShadowSubsystem* subsystem, InputEvent event) {
         if (subsystem->input_stop_requested.load()) {
             return false;
         }
+        if (was_full) {
+            const auto wait_elapsed_us = static_cast<std::uint64_t>(
+                std::chrono::duration_cast<std::chrono::microseconds>(
+                    std::chrono::steady_clock::now() - wait_started)
+                    .count());
+            subsystem->input_queue_wait_events.fetch_add(1, std::memory_order_relaxed);
+            subsystem->input_queue_wait_time_us_total.fetch_add(
+                wait_elapsed_us,
+                std::memory_order_relaxed);
+            record_atomic_max(subsystem->input_queue_wait_time_us_max, wait_elapsed_us);
+        }
     }
     subsystem->input_queue.push_back(event);
+    record_atomic_max(
+        subsystem->input_queue_max_depth,
+        static_cast<std::uint64_t>(subsystem->input_queue.size()));
     lock.unlock();
     subsystem->input_queue_condition.notify_one();
     return true;
@@ -1255,13 +1296,28 @@ void log_input_pipeline(MacShadowSubsystem* subsystem, bool force) {
         return;
     }
     subsystem->last_input_pipeline_log = now;
+    std::size_t input_queue_depth = 0;
+    {
+        std::lock_guard lock(subsystem->input_queue_mutex);
+        input_queue_depth = subsystem->input_queue.size();
+    }
+    const auto queue_wait_events = subsystem->input_queue_wait_events.load(
+        std::memory_order_relaxed);
+    const auto queue_wait_average_us = queue_wait_events == 0
+        ? 0
+        : subsystem->input_queue_wait_time_us_total.load(std::memory_order_relaxed)
+            / queue_wait_events;
     WLog_INFO(
         TAG,
         "Input pipeline: synchronize=%" PRIu64 " keyboard=%" PRIu64
         " unicode=%" PRIu64 " mouse=%" PRIu64 " wheel=%" PRIu64
         " left_button=%" PRIu64 " right_button=%" PRIu64
         " middle_button=%" PRIu64 " drag=%" PRIu64
-        " extended_mouse=%" PRIu64 " injection_failures=%" PRIu64,
+        " extended_mouse=%" PRIu64 " injection_failures=%" PRIu64
+        " queue_depth=%" PRIuz " queue_max=%" PRIu64
+        " motion_coalesced=%" PRIu64 " motion_dropped=%" PRIu64
+        " queue_wait_events=%" PRIu64 " queue_wait_avg_us=%" PRIu64
+        " queue_wait_max_us=%" PRIu64,
         subsystem->input_synchronize_events.load(std::memory_order_relaxed),
         subsystem->input_keyboard_events.load(std::memory_order_relaxed),
         subsystem->input_unicode_events.load(std::memory_order_relaxed),
@@ -1272,7 +1328,14 @@ void log_input_pipeline(MacShadowSubsystem* subsystem, bool force) {
         subsystem->input_middle_button_events.load(std::memory_order_relaxed),
         subsystem->input_drag_events.load(std::memory_order_relaxed),
         subsystem->input_extended_mouse_events.load(std::memory_order_relaxed),
-        subsystem->input_injection_failures.load(std::memory_order_relaxed));
+        subsystem->input_injection_failures.load(std::memory_order_relaxed),
+        input_queue_depth,
+        subsystem->input_queue_max_depth.load(std::memory_order_relaxed),
+        subsystem->input_motion_coalesced.load(std::memory_order_relaxed),
+        subsystem->input_motion_dropped.load(std::memory_order_relaxed),
+        queue_wait_events,
+        queue_wait_average_us,
+        subsystem->input_queue_wait_time_us_max.load(std::memory_order_relaxed));
 }
 
 void input_loop(MacShadowSubsystem* subsystem) {
@@ -1958,6 +2021,12 @@ int mac_shadow_subsystem_start(rdpShadowSubsystem* base) {
     subsystem->audio_published_chunks.store(0, std::memory_order_relaxed);
     subsystem->audio_delivered_clients.store(0, std::memory_order_relaxed);
     subsystem->audio_dropped_frames.store(0, std::memory_order_relaxed);
+    subsystem->input_motion_coalesced.store(0, std::memory_order_relaxed);
+    subsystem->input_motion_dropped.store(0, std::memory_order_relaxed);
+    subsystem->input_queue_wait_events.store(0, std::memory_order_relaxed);
+    subsystem->input_queue_wait_time_us_total.store(0, std::memory_order_relaxed);
+    subsystem->input_queue_wait_time_us_max.store(0, std::memory_order_relaxed);
+    subsystem->input_queue_max_depth.store(0, std::memory_order_relaxed);
     subsystem->last_pipeline_log = {};
     subsystem->last_audio_log = {};
     {

@@ -229,6 +229,11 @@ FetchContent_Declare(
 # FetchContent keeps its extracted source across reconfiguration. Refresh only
 # the generated dependency tree when this repository's adaptation patch has
 # changed; a caller-provided FETCHCONTENT_SOURCE_DIR_FREERDP is never removed.
+set(MACRDP_FREERDP_PATCH
+    "${CMAKE_CURRENT_SOURCE_DIR}/patches/freerdp-macrdp-adaptations.patch")
+file(SHA256 "${MACRDP_FREERDP_PATCH}" MACRDP_FREERDP_PATCH_HASH)
+set(MACRDP_FREERDP_PATCH_STAMP
+    "${CMAKE_CURRENT_BINARY_DIR}/macrdp-freerdp-patch.sha256")
 set(MACRDP_FREERDP_SOURCE_HINT
     "${CMAKE_CURRENT_BINARY_DIR}/_deps/freerdp-src")
 set(MACRDP_FREERDP_BUILD_HINT
@@ -236,9 +241,15 @@ set(MACRDP_FREERDP_BUILD_HINT
 set(MACRDP_FREERDP_SUBBUILD_HINT
     "${CMAKE_CURRENT_BINARY_DIR}/_deps/freerdp-subbuild")
 set(MACRDP_FREERDP_PATCH_VERSION_MARKER
-    "MACRDP_PATCH_VERSION_20260807")
+    "MACRDP_PATCH_VERSION_20260807_INPUT_OUTPUT_GATING_RESET_METRICS_TRANSPORT_ERRORS_CONTROL_OUTPUT_PRIORITY")
+set(MACRDP_EXISTING_PATCH_HASH "")
+if(EXISTS "${MACRDP_FREERDP_PATCH_STAMP}")
+    file(READ "${MACRDP_FREERDP_PATCH_STAMP}" MACRDP_EXISTING_PATCH_HASH)
+    string(STRIP "${MACRDP_EXISTING_PATCH_HASH}" MACRDP_EXISTING_PATCH_HASH)
+endif()
 if(NOT FETCHCONTENT_SOURCE_DIR_FREERDP
-   AND EXISTS "${MACRDP_FREERDP_SOURCE_HINT}/server/shadow/shadow_client.c")
+   AND EXISTS "${MACRDP_FREERDP_SOURCE_HINT}/server/shadow/shadow_client.c"
+   AND EXISTS "${MACRDP_FREERDP_SOURCE_HINT}/include/freerdp/server/shadow.h")
     file(READ
         "${MACRDP_FREERDP_SOURCE_HINT}/server/shadow/shadow_client.c"
         MACRDP_EXISTING_SHADOW_CLIENT_CONTENT)
@@ -257,9 +268,10 @@ if(NOT FETCHCONTENT_SOURCE_DIR_FREERDP
         "${MACRDP_EXISTING_SHADOW_HEADER_CONTENT}"
         "MACRDP_CLIENT_FRAME_SNAPSHOT"
         MACRDP_EXISTING_HEADER_PATCH_OFFSET)
-    if(MACRDP_EXISTING_PATCH_VERSION_OFFSET EQUAL -1
+    if(NOT "${MACRDP_EXISTING_PATCH_HASH}" STREQUAL "${MACRDP_FREERDP_PATCH_HASH}"
        AND (NOT MACRDP_EXISTING_PATCH_OFFSET EQUAL -1
-            OR NOT MACRDP_EXISTING_HEADER_PATCH_OFFSET EQUAL -1))
+            OR NOT MACRDP_EXISTING_HEADER_PATCH_OFFSET EQUAL -1
+            OR NOT MACRDP_EXISTING_PATCH_VERSION_OFFSET EQUAL -1))
         message(STATUS
             "Refreshing generated FreeRDP source because the macrdp adaptation patch changed")
         file(REMOVE_RECURSE
@@ -272,8 +284,6 @@ FetchContent_MakeAvailable(freerdp)
 
 # FreeRDP source adaptations are kept as one checked-in patch against the
 # pinned 3.30.0 tree. CMake only modifies the generated FetchContent copy.
-set(MACRDP_FREERDP_PATCH
-    "${CMAKE_CURRENT_SOURCE_DIR}/patches/freerdp-macrdp-adaptations.patch")
 set(MACRDP_FREERDP_SHADOW_HEADER
     "${freerdp_SOURCE_DIR}/include/freerdp/server/shadow.h")
 set(MACRDP_FREERDP_SHADOW_CLIENT
@@ -388,6 +398,8 @@ string(FIND "${MACRDP_FREERDP_TRANSPORT_CONTENT}" "MACRDP_WRITE_CHUNK"
     MACRDP_FREERDP_WRITE_CHUNK_OFFSET)
 string(FIND "${MACRDP_FREERDP_TRANSPORT_CONTENT}" "MACRDP_WRITE_BUDGET"
     MACRDP_FREERDP_WRITE_BUDGET_OFFSET)
+string(FIND "${MACRDP_FREERDP_TRANSPORT_CONTENT}" "transport_set_output_priority"
+    MACRDP_FREERDP_OUTPUT_PRIORITY_OFFSET)
 string(FIND "${MACRDP_FREERDP_CHANNEL_SERVER_CONTENT}" "MACRDP_CHANNEL_MESSAGE_BUDGET"
     MACRDP_CHANNEL_MESSAGE_BUDGET_OFFSET)
 
@@ -418,6 +430,7 @@ if(MACRDP_SHADOW_HEADER_PATCH_OFFSET EQUAL -1
    AND MACRDP_FREERDP_WRITE_QUEUE_COPY_OFFSET EQUAL -1
    AND MACRDP_FREERDP_WRITE_CHUNK_OFFSET EQUAL -1
    AND MACRDP_FREERDP_WRITE_BUDGET_OFFSET EQUAL -1
+   AND MACRDP_FREERDP_OUTPUT_PRIORITY_OFFSET EQUAL -1
    AND MACRDP_CHANNEL_MESSAGE_BUDGET_OFFSET EQUAL -1)
     find_program(MACRDP_PATCH_EXECUTABLE patch)
     if(NOT MACRDP_PATCH_EXECUTABLE)
@@ -466,6 +479,7 @@ elseif(NOT MACRDP_SHADOW_HEADER_PATCH_OFFSET EQUAL -1
        AND NOT MACRDP_FREERDP_WRITE_QUEUE_COPY_OFFSET EQUAL -1
        AND NOT MACRDP_FREERDP_WRITE_CHUNK_OFFSET EQUAL -1
        AND NOT MACRDP_FREERDP_WRITE_BUDGET_OFFSET EQUAL -1
+       AND NOT MACRDP_FREERDP_OUTPUT_PRIORITY_OFFSET EQUAL -1
        AND NOT MACRDP_CHANNEL_MESSAGE_BUDGET_OFFSET EQUAL -1)
     # The generated FetchContent tree already contains the complete patch.
 else()
@@ -473,6 +487,8 @@ else()
         "Pinned FreeRDP has a partial macrdp adaptation patch; "
         "remove the generated FetchContent source and reconfigure")
 endif()
+
+file(WRITE "${MACRDP_FREERDP_PATCH_STAMP}" "${MACRDP_FREERDP_PATCH_HASH}\n")
 
 foreach(MACRDP_FREERDP_CODEC_TARGET IN ITEMS freerdp-codecs freerdp)
     if(TARGET ${MACRDP_FREERDP_CODEC_TARGET})
@@ -512,11 +528,13 @@ target_sources(macrdp_freerdp_shadow PRIVATE
 target_include_directories(macrdp_freerdp_shadow
     PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${freerdp_SOURCE_DIR}/libfreerdp/core
         ${freerdp_SOURCE_DIR}/server/shadow
         ${freerdp_SOURCE_DIR}/include
         ${freerdp_SOURCE_DIR}/winpr/include
         ${freerdp_BINARY_DIR}/include
         ${freerdp_BINARY_DIR}/winpr/include
+        ${OPENSSL_INCLUDE_DIR}
 )
 
 target_compile_options(macrdp_freerdp_shadow PRIVATE

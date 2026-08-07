@@ -63,11 +63,26 @@ bool test_motion_coalescing() {
                    "coalescing did not retain the newest pointer position");
 }
 
+bool test_discard_motion_for_critical_input() {
+    const auto is_motion = [](const QueuedEvent& event) { return event.motion; };
+    std::deque<QueuedEvent> queue{{1, 10, false, true, 100},
+                                  {1, 11, false, false, 110},
+                                  {2, 12, false, true, 120},
+                                  {2, 13, false, true, 130}};
+
+    const auto discarded = macrdp::discard_coalescible(queue, is_motion);
+    return expect(discarded == 3, "critical input did not discard queued motion")
+        && expect(queue.size() == 1 && queue.front().sequence == 11
+                      && !queue.front().motion,
+                   "critical input discard removed a non-coalescible event");
+}
+
 } // namespace
 
 int main() {
     bool ok = test_reset_priority();
     ok = test_motion_coalescing() && ok;
+    ok = test_discard_motion_for_critical_input() && ok;
     macrdp::InputOwnership ownership;
 
     ok = expect(ownership.acquire_key(1, 30), "first key owner was not announced") && ok;
