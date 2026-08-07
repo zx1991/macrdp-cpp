@@ -222,6 +222,72 @@ and rejects leftover build-machine paths; it is still ad-hoc signed. Developer
 ID signing and notarization remain deployment tasks for distributing the
 install to other Macs.
 
+### Automated loopback smoke test
+
+The repository includes a small FreeRDP client used only for protocol testing.
+It connects over `127.0.0.1`, records decoded frame timing and negotiated GFX
+codec counts, sends mouse clicks, checks that the server receives them, tests a
+wrong NLA password, and compares GFX/AVC420 with the `--no-gfx` SurfaceBits
+path. It also fails when the server reports a slow frame stage. No third-party
+source is copied or modified by this test.
+
+The normal macrdp build intentionally does not build a FreeRDP client, so
+build the test client against a separate FreeRDP client build:
+
+```bash
+tools/build_loopback_client.sh \
+  /path/to/freerdp-client-build \
+  /path/to/FreeRDP-3.30.0 \
+  /tmp/macrdp-loopback-client
+```
+
+Run it from the logged-in graphical session using the current server binary:
+
+```bash
+MACRDP_SERVER=./build/macrdp-server \
+MACRDP_LOOPBACK_CLIENT=/tmp/macrdp-loopback-client \
+tools/run_loopback_smoke.sh
+```
+
+The script uses TCP port 3390 by default and refuses to touch an existing
+listener. Set `MACRDP_LOOPBACK_PORT` to use another port. Set
+`MACRDP_LOOPBACK_KEEP_TEMP=1` to retain logs, or use
+`MACRDP_LOOPBACK_DURATION_MS` and `MACRDP_LOOPBACK_MAX_INTERVAL_MS` to adjust
+the sampling duration and timing threshold. Screen Recording and Accessibility
+permissions are still required because the server captures and injects real
+macOS desktop events; the test verifies protocol delivery, not the visual
+effect of a click in an arbitrary foreground application.
+
+The optional C TCP proxy applies deterministic one-way delay, jitter, per-
+direction bandwidth shaping, and periodic forwarding outages. Build it once:
+
+```bash
+tools/build_loopback_proxy.sh /tmp/macrdp-loopback-proxy
+```
+
+Then select a profile:
+
+```bash
+MACRDP_SERVER=./build/macrdp-server \
+MACRDP_LOOPBACK_CLIENT=/tmp/macrdp-loopback-client \
+MACRDP_LOOPBACK_PROXY=/tmp/macrdp-loopback-proxy \
+MACRDP_LOOPBACK_NETWORK_PROFILE=wifi \
+tools/run_loopback_smoke.sh
+```
+
+Available profiles are `direct` (no proxy), `wan` (50 ms one-way delay,
+10 ms jitter, 5 Mbps), `wifi` (75 ms delay, 40 ms jitter, 1 Mbps, and a
+300 ms outage every 5 seconds), `outage` (50 ms delay, 50 ms jitter, 5 Mbps,
+and a 500 ms outage every 3 seconds), and `bad` (150 ms delay, 100 ms jitter,
+256 Kbps, and a 1 second outage every 4 seconds). The bandwidth is applied
+independently in each direction. The `bad` profile intentionally runs the
+GFX path only: a classic full-screen SurfaceBits update can take longer than
+the short stress-test window at 256 Kbps. Frame thresholds are mode-specific
+so a low-bandwidth test checks delivery and recovery without requiring the
+same frame rate as a direct connection. An outage pauses forwarding without
+discarding TCP bytes, so it models a stalled link and recovery rather than
+packet loss or a dropped connection.
+
 ## Layout
 
 - `include/macrdp/`: C++ interfaces and data types; no Objective-C types.
@@ -246,8 +312,9 @@ priority validation still requires a graphical macOS session and a Windows
 3. Verify Retina coordinate mapping and display-mode changes on the hardware
    used for deployment. The server still captures only the main display and
    does not offer multi-monitor selection.
-4. Add a repeatable protocol smoke test. No FreeRDP client binary is built by
-   this repository, and `mstsc` remains the compatibility target.
+4. Extend the loopback smoke test with keyboard, wheel, clipboard, resize,
+   reconnect, and slow-client cases. No FreeRDP client binary is built by this
+   repository, and `mstsc` remains the compatibility target.
 5. Validate the text-only clipboard implementation with current Windows
    `mstsc`, then add image/file redirection only if the use case requires it.
 6. Add a macOS microphone/AUDIN implementation if microphone redirection is
