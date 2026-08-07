@@ -1,12 +1,13 @@
 --- a/include/freerdp/server/shadow.h
 +++ b/include/freerdp/server/shadow.h
-@@ -131,6 +131,9 @@
+@@ -131,6 +131,10 @@
  		BOOL macrdpH264CompletionDeferred;
  		UINT64 macrdpH264LastDiagnostics;
  		/* MACRDP_CLIENT_FRAME_SNAPSHOT */
 +		/* MACRDP_AUDIO_QUEUE_BOUND */
 +		LONG macrdpAudioMessageQueued;
 +		LONG macrdpAudioMessagesDropped;
++		LONGLONG macrdpAudioSuppressedUntil;
  		rdpShadowServer* server;
  		rdpShadowEncoder* encoder;
  		rdpShadowSubsystem* subsystem;
@@ -58,7 +59,7 @@
  				if (message.id == WMQ_QUIT)
  				{
  					break;
-@@ -3708,18 +3721,34 @@
+@@ -3708,18 +3721,46 @@
  static BOOL shadow_client_dispatch_msg(rdpShadowClient* client, wMessage* message)
  {
  	if (!client || !message)
@@ -67,9 +68,21 @@
 +	if (message->id == SHADOW_MSG_OUT_AUDIO_OUT_SAMPLES_ID)
 +	{
 +		rdpTransport* transport = client->context.rdp ? client->context.rdp->transport : nullptr;
++		const ULONGLONG now = GetTickCount64();
++		const BOOL transportBlocked = transport && transport_is_write_blocked(transport);
++		const LONGLONG suppressedUntil = InterlockedCompareExchange64(
++			&client->macrdpAudioSuppressedUntil, 0, 0);
++		if (transportBlocked)
++		{
++			(void)InterlockedCompareExchange64(
++				&client->macrdpAudioSuppressedUntil,
++				(LONGLONG)(now + 2000), suppressedUntil);
++		}
 +		/* Audio is real-time. Reject it before it enters a blocked transport or
-+		 * creates an unbounded MessageQueue backlog. */
-+		if ((transport && transport_is_write_blocked(transport))
++		 * creates an unbounded MessageQueue backlog. Keep it suppressed briefly
++		 * after recovery so video can drain without an audio burst. */
++		if (!client->activated || !client->rdpsnd || !client->rdpsnd->Activated
++		    || transportBlocked || suppressedUntil > (LONGLONG)now
 +		    || InterlockedCompareExchange(
 +			       &client->macrdpAudioMessageQueued, TRUE, FALSE) != FALSE)
 +		{

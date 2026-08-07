@@ -318,6 +318,13 @@ clipboard assertions. Other clipboard managers or desktop applications can
 change that shared pasteboard; retain the test artifacts and rerun before
 diagnosing an isolated clipboard mismatch as a transport regression.
 
+The loopback client auto-negotiates the server's preferred RDPSND format by
+default. Use `--audio-format 1 --expect-audio-format 1` with the smoke script to
+exercise the uncompressed PCM worst case, or use
+`--audio-format 0xA106 --expect-audio-format 0xA106` to force AAC. This matters
+on shaped links because stereo 16-bit PCM is roughly 176 KB/s before protocol
+overhead, while AAC is much smaller.
+
 ## Layout
 
 - `include/macrdp/`: C++ interfaces and data types; no Objective-C types.

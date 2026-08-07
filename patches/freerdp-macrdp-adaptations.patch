@@ -113,7 +113,7 @@ index 049696a..2482e6b 100644
  	if (sys->codecEncoderContext)
  	{
  #if LIBAVCODEC_VERSION_INT >= AV_VERSION_INT(55, 69, 100)
-@@ -191,6 +206,32 @@ static BOOL libavcodec_create_encoder_context(H264_CONTEXT* WINPR_RESTRICT h264)
+@@ -191,6 +206,33 @@ static BOOL libavcodec_create_encoder_context(H264_CONTEXT* WINPR_RESTRICT h264)
  	if (!sys || !sys->codecEncoder)
  		return FALSE;
  
@@ -125,7 +125,8 @@ index 049696a..2482e6b 100644
 +	{
 +		/* MACRDP_VIDEOTOOLBOX_BRIDGE_CREATE */
 +		sys->macrdpVideoToolboxEncoder = macrdp_vt_h264_encoder_new(
-+			h264->width, h264->height, h264->BitRate, h264->FrameRate, 60);
++			h264->width, h264->height, h264->BitRate, h264->FrameRate,
++			h264->FrameRate > 0 ? MIN((UINT32)300, h264->FrameRate * 5) : 60);
 +		if (sys->macrdpVideoToolboxEncoder)
 +		{
 +			WLog_Print(h264->log, WLOG_INFO,
@@ -2382,3 +2383,60 @@ diff --git a/server/shadow/shadow_encoder.c b/server/shadow/shadow_encoder.c
  	encoder->codecs |= FREERDP_CODEC_AVC420 | FREERDP_CODEC_AVC444;
  	return 1;
  fail:
+
+diff --git a/server/shadow/shadow_rdpsnd.c b/server/shadow/shadow_rdpsnd.c
+--- a/server/shadow/shadow_rdpsnd.c
++++ b/server/shadow/shadow_rdpsnd.c
+@@ -35,18 +35,46 @@
+ #define TAG SERVER_TAG("shadow")
+ 
++static BOOL rdpsnd_select_preferred_format(
++    RdpsndServerContext* context,
++    size_t client_index,
++    const AUDIO_FORMAT* format)
++{
++    const UINT rc = context->SelectFormat(
++        context, WINPR_ASSERTING_INT_CAST(UINT16, client_index));
++    if (rc != CHANNEL_RC_OK)
++    {
++        WLog_WARN(TAG, "SelectFormat failed with %" PRIu32, rc);
++        return FALSE;
++    }
++
++    WLog_INFO(TAG,
++              "Selected audio format tag=0x%04" PRIx16 " rate=%" PRIu32
++              " channels=%" PRIu16 " avg_bytes=%" PRIu32,
++              format->wFormatTag,
++              format->nSamplesPerSec,
++              format->nChannels,
++              format->nAvgBytesPerSec);
++    return TRUE;
++}
++/* MACRDP_RDPSND_PREFER_COMPRESSED */
++
+ static void rdpsnd_activated(RdpsndServerContext* context)
+ {
+ 	WINPR_ASSERT(context);
+-	for (size_t i = 0; i < context->num_client_formats; i++)
++	for (size_t pass = 0; pass < 2; pass++)
+ 	{
+ 		for (size_t j = 0; j < context->num_server_formats; j++)
+ 		{
+-			if (audio_format_compatible(&context->server_formats[j], &context->client_formats[i]))
++			const AUDIO_FORMAT* server_format = &context->server_formats[j];
++			const BOOL compressed = server_format->wFormatTag != WAVE_FORMAT_PCM;
++			if ((pass == 0 && !compressed) || (pass == 1 && compressed))
++				continue;
++
++			for (size_t i = 0; i < context->num_client_formats; i++)
+ 			{
+-				const UINT rc = context->SelectFormat(context, WINPR_ASSERTING_INT_CAST(UINT16, i));
+-				if (rc != CHANNEL_RC_OK)
+-					WLog_WARN(TAG, "SelectFormat failed with %" PRIu32, rc);
+-				return;
++				if (audio_format_compatible(server_format, &context->client_formats[i])
++				    && rdpsnd_select_preferred_format(context, i, server_format))
++					return;
+ 			}
+ 		}
+ 	}

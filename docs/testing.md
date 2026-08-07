@@ -39,7 +39,7 @@ The smoke script uses a real TCP connection to the server and checks:
 - mouse buttons, drag, wheel, keyboard, Unicode, and synchronization input;
 - initial, repeated, and released keyboard events, including modifier cleanup;
 - bidirectional text clipboard traffic;
-- PCM RDPSND negotiation and delivery;
+- PCM and compressed RDPSND negotiation and delivery;
 - reconnect, requested sizes, and an intentionally slow client event loop.
 
 The server's `Input pipeline` diagnostics also report the current and maximum
@@ -126,8 +126,27 @@ on the server's default 16 Mbps/30 FPS configuration.
 
 Audio is enabled by default. Use `--no-audio` on the server, or
 `MACRDP_LOOPBACK_DISABLE_AUDIO=1` with the smoke script, to measure video without
-PCM RDPSND consuming the shaped link. This does not alter the default audio
-coverage; it provides a separate low-bandwidth comparison.
+RDPSND consuming the shaped link. The loopback client auto-negotiates the
+server's preferred audio format by default; with the current FFmpeg build this
+is AAC (`0xA106`), so compressed audio does not consume PCM bandwidth. To test
+the raw PCM worst case explicitly, run:
+
+```bash
+MACRDP_LOOPBACK_AUDIO_FORMAT=1 \
+MACRDP_LOOPBACK_EXPECT_AUDIO_FORMAT=1 \
+tools/run_loopback_smoke.sh --profile wifi --bitrate 4M --fps 20
+```
+
+The equivalent command-line form is:
+
+```bash
+tools/run_loopback_smoke.sh --profile wifi --bitrate 4M --fps 20 \
+  --audio-format 1 --expect-audio-format 1
+```
+
+Use `--audio-format 0xA106 --expect-audio-format 0xA106` to force AAC in a
+reproducible comparison. `audio_format_tag`, `audio_non_pcm`, and the audio
+payload counters in the loopback summary show what was actually delivered.
 
 During shaped-link backpressure, the server's `Output pipeline` diagnostics
 include `audio_dropped`. A nonzero value means stale per-client audio messages
@@ -136,12 +155,14 @@ outage, and bad profiles with audio enabled. `Audio pipeline`'s
 `dropped_frames` measures capture-side loss and is independent of this queue
 bound.
 
-In the checked-in Wi-Fi profile (1 Mbps, 75 ms delay, 40 ms jitter), a local
-comparison of `4M/20FPS` reduced first-frame latency from about 3.37 s to
-2.97 s and the largest observed frame gap from 1.85 s to 1.45 s. A `2M/15FPS`
-run did not improve first-frame latency and reduced the normal frame cadence.
-These are tuning observations for this deterministic proxy profile, not an
-automatic bitrate-selection rule.
+In the checked-in Wi-Fi profile (1 Mbps, 75 ms delay, 40 ms jitter), a current
+10-second comparison of `4M/20FPS` produced 89 frames with auto-negotiated AAC
+(83 ms average interval), 40 frames with explicitly selected PCM (177 ms), and
+94 frames with audio disabled (82 ms). First-frame latency in that run was
+2473 ms, 3012 ms, and 2208 ms respectively. These are tuning observations for
+this deterministic proxy profile, not an automatic bitrate-selection rule or a
+guarantee of a particular Windows client's negotiation; jitter and the proxy's
+scheduled outage can change individual runs.
 
 The `bad` profile intentionally allows a 30-second GFX window. A full-screen
 keyframe can take roughly 20 seconds at 256 Kbps before later frames can be

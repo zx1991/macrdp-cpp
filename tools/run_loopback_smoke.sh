@@ -19,6 +19,8 @@ server_bitrate=${MACRDP_LOOPBACK_SERVER_BITRATE:-}
 server_fps=${MACRDP_LOOPBACK_SERVER_FPS:-}
 synthetic_audio=${MACRDP_LOOPBACK_SYNTHETIC_AUDIO:-1}
 disable_audio=${MACRDP_LOOPBACK_DISABLE_AUDIO:-0}
+audio_format=${MACRDP_LOOPBACK_AUDIO_FORMAT:-auto}
+expected_audio_format=${MACRDP_LOOPBACK_EXPECT_AUDIO_FORMAT:-auto}
 clipboard_client_text=${MACRDP_LOOPBACK_CLIENT_CLIPBOARD_TEXT:-macrdp\ loopback\ client\ clipboard\ text}
 clipboard_server_text=${MACRDP_LOOPBACK_SERVER_CLIPBOARD_TEXT:-macrdp\ loopback\ server\ clipboard\ text}
 keyboard_probe=${MACRDP_LOOPBACK_PROBE_F:-0}
@@ -38,6 +40,8 @@ Options:
   --client PATH   Use this FreeRDP loopback client executable.
   --bitrate RATE  Pass --bitrate RATE to the server for reproducible tuning.
   --fps NUMBER    Pass --fps NUMBER to the server for reproducible tuning.
+  --audio-format FORMAT  Request a WAVE format tag, or auto-negotiate.
+  --expect-audio-format FORMAT  Expect a WAVE format tag, or auto for compressed audio.
   --no-audio      Disable audio capture and RDPSND for this run.
   -h, --help      Show this help.
 
@@ -127,6 +131,32 @@ while [ "$#" -gt 0 ]; do
 			server_fps=${1#--fps=}
 			shift
 			;;
+		--audio-format)
+			if [ "$#" -lt 2 ]; then
+				echo "--audio-format requires a value" >&2
+				usage >&2
+				exit 2
+			fi
+			audio_format=$2
+			shift 2
+			;;
+		--audio-format=*)
+			audio_format=${1#--audio-format=}
+			shift
+			;;
+		--expect-audio-format)
+			if [ "$#" -lt 2 ]; then
+				echo "--expect-audio-format requires a value" >&2
+				usage >&2
+				exit 2
+			fi
+			expected_audio_format=$2
+			shift 2
+			;;
+		--expect-audio-format=*)
+			expected_audio_format=${1#--expect-audio-format=}
+			shift
+			;;
 		--no-audio)
 			disable_audio=1
 			shift
@@ -168,6 +198,19 @@ case "$disable_audio" in
 		exit 2
 		;;
 esac
+
+expected_audio_format_auto=0
+if [ "$expected_audio_format" = "auto" ] || [ "$expected_audio_format" = "AUTO" ]; then
+	expected_audio_format_auto=1
+	expected_audio_format_value=0
+else
+	if ! expected_audio_format_value=$((expected_audio_format)); then
+		echo "MACRDP_LOOPBACK_EXPECT_AUDIO_FORMAT must be a numeric WAVE format tag or auto" >&2
+		exit 2
+	fi
+fi
+
+expected_audio_label=$expected_audio_format
 
 if [ "$positional_count" -eq 1 ]; then
 	case "$server" in
@@ -541,6 +584,7 @@ run_client() {
 
 	if MACRDP_LOOPBACK_DURATION_MS="$duration_override" \
 		MACRDP_LOOPBACK_GFX="$client_gfx" \
+		MACRDP_LOOPBACK_AUDIO_FORMAT="$audio_format" \
 		MACRDP_LOOPBACK_EVENT_DELAY_MS="$event_delay_ms" \
 		MACRDP_LOOPBACK_CLIENT_CLIPBOARD_TEXT="$clipboard_client_text" \
 		MACRDP_LOOPBACK_SERVER_CLIPBOARD_TEXT="$clipboard_server_text" \
@@ -672,10 +716,23 @@ run_client() {
 		if [ "${audio_first_play:-0}" -le 0 ] || [ "${audio_first_play:-0}" -gt "$first_frame_limit_ms" ]; then
 			fail "$case_name first audio callback latency is ${audio_first_play:-missing} ms"
 		fi
-		if [ "${audio_non_pcm:-0}" -ne 0 ] || [ "${audio_format_tag:-0}" -ne 1 ] \
-			|| [ "${audio_channels:-0}" -ne 2 ] || [ "${audio_sample_rate:-0}" -ne 44100 ] \
+		expected_non_pcm=0
+		if [ "$expected_audio_format_value" -ne 1 ]; then
+			expected_non_pcm=1
+		fi
+		if [ "$expected_non_pcm" -eq 0 ] && [ "${audio_non_pcm:-0}" -ne 0 ]; then
+			fail "$case_name unexpectedly delivered a compressed audio callback"
+		fi
+		if [ "$expected_non_pcm" -eq 1 ] && [ "${audio_non_pcm:-0}" -lt 1 ]; then
+			fail "$case_name did not deliver a compressed audio callback"
+		fi
+		if [ "$expected_audio_format_auto" -eq 0 ] \
+			&& [ "${audio_format_tag:-0}" -ne "$expected_audio_format_value" ]; then
+			fail "$case_name negotiated unexpected audio format: expected_tag=$expected_audio_format_value tag=${audio_format_tag:-missing}"
+		fi
+		if [ "${audio_channels:-0}" -ne 2 ] || [ "${audio_sample_rate:-0}" -ne 44100 ] \
 			|| [ "${audio_bits:-0}" -ne 16 ]; then
-			fail "$case_name negotiated unexpected audio format: tag=${audio_format_tag:-missing} channels=${audio_channels:-missing} rate=${audio_sample_rate:-missing} bits=${audio_bits:-missing} non_pcm=${audio_non_pcm:-missing}"
+			fail "$case_name negotiated unexpected audio format: expected_tag=$expected_audio_label tag=${audio_format_tag:-missing} channels=${audio_channels:-missing} rate=${audio_sample_rate:-missing} bits=${audio_bits:-missing} non_pcm=${audio_non_pcm:-missing}"
 		fi
 	fi
 	server_case=$case_name
@@ -847,7 +904,7 @@ echo "loopback smoke test: server=$server client=$client profile=$network_profil
 	"duration=${duration_ms}ms delay=${proxy_delay_ms}ms jitter=${proxy_jitter_ms}ms "\
 	"bandwidth=${proxy_bandwidth_bps}bps outage=${proxy_outage_period_ms}/${proxy_outage_duration_ms}ms "\
 	"bitrate=${server_bitrate:-default} fps=${server_fps:-default} "\
-	"audio=$audio_label "\
+	"audio=$audio_label audio_format=$audio_format expected_audio_format=$expected_audio_label "\
 	"nogfx_duration=${nogfx_duration_ms}ms"
 
 if start_server gfx; then

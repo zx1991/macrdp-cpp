@@ -147,9 +147,10 @@ static BOOL loopback_audio_format_supported(
 	if (loop)
 		loop->audio_format_supported_calls++;
 
-	/* The loopback test pins the channel to PCM below. Keep the device honest
-	 * so a compressed server format cannot be mistaken for raw PCM delivery. */
-	return format != NULL && format->wFormatTag == WAVE_FORMAT_PCM;
+	/* This backend has no speaker and only measures the payload. Accept every
+	 * valid format so the test can exercise the server's compressed audio path. */
+	return format != NULL && format->wFormatTag != WAVE_FORMAT_UNKNOWN
+	    && format->nChannels > 0 && format->nSamplesPerSec > 0;
 }
 
 static BOOL loopback_audio_open(
@@ -810,8 +811,22 @@ static BOOL loopback_pre_connect(freerdp* instance)
 {
 	rdpSettings* settings = NULL;
 	const BOOL gfx_enabled = env_gfx_enabled();
-	const char* audio_channel[] = { RDPSND_CHANNEL_NAME, "sys:macrdp", "format:1",
-		                              "rate:44100", "channel:2" };
+	const char* audio_format = getenv("MACRDP_LOOPBACK_AUDIO_FORMAT");
+	const char* audio_channel[] = { RDPSND_CHANNEL_NAME, "sys:macrdp", NULL,
+	                              "rate:44100", "channel:2" };
+	char audio_format_argument[32] = { 0 };
+	size_t audio_channel_count = 2;
+	const BOOL automatic_audio_format = audio_format == NULL || *audio_format == '\0'
+	    || strcmp(audio_format, "auto") == 0 || strcmp(audio_format, "AUTO") == 0;
+	if (!automatic_audio_format)
+	{
+		if (snprintf(audio_format_argument, sizeof(audio_format_argument), "format:%s",
+		             audio_format) < 0
+		    || strlen(audio_format_argument) >= sizeof(audio_format_argument))
+			return FALSE;
+		audio_channel[2] = audio_format_argument;
+		audio_channel_count = 5;
+	}
 
 	WINPR_ASSERT(instance);
 	WINPR_ASSERT(instance->context);
@@ -851,9 +866,8 @@ static BOOL loopback_pre_connect(freerdp* instance)
 
 	(void)freerdp_client_del_static_channel(settings, RDPSND_CHANNEL_NAME);
 	(void)freerdp_client_del_dynamic_channel(settings, RDPSND_CHANNEL_NAME);
-	if (!freerdp_client_add_static_channel(settings, ARRAYSIZE(audio_channel), audio_channel)
-	    || !freerdp_client_add_dynamic_channel(
-           settings, ARRAYSIZE(audio_channel), audio_channel))
+	if (!freerdp_client_add_static_channel(settings, audio_channel_count, audio_channel)
+	    || !freerdp_client_add_dynamic_channel(settings, audio_channel_count, audio_channel))
 		return FALSE;
 
 	return TRUE;
