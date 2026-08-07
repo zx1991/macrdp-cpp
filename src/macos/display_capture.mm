@@ -2,11 +2,13 @@
 #import <CoreMedia/CoreMedia.h>
 #import <CoreVideo/CoreVideo.h>
 #import <Foundation/Foundation.h>
+#import <AudioToolbox/AudioToolbox.h>
 #import <ScreenCaptureKit/ScreenCaptureKit.h>
 
 #include "macrdp/display_capture.hpp"
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <condition_variable>
 #include <cmath>
@@ -66,6 +68,7 @@ struct CaptureState {
     mutable std::mutex mutex;
     std::condition_variable condition;
     std::optional<macrdp::Frame> latest_frame;
+    std::optional<macrdp::AudioFrame> latest_audio;
     std::optional<macrdp::Frame> reusable_frame;
     std::string error;
     bool accepting_frames = false;
@@ -243,6 +246,290 @@ bool copy_sample_buffer(CMSampleBufferRef sample_buffer, macrdp::Frame& frame) {
     return true;
 }
 
+struct AudioBufferView {
+    const std::uint8_t* data = nullptr;
+    std::size_t byte_size = 0;
+    std::size_t channel_count = 0;
+    std::size_t bytes_per_sample = 0;
+    std::size_t bytes_per_frame = 0;
+};
+
+float read_audio_sample(
+    const std::uint8_t* data,
+    std::size_t byte_size,
+    std::size_t byte_offset,
+    const AudioStreamBasicDescription& description) {
+    const std::size_t bytes_per_sample =
+        (description.mBitsPerChannel + 7U) / 8U;
+    if (data == nullptr || bytes_per_sample == 0 || byte_offset > byte_size
+        || bytes_per_sample > byte_size - byte_offset) {
+        return 0.0F;
+    }
+
+    const auto* source = data + byte_offset;
+    const bool big_endian =
+        (description.mFormatFlags & kAudioFormatFlagIsBigEndian) != 0;
+    const bool is_float =
+        (description.mFormatFlags & kAudioFormatFlagIsFloat) != 0;
+    const bool is_signed =
+        (description.mFormatFlags & kAudioFormatFlagIsSignedInteger) != 0;
+
+    if (is_float && description.mBitsPerChannel == 32) {
+        std::uint32_t bits = 0;
+        std::memcpy(&bits, source, sizeof(bits));
+        if (big_endian) {
+            bits = __builtin_bswap32(bits);
+        }
+        float value = 0.0F;
+        std::memcpy(&value, &bits, sizeof(value));
+        return std::isfinite(value) ? value : 0.0F;
+    }
+
+    if (is_float && description.mBitsPerChannel == 64) {
+        std::uint64_t bits = 0;
+        std::memcpy(&bits, source, sizeof(bits));
+        if (big_endian) {
+            bits = __builtin_bswap64(bits);
+        }
+        double value = 0.0;
+        std::memcpy(&value, &bits, sizeof(value));
+        return std::isfinite(value) ? static_cast<float>(value) : 0.0F;
+    }
+
+    if (!is_signed || !((description.mBitsPerChannel == 8)
+                        || (description.mBitsPerChannel == 16)
+                        || (description.mBitsPerChannel == 24)
+                        || (description.mBitsPerChannel == 32))) {
+        return 0.0F;
+    }
+
+    std::int64_t value = 0;
+    if (big_endian) {
+        for (std::size_t index = 0; index < bytes_per_sample; ++index) {
+            value = (value << 8U) | source[index];
+        }
+    } else {
+        for (std::size_t index = 0; index < bytes_per_sample; ++index) {
+            value |= static_cast<std::int64_t>(source[index]) << (index * 8U);
+        }
+    }
+
+    const auto bits = static_cast<unsigned>(description.mBitsPerChannel);
+    const std::int64_t sign_bit = std::int64_t{1} << (bits - 1U);
+    const std::int64_t full_scale = std::int64_t{1} << (bits - 1U);
+    if ((value & sign_bit) != 0) {
+        value -= std::int64_t{1} << bits;
+    }
+    return static_cast<float>(value) / static_cast<float>(full_scale);
+}
+
+std::optional<macrdp::AudioFrame> copy_audio_sample_buffer(
+    CMSampleBufferRef sample_buffer) {
+    if (sample_buffer == nullptr) {
+        return std::nullopt;
+    }
+
+    auto* format_description = CMSampleBufferGetFormatDescription(sample_buffer);
+    if (format_description == nullptr) {
+        return std::nullopt;
+    }
+    const auto* description = CMAudioFormatDescriptionGetStreamBasicDescription(
+        static_cast<CMAudioFormatDescriptionRef>(format_description));
+    if (description == nullptr || description->mFormatID != kAudioFormatLinearPCM
+        || description->mChannelsPerFrame == 0
+        || description->mChannelsPerFrame > 32
+        || !std::isfinite(description->mSampleRate)
+        || description->mSampleRate <= 0.0
+        || description->mBitsPerChannel == 0
+        || description->mBytesPerFrame == 0) {
+        return std::nullopt;
+    }
+
+    const auto source_channels = static_cast<std::size_t>(description->mChannelsPerFrame);
+    const auto source_frames = static_cast<std::size_t>(CMSampleBufferGetNumSamples(sample_buffer));
+    if (source_frames == 0 || source_frames > 1'000'000
+        || source_frames > std::numeric_limits<std::size_t>::max() / source_channels) {
+        return std::nullopt;
+    }
+
+    size_t buffer_list_size = 0;
+    CMBlockBufferRef retained_block_buffer = nullptr;
+    const auto size_status = CMSampleBufferGetAudioBufferListWithRetainedBlockBuffer(
+        sample_buffer,
+        &buffer_list_size,
+        nullptr,
+        0,
+        kCFAllocatorDefault,
+        kCFAllocatorDefault,
+        kCMSampleBufferFlag_AudioBufferList_Assure16ByteAlignment,
+        &retained_block_buffer);
+    if (retained_block_buffer != nullptr) {
+        CFRelease(retained_block_buffer);
+        retained_block_buffer = nullptr;
+    }
+    if (size_status != noErr && buffer_list_size == 0) {
+        return std::nullopt;
+    }
+    if (buffer_list_size < sizeof(AudioBufferList)) {
+        return std::nullopt;
+    }
+
+    std::vector<std::uint8_t> buffer_list_storage;
+    try {
+        buffer_list_storage.resize(buffer_list_size);
+    } catch (...) {
+        return std::nullopt;
+    }
+    auto* buffer_list = reinterpret_cast<AudioBufferList*>(buffer_list_storage.data());
+    const auto list_status = CMSampleBufferGetAudioBufferListWithRetainedBlockBuffer(
+        sample_buffer,
+        nullptr,
+        buffer_list,
+        buffer_list_storage.size(),
+        kCFAllocatorDefault,
+        kCFAllocatorDefault,
+        kCMSampleBufferFlag_AudioBufferList_Assure16ByteAlignment,
+        &retained_block_buffer);
+    if (list_status != noErr || retained_block_buffer == nullptr
+        || buffer_list->mNumberBuffers == 0) {
+        if (retained_block_buffer != nullptr) {
+            CFRelease(retained_block_buffer);
+        }
+        return std::nullopt;
+    }
+
+    const std::size_t bytes_per_sample =
+        (description->mBitsPerChannel + 7U) / 8U;
+    const bool non_interleaved =
+        (description->mFormatFlags & kAudioFormatFlagIsNonInterleaved) != 0;
+    if (bytes_per_sample == 0) {
+        CFRelease(retained_block_buffer);
+        return std::nullopt;
+    }
+
+    std::vector<AudioBufferView> views;
+    views.reserve(buffer_list->mNumberBuffers);
+    std::size_t represented_channels = 0;
+    for (UInt32 index = 0; index < buffer_list->mNumberBuffers; ++index) {
+        const auto& buffer = buffer_list->mBuffers[index];
+        const std::size_t buffer_channels = buffer.mNumberChannels != 0
+            ? static_cast<std::size_t>(buffer.mNumberChannels)
+            : (non_interleaved ? 1U : source_channels);
+        const std::size_t bytes_per_frame = non_interleaved
+            ? bytes_per_sample
+            : bytes_per_sample * buffer_channels;
+        if (buffer_channels == 0 || bytes_per_frame == 0) {
+            continue;
+        }
+        views.push_back({
+            static_cast<const std::uint8_t*>(buffer.mData),
+            static_cast<std::size_t>(buffer.mDataByteSize),
+            buffer_channels,
+            bytes_per_sample,
+            bytes_per_frame});
+        represented_channels += buffer_channels;
+    }
+    if (views.empty() || represented_channels < source_channels) {
+        CFRelease(retained_block_buffer);
+        return std::nullopt;
+    }
+
+    std::vector<float> source_pcm;
+    try {
+        source_pcm.resize(source_frames * source_channels);
+    } catch (...) {
+        CFRelease(retained_block_buffer);
+        return std::nullopt;
+    }
+
+    bool complete = true;
+    for (std::size_t frame = 0; frame < source_frames && complete; ++frame) {
+        for (std::size_t channel = 0; channel < source_channels; ++channel) {
+            const AudioBufferView* selected = nullptr;
+            std::size_t local_channel = 0;
+            std::size_t channel_base = 0;
+            for (const auto& view : views) {
+                if (channel < channel_base + view.channel_count) {
+                    selected = &view;
+                    local_channel = channel - channel_base;
+                    break;
+                }
+                channel_base += view.channel_count;
+            }
+            if (selected == nullptr) {
+                complete = false;
+                break;
+            }
+            if (frame > std::numeric_limits<std::size_t>::max() / selected->bytes_per_frame) {
+                complete = false;
+                break;
+            }
+            const auto byte_offset = frame * selected->bytes_per_frame
+                + local_channel * selected->bytes_per_sample;
+            source_pcm[frame * source_channels + channel] = read_audio_sample(
+                selected->data,
+                selected->byte_size,
+                byte_offset,
+                *description);
+        }
+    }
+    CFRelease(retained_block_buffer);
+    if (!complete) {
+        return std::nullopt;
+    }
+
+    constexpr std::uint32_t target_sample_rate = 48'000;
+    constexpr std::uint16_t target_channels = 2;
+    const auto target_frames = static_cast<std::size_t>(std::llround(
+        static_cast<double>(source_frames) * target_sample_rate / description->mSampleRate));
+    if (target_frames == 0 || target_frames > 1'000'000
+        || target_frames > std::numeric_limits<std::size_t>::max() / target_channels) {
+        return std::nullopt;
+    }
+
+    macrdp::AudioFrame frame;
+    frame.sample_rate = target_sample_rate;
+    frame.channels = target_channels;
+    frame.pcm.resize(target_frames * target_channels);
+    for (std::size_t output_frame = 0; output_frame < target_frames; ++output_frame) {
+        const double source_position = static_cast<double>(output_frame)
+            * description->mSampleRate / target_sample_rate;
+        const auto source_index = std::min(
+            source_frames - 1,
+            static_cast<std::size_t>(source_position));
+        const auto next_index = std::min(source_frames - 1, source_index + 1);
+        const float interpolation = static_cast<float>(
+            source_position - static_cast<double>(source_index));
+        for (std::size_t channel = 0; channel < target_channels; ++channel) {
+            const auto source_channel = source_channels == 1
+                ? 0
+                : std::min(channel, source_channels - 1);
+            const float first = source_pcm[source_index * source_channels + source_channel];
+            const float second = source_pcm[next_index * source_channels + source_channel];
+            const float value = std::clamp(
+                first + (second - first) * interpolation,
+                -1.0F,
+                1.0F);
+            const auto converted = value <= -1.0F
+                ? -32768
+                : value >= 1.0F
+                    ? 32767
+                    : static_cast<int>(std::lrint(value * 32767.0F));
+            frame.pcm[output_frame * target_channels + channel] =
+                static_cast<std::int16_t>(converted);
+        }
+    }
+
+    const auto timestamp = CMSampleBufferGetPresentationTimeStamp(sample_buffer);
+    if (CMTIME_IS_VALID(timestamp) && CMTIME_IS_NUMERIC(timestamp)
+        && timestamp.timescale > 0 && timestamp.value >= 0) {
+        frame.timestamp_us = static_cast<std::uint64_t>(
+            (static_cast<long double>(timestamp.value) * 1'000'000.0L)
+            / static_cast<long double>(timestamp.timescale));
+    }
+    return frame;
+}
+
 } // namespace
 
 namespace macrdp {
@@ -326,11 +613,29 @@ std::pair<std::size_t, std::size_t> output_size(
     didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     ofType:(SCStreamOutputType)type {
     (void)stream;
-    if (type != SCStreamOutputTypeScreen || sampleBuffer == nullptr) {
+    if (sampleBuffer == nullptr) {
         return;
     }
 
     const auto state = state_;
+    if (type == SCStreamOutputTypeAudio) {
+        auto audio = copy_audio_sample_buffer(sampleBuffer);
+        if (!audio.has_value()) {
+            return;
+        }
+        std::lock_guard lock(state->mutex);
+        if (state->accepting_frames) {
+            // The audio consumer runs independently from video and keeps the
+            // newest block only, so audio backpressure cannot stall SCK.
+            state->latest_audio = std::move(*audio);
+        }
+        state->condition.notify_one();
+        return;
+    }
+    if (type != SCStreamOutputTypeScreen) {
+        return;
+    }
+
     macrdp::Frame frame;
     std::vector<macrdp::FrameRect> dropped_dirty_rects;
     std::uint32_t dropped_width = 0;
@@ -417,6 +722,7 @@ struct DisplayCapture::Impl {
     [[nodiscard]] bool start();
     [[nodiscard]] bool start_locked();
     [[nodiscard]] std::optional<Frame> next_frame(std::chrono::milliseconds timeout);
+    [[nodiscard]] std::optional<AudioFrame> next_audio(std::chrono::milliseconds timeout);
     void recycle_frame(Frame frame) noexcept;
     [[nodiscard]] bool reconfigure(DisplayCaptureOptions next_options);
     void stop() noexcept;
@@ -427,6 +733,7 @@ struct DisplayCapture::Impl {
     std::mutex lifecycle_mutex;
     SCStream* stream = nil;
     MacCaptureOutput* output = nil;
+    bool audio_output_registered = false;
 };
 
 namespace {
@@ -443,7 +750,7 @@ void set_capture_error(
     state->condition.notify_all();
 }
 
-void stop_stream(SCStream* stream, MacCaptureOutput* output) {
+void stop_stream(SCStream* stream, MacCaptureOutput* output, bool audio_registered) {
     if (stream == nil) {
         return;
     }
@@ -455,6 +762,9 @@ void stop_stream(SCStream* stream, MacCaptureOutput* output) {
     (void)waiter->wait();
 
     if (output != nil) {
+        if (audio_registered) {
+            [stream removeStreamOutput:output type:SCStreamOutputTypeAudio error:nil];
+        }
         [stream removeStreamOutput:output type:SCStreamOutputTypeScreen error:nil];
     }
 }
@@ -468,6 +778,7 @@ bool DisplayCapture::Impl::start_locked() {
             recycle_frame_locked(*state, std::move(*state->latest_frame));
         }
         state->latest_frame.reset();
+        state->latest_audio.reset();
         state->error.clear();
         state->accepting_frames = false;
         state->stopped = false;
@@ -478,6 +789,7 @@ bool DisplayCapture::Impl::start_locked() {
     auto waiter = std::make_shared<CompletionWaiter>();
     __block SCStream* new_stream = nil;
     __block MacCaptureOutput* new_output = nil;
+    __block bool audio_registered = false;
 
     [SCShareableContent getShareableContentExcludingDesktopWindows:NO
         onScreenWindowsOnly:YES
@@ -526,7 +838,10 @@ bool DisplayCapture::Impl::start_locked() {
                     std::uint32_t{1},
                     std::uint32_t{60})));
             configuration.showsCursor = capture_options.show_cursor;
-            configuration.capturesAudio = NO;
+            configuration.capturesAudio = YES;
+            configuration.sampleRate = 48000;
+            configuration.channelCount = 2;
+            configuration.excludesCurrentProcessAudio = YES;
             configuration.queueDepth = 2;
             configuration.preservesAspectRatio = YES;
             configuration.scalesToFit = YES;
@@ -550,9 +865,26 @@ bool DisplayCapture::Impl::start_locked() {
                 return;
             }
 
+            NSError* audio_add_error = nil;
+            dispatch_queue_t audio_queue = dispatch_queue_create(
+                "com.macrdp.cpp.audio-capture",
+                DISPATCH_QUEUE_SERIAL);
+            if ([new_stream addStreamOutput:new_output
+                type:SCStreamOutputTypeAudio
+                sampleHandlerQueue:audio_queue
+                error:&audio_add_error]) {
+                audio_registered = true;
+            }
+
             {
                 std::lock_guard lock(state_for_callback->mutex);
                 state_for_callback->accepting_frames = true;
+            }
+
+            if (!audio_registered && audio_add_error != nil) {
+                // Screen capture remains useful when the system has no audio
+                // source or refuses audio output; RDPSND will simply stay idle.
+                NSLog(@"macrdp: audio capture unavailable: %@", audio_add_error);
             }
 
             [new_stream startCaptureWithCompletionHandler:^(NSError* start_error) {
@@ -564,7 +896,7 @@ bool DisplayCapture::Impl::start_locked() {
     const bool started = waiter->wait();
     if (!started) {
         if (new_stream != nil) {
-            stop_stream(new_stream, new_output);
+            stop_stream(new_stream, new_output, audio_registered);
         }
         {
             std::lock_guard lock(state->mutex);
@@ -580,6 +912,7 @@ bool DisplayCapture::Impl::start_locked() {
 
     stream = new_stream;
     output = new_output;
+    audio_output_registered = audio_registered;
     return true;
 }
 
@@ -600,9 +933,10 @@ bool DisplayCapture::Impl::reconfigure(DisplayCaptureOptions next_options) {
             state->stopped = true;
         }
         state->condition.notify_all();
-        stop_stream(stream, output);
+        stop_stream(stream, output, audio_output_registered);
         stream = nil;
         output = nil;
+        audio_output_registered = false;
     }
     options = next_options;
     return start_locked();
@@ -623,6 +957,24 @@ std::optional<Frame> DisplayCapture::Impl::next_frame(
 
     Frame frame = std::move(*state->latest_frame);
     state->latest_frame.reset();
+    return frame;
+}
+
+std::optional<AudioFrame> DisplayCapture::Impl::next_audio(
+    std::chrono::milliseconds timeout) {
+    std::unique_lock lock(state->mutex);
+    const auto ready = [this] {
+        return state->latest_audio.has_value() || state->stopped;
+    };
+    if (!state->condition.wait_for(lock, timeout, ready)) {
+        return std::nullopt;
+    }
+    if (!state->latest_audio.has_value()) {
+        return std::nullopt;
+    }
+
+    AudioFrame frame = std::move(*state->latest_audio);
+    state->latest_audio.reset();
     return frame;
 }
 
@@ -648,9 +1000,10 @@ void DisplayCapture::Impl::stop() noexcept {
     state->condition.notify_all();
 
     if (stream != nil) {
-        stop_stream(stream, output);
+        stop_stream(stream, output, audio_output_registered);
         stream = nil;
         output = nil;
+        audio_output_registered = false;
     }
 }
 
@@ -674,6 +1027,10 @@ bool DisplayCapture::start() {
 
 std::optional<Frame> DisplayCapture::next_frame(std::chrono::milliseconds timeout) {
     return impl_->next_frame(timeout);
+}
+
+std::optional<AudioFrame> DisplayCapture::next_audio(std::chrono::milliseconds timeout) {
+    return impl_->next_audio(timeout);
 }
 
 void DisplayCapture::recycle_frame(Frame frame) noexcept {

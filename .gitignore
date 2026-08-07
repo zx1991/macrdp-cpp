@@ -3,4 +3,7 @@
 /capture.ppm
 /capture.h264
 /encoder-test.h264
+/macrdp.sam
+/macrdp-dist/
+/macrdp-loopback-*.log
 .DS_Store

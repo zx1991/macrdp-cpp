@@ -18,6 +18,7 @@
 #include <atomic>
 #include <chrono>
 #include <cinttypes>
+#include <cmath>
 #include <condition_variable>
 #include <cstdint>
 #include <cstring>
@@ -106,6 +107,7 @@ struct mac_shadow_subsystem {
     std::unique_ptr<macrdp::DisplayCapture> capture;
     std::thread capture_thread;
     std::thread publish_thread;
+    std::thread audio_thread;
     std::atomic_bool stop_requested{false};
     std::mutex lifecycle_mutex;
     std::mutex input_mutex;
@@ -151,7 +153,12 @@ struct mac_shadow_subsystem {
     std::atomic<std::uint64_t> surface_copy_time_us_max{0};
     std::atomic<std::uint64_t> publish_wait_time_us_total{0};
     std::atomic<std::uint64_t> publish_wait_time_us_max{0};
+    std::atomic<std::uint64_t> audio_captured_frames{0};
+    std::atomic<std::uint64_t> audio_published_chunks{0};
+    std::atomic<std::uint64_t> audio_delivered_clients{0};
+    std::atomic<std::uint64_t> audio_dropped_frames{0};
     std::chrono::steady_clock::time_point last_pipeline_log{};
+    std::chrono::steady_clock::time_point last_audio_log{};
     std::atomic<std::uint64_t> input_synchronize_events{0};
     std::atomic<std::uint64_t> input_keyboard_events{0};
     std::atomic<std::uint64_t> input_unicode_events{0};
@@ -1556,6 +1563,173 @@ void publish_loop(MacShadowSubsystem* subsystem) {
     }
 }
 
+// Keep this format alive for the lifetime of the process. The FreeRDP shadow
+// audio message stores a pointer to the source format after processing it.
+AUDIO_FORMAT g_macrdp_pcm_audio_format = {
+    WAVE_FORMAT_PCM,
+    2,
+    48'000,
+    192'000,
+    4,
+    16,
+    0,
+    nullptr,
+};
+
+void free_audio_samples_message(UINT32, SHADOW_MSG_OUT* message) {
+    auto* audio_message = reinterpret_cast<SHADOW_MSG_OUT_AUDIO_OUT_SAMPLES*>(message);
+    if (audio_message == nullptr) {
+        return;
+    }
+    std::free(audio_message->buf);
+    std::free(audio_message);
+}
+
+int broadcast_audio_samples(
+    MacShadowSubsystem* subsystem,
+    const std::vector<std::int16_t>& pcm,
+    UINT16 timestamp) {
+    if (subsystem == nullptr || subsystem->common.server == nullptr
+        || pcm.empty() || pcm.size() % g_macrdp_pcm_audio_format.nChannels != 0
+        || pcm.size() > std::numeric_limits<std::size_t>::max() / sizeof(pcm[0])) {
+        return 0;
+    }
+
+    auto* audio_message = static_cast<SHADOW_MSG_OUT_AUDIO_OUT_SAMPLES*>(
+        std::calloc(1, sizeof(SHADOW_MSG_OUT_AUDIO_OUT_SAMPLES)));
+    if (audio_message == nullptr) {
+        return 0;
+    }
+    const auto byte_size = pcm.size() * sizeof(pcm[0]);
+    audio_message->buf = std::malloc(byte_size);
+    if (audio_message->buf == nullptr) {
+        std::free(audio_message);
+        return 0;
+    }
+
+    audio_message->common.Free = free_audio_samples_message;
+    audio_message->audio_format = &g_macrdp_pcm_audio_format;
+    audio_message->nFrames = pcm.size() / g_macrdp_pcm_audio_format.nChannels;
+    audio_message->wTimestamp = timestamp;
+    std::memcpy(audio_message->buf, pcm.data(), byte_size);
+
+    const int delivered = shadow_client_boardcast_msg(
+        subsystem->common.server,
+        nullptr,
+        SHADOW_MSG_OUT_AUDIO_OUT_SAMPLES_ID,
+        &audio_message->common,
+        nullptr);
+    subsystem->audio_delivered_clients.fetch_add(
+        delivered > 0 ? static_cast<std::uint64_t>(delivered) : 0,
+        std::memory_order_relaxed);
+    return delivered;
+}
+
+void audio_loop(MacShadowSubsystem* subsystem) {
+    constexpr std::uint32_t sample_rate = 48'000;
+    constexpr std::uint16_t channels = 2;
+    constexpr std::size_t chunk_frames = 960; // 20 ms at 48 kHz.
+    constexpr std::size_t chunk_samples = chunk_frames * channels;
+    constexpr std::size_t max_pending_samples = chunk_samples * 4;
+    constexpr double pi = 3.14159265358979323846;
+    constexpr double test_tone_frequency = 440.0;
+    constexpr double test_tone_amplitude = 0.20;
+
+    const char* test_tone_value = std::getenv("MACRDP_AUDIO_TEST_TONE");
+    const bool test_tone_enabled = test_tone_value != nullptr
+        && *test_tone_value != '\0'
+        && *test_tone_value != '0'
+        && *test_tone_value != 'n'
+        && *test_tone_value != 'N';
+    if (test_tone_enabled) {
+        WLog_INFO(TAG, "Audio test tone enabled (440Hz, 48kHz, stereo)");
+    }
+
+    std::deque<std::int16_t> pending;
+    std::uint64_t timestamp_ms = 0;
+    std::uint64_t test_tone_frame = 0;
+    while (!subsystem->stop_requested.load(std::memory_order_acquire)) {
+        std::optional<macrdp::AudioFrame> audio;
+        if (test_tone_enabled) {
+            macrdp::AudioFrame frame;
+            frame.sample_rate = sample_rate;
+            frame.channels = channels;
+            frame.pcm.resize(chunk_samples);
+            for (std::size_t index = 0; index < chunk_frames; ++index) {
+                const double phase = static_cast<double>(test_tone_frame + index)
+                    * test_tone_frequency * 2.0 * pi / static_cast<double>(sample_rate);
+                const auto sample = static_cast<std::int16_t>(
+                    std::sin(phase) * test_tone_amplitude * 32767.0);
+                frame.pcm[index * channels] = sample;
+                frame.pcm[index * channels + 1] = sample;
+            }
+            test_tone_frame += chunk_frames;
+            audio = std::move(frame);
+            std::this_thread::sleep_for(std::chrono::milliseconds{20});
+        } else {
+            audio = subsystem->capture->next_audio(std::chrono::milliseconds{250});
+        }
+        if (!audio.has_value()) {
+            continue;
+        }
+        if (!audio->valid() || audio->sample_rate != sample_rate
+            || audio->channels != channels) {
+            subsystem->audio_dropped_frames.fetch_add(
+                audio->frames(),
+                std::memory_order_relaxed);
+            continue;
+        }
+
+        subsystem->audio_captured_frames.fetch_add(
+            audio->frames(),
+            std::memory_order_relaxed);
+        pending.insert(pending.end(), audio->pcm.begin(), audio->pcm.end());
+        while (pending.size() > max_pending_samples) {
+            pending.pop_front();
+            if (pending.size() > max_pending_samples) {
+                pending.pop_front();
+            }
+            subsystem->audio_dropped_frames.fetch_add(
+                1,
+                std::memory_order_relaxed);
+        }
+
+        while (pending.size() >= chunk_samples
+               && !subsystem->stop_requested.load(std::memory_order_acquire)) {
+            std::vector<std::int16_t> chunk;
+            chunk.reserve(chunk_samples);
+            for (std::size_t index = 0; index < chunk_samples; ++index) {
+                chunk.push_back(pending.front());
+                pending.pop_front();
+            }
+            (void)broadcast_audio_samples(
+                subsystem,
+                chunk,
+                static_cast<UINT16>(timestamp_ms & UINT16_MAX));
+            timestamp_ms += (chunk_frames * 1000U) / sample_rate;
+            subsystem->audio_published_chunks.fetch_add(
+                1,
+                std::memory_order_relaxed);
+        }
+
+        const auto now = std::chrono::steady_clock::now();
+        if (subsystem->last_audio_log.time_since_epoch().count() == 0
+            || now - subsystem->last_audio_log >= std::chrono::seconds{5}) {
+            WLog_INFO(
+                TAG,
+                "Audio pipeline: captured_frames=%" PRIu64
+                " published_chunks=%" PRIu64
+                " delivered_clients=%" PRIu64
+                " dropped_frames=%" PRIu64,
+                subsystem->audio_captured_frames.load(std::memory_order_relaxed),
+                subsystem->audio_published_chunks.load(std::memory_order_relaxed),
+                subsystem->audio_delivered_clients.load(std::memory_order_relaxed),
+                subsystem->audio_dropped_frames.load(std::memory_order_relaxed));
+            subsystem->last_audio_log = now;
+        }
+    }
+}
+
 int mac_shadow_subsystem_init(rdpShadowSubsystem* base) {
     auto* subsystem = reinterpret_cast<MacShadowSubsystem*>(base);
     if (subsystem == nullptr) {
@@ -1622,7 +1796,12 @@ int mac_shadow_subsystem_start(rdpShadowSubsystem* base) {
     subsystem->surface_copy_time_us_max.store(0, std::memory_order_relaxed);
     subsystem->publish_wait_time_us_total.store(0, std::memory_order_relaxed);
     subsystem->publish_wait_time_us_max.store(0, std::memory_order_relaxed);
+    subsystem->audio_captured_frames.store(0, std::memory_order_relaxed);
+    subsystem->audio_published_chunks.store(0, std::memory_order_relaxed);
+    subsystem->audio_delivered_clients.store(0, std::memory_order_relaxed);
+    subsystem->audio_dropped_frames.store(0, std::memory_order_relaxed);
     subsystem->last_pipeline_log = {};
+    subsystem->last_audio_log = {};
     {
         std::lock_guard input_lock(subsystem->input_queue_mutex);
         subsystem->input_queue.clear();
@@ -1636,6 +1815,7 @@ int mac_shadow_subsystem_start(rdpShadowSubsystem* base) {
         subsystem->input_thread = std::thread(input_loop, subsystem);
         subsystem->publish_thread = std::thread(publish_loop, subsystem);
         subsystem->capture_thread = std::thread(capture_loop, subsystem);
+        subsystem->audio_thread = std::thread(audio_loop, subsystem);
     } catch (...) {
         subsystem->stop_requested.store(true);
         subsystem->input_stop_requested.store(true);
@@ -1645,6 +1825,9 @@ int mac_shadow_subsystem_start(rdpShadowSubsystem* base) {
         subsystem->input_queue_space_condition.notify_all();
         if (subsystem->capture_thread.joinable()) {
             subsystem->capture_thread.join();
+        }
+        if (subsystem->audio_thread.joinable()) {
+            subsystem->audio_thread.join();
         }
         if (subsystem->publish_thread.joinable()) {
             subsystem->publish_thread.join();
@@ -1679,6 +1862,9 @@ int mac_shadow_subsystem_stop(rdpShadowSubsystem* base) {
     subsystem->pending_frame_condition.notify_all();
     if (subsystem->capture_thread.joinable()) {
         subsystem->capture_thread.join();
+    }
+    if (subsystem->audio_thread.joinable()) {
+        subsystem->audio_thread.join();
     }
     if (subsystem->publish_thread.joinable()) {
         subsystem->publish_thread.join();

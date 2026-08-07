@@ -6,6 +6,7 @@
 #include <optional>
 #include <string>
 #include <utility>
+#include <vector>
 
 #include "macrdp/frame.hpp"
 
@@ -17,6 +18,25 @@ struct DisplayCaptureOptions {
     std::uint32_t max_height = 0;
     std::uint32_t frame_rate = 30;
     bool show_cursor = false;
+};
+
+// ScreenCaptureKit audio normalized to interleaved signed 16-bit PCM. The
+// capture implementation requests 48 kHz stereo and resamples unexpected
+// linear-PCM input before publishing it.
+struct AudioFrame {
+    std::uint32_t sample_rate = 0;
+    std::uint16_t channels = 0;
+    std::uint64_t timestamp_us = 0;
+    std::vector<std::int16_t> pcm;
+
+    [[nodiscard]] bool valid() const noexcept {
+        return sample_rate > 0 && channels > 0 && !pcm.empty()
+            && pcm.size() % channels == 0;
+    }
+
+    [[nodiscard]] std::size_t frames() const noexcept {
+        return channels == 0 ? 0 : pcm.size() / channels;
+    }
 };
 
 // Return the native display size reduced to fit both optional limits while
@@ -47,6 +67,11 @@ public:
     // Returns the newest available frame. Older pending frames are discarded
     // deliberately to keep capture latency bounded.
     [[nodiscard]] std::optional<Frame> next_frame(
+        std::chrono::milliseconds timeout = std::chrono::milliseconds{1000});
+
+    // Returns the newest normalized audio block. Audio is intentionally kept
+    // on a separate bounded path so a slow RDP client cannot stall capture.
+    [[nodiscard]] std::optional<AudioFrame> next_audio(
         std::chrono::milliseconds timeout = std::chrono::milliseconds{1000});
 
     // Returns a consumed frame's allocated pixel storage to the capture

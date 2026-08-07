@@ -1,8 +1,17 @@
 # macrdp-cpp
 
+[![macOS build](https://github.com/zx1991/macrdp-cpp/actions/workflows/macos.yml/badge.svg)](https://github.com/zx1991/macrdp-cpp/actions/workflows/macos.yml)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+
 An experimental C++/Objective-C++ implementation of the macOS remote desktop
 building blocks. This is intentionally separate from the existing Rust
 implementation in `../macrdp`.
+
+This repository is an active engineering project, not a production-ready
+remote desktop distribution. The server currently targets a logged-in macOS
+session, one main display, and a Windows `mstsc` client. Expect incomplete
+features and platform-specific limitations; see the [roadmap](docs/roadmap.md)
+before deploying it beyond a trusted test network.
 
 ## Current state
 
@@ -27,9 +36,9 @@ disconnecting one client releases only the keys and buttons still owned by that
 client. Pointer-position updates are sent to the other connected RDP clients,
 so the client that generated the input event does not receive a redundant
 echo. A stopped ScreenCaptureKit stream is restarted with bounded backoff
-while the server is running. AVC444 remains available for clients that need higher chroma
-fidelity; it uses the FFmpeg path because the direct bridge currently accepts
-I420/AVC420 input.
+while the server is running. AVC444 remains available for clients that need
+higher chroma fidelity; it uses the FFmpeg path because the direct bridge
+currently accepts I420/AVC420 input.
 
 The server keeps its configuration root private and only changes permissions on
 the root, the FreeRDP `shadow` directory, `shadow.crt`, `shadow.key`, and the
@@ -293,21 +302,32 @@ and a 500 ms outage every 3 seconds), and `bad` (150 ms delay, 100 ms jitter,
 256 Kbps, and a 1 second outage every 4 seconds). The bandwidth is applied
 independently in each direction. The `wifi` classic path gets a longer default
 window so the test checks eventual delivery under low bandwidth; the `bad`
-profile intentionally runs the GFX path only. Frame thresholds are
-mode-specific so a low-bandwidth test checks delivery and recovery without
+profile intentionally runs the GFX path only and uses a 30-second window because
+the first full-screen keyframe can take more than 20 seconds at 256 Kbps. Frame
+thresholds are mode-specific so a low-bandwidth test checks delivery and recovery without
 requiring the same frame rate as a direct connection. An outage pauses
 forwarding without discarding TCP bytes, so it models a stalled link and
 recovery rather than packet loss or a dropped connection.
+
+The loopback test uses the logged-in user's macOS general pasteboard for its
+clipboard assertions. Other clipboard managers or desktop applications can
+change that shared pasteboard; retain the test artifacts and rerun before
+diagnosing an isolated clipboard mismatch as a transport regression.
 
 ## Layout
 
 - `include/macrdp/`: C++ interfaces and data types; no Objective-C types.
 - `src/`: portable C++ application logic.
 - `src/macos/`: Objective-C++ adapters for Apple frameworks.
+- `tools/`: loopback client, TCP network shaper, and smoke-test scripts.
+- `scripts/`: packaging and LaunchAgent helpers.
+- `patches/`: the version-pinned FreeRDP adaptation patch.
+- `docs/`: architecture, testing, and roadmap notes.
+- `.github/`: CI, issue templates, and pull request guidance.
 - `CMakeLists.txt`: manages C, C++, Objective-C, Objective-C++, FreeRDP, and
   Apple framework dependencies.
 
-## Remaining work
+## Roadmap and known limitations
 
 The local unit tests and loopback smoke test cover frame coalescing,
 display-size calculation, H.264, the asynchronous encoder worker, multi-client
@@ -329,6 +349,27 @@ requires a graphical macOS session and a Windows `mstsc` client is:
 5. Add Developer ID signing and notarization for distribution. The local
    package now carries its non-system runtime dependency closure, but it still
    includes the full FFmpeg dependency graph and needs a distribution identity.
+
+The broader project priorities are tracked in [docs/roadmap.md](docs/roadmap.md).
+
+## Contributing
+
+Start with [CONTRIBUTING.md](CONTRIBUTING.md). The architecture and test
+boundaries are documented in [docs/architecture.md](docs/architecture.md) and
+[docs/testing.md](docs/testing.md). Changes that affect the FreeRDP boundary
+must update the checked-in patch and its version assumptions together.
+
+## Security
+
+The server exposes remote control and should be treated as security-sensitive
+software. Read [SECURITY.md](SECURITY.md) before opening a listener outside a
+trusted network. Do not report an unpatched vulnerability in a public issue.
+
+## License
+
+The project-owned code and documentation are licensed under the Apache License
+2.0. See [LICENSE](LICENSE) and [NOTICE](NOTICE). FreeRDP is downloaded as a
+separate, pinned dependency and retains its own upstream notices and license.
 
 ## Encoder test
 

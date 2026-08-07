@@ -1996,6 +1996,60 @@
  #if defined(CHANNEL_AUDIN_SERVER)
  		audin_server_context* audin;
  #endif
+--- a/server/shadow/shadow_client.c
++++ b/server/shadow/shadow_client.c
+@@ -3078,6 +3078,7 @@
+ 	wMessage pointerPositionMsg = WINPR_C_ARRAY_INIT;
+ 	wMessage pointerAlphaMsg = WINPR_C_ARRAY_INIT;
+ 	wMessage audioVolumeMsg = WINPR_C_ARRAY_INIT;
++	wMessage audioSamplesMsg = WINPR_C_ARRAY_INIT;
+ 	HANDLE ChannelEvent = nullptr;
+ 	HANDLE H264WorkerEvent = nullptr;
+ 	void* UpdateSubscriber = nullptr;
+@@ -3382,6 +3382,8 @@
+ 			pointerAlphaMsg.Free = nullptr;
+ 			audioVolumeMsg.id = 0;
+ 			audioVolumeMsg.Free = nullptr;
++			audioSamplesMsg.id = 0;
++			audioSamplesMsg.Free = nullptr;
+ 
+ 			size_t messageBudget = 64;
+ 			/* MACRDP_MESSAGE_BUDGET */
+@@ -3412,6 +3415,13 @@
+ 						/* Abandon previous message */
+ 						shadow_client_free_queued_message(&audioVolumeMsg);
+ 						audioVolumeMsg = message;
++						break;
++
++					case SHADOW_MSG_OUT_AUDIO_OUT_SAMPLES_ID:
++						/* MACRDP_AUDIO_MESSAGE_COALESCING */
++						/* Audio is real-time; discard older samples when this client is behind. */
++						shadow_client_free_queued_message(&audioSamplesMsg);
++						audioSamplesMsg = message;
+ 						break;
+ 
+ 					default:
+@@ -3425,6 +3435,7 @@
+ 				shadow_client_free_queued_message(&pointerPositionMsg);
+ 				shadow_client_free_queued_message(&pointerAlphaMsg);
+ 				shadow_client_free_queued_message(&audioVolumeMsg);
++				shadow_client_free_queued_message(&audioSamplesMsg);
+ 				goto fail;
+ 			}
+ 			else
+@@ -3447,6 +3458,12 @@
+ 					if (!shadow_client_subsystem_process_message(client, &audioVolumeMsg))
+ 						goto fail;
+ 				}
++
++				if (audioSamplesMsg.id)
++				{
++					if (!shadow_client_subsystem_process_message(client, &audioSamplesMsg))
++						goto fail;
++				}
+ 			}
+ 		}
+ 	}
 --- a/server/shadow/shadow_channels.c
 +++ b/server/shadow/shadow_channels.c
 @@ -18,12 +18,20 @@

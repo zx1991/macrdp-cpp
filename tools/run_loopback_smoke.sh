@@ -14,6 +14,8 @@ proxy=${MACRDP_LOOPBACK_PROXY:-/tmp/macrdp-loopback-proxy}
 proxy_port=${MACRDP_LOOPBACK_PROXY_PORT:-3391}
 keep_temp=${MACRDP_LOOPBACK_KEEP_TEMP:-0}
 client_log_level=${MACRDP_LOOPBACK_CLIENT_LOG_LEVEL:-WARN}
+server_log_level=${MACRDP_LOOPBACK_SERVER_LOG_LEVEL:-DEBUG}
+synthetic_audio=${MACRDP_LOOPBACK_SYNTHETIC_AUDIO:-1}
 clipboard_client_text=${MACRDP_LOOPBACK_CLIENT_CLIPBOARD_TEXT:-macrdp\ loopback\ client\ clipboard\ text}
 clipboard_server_text=${MACRDP_LOOPBACK_SERVER_CLIPBOARD_TEXT:-macrdp\ loopback\ server\ clipboard\ text}
 
@@ -83,7 +85,7 @@ case "$network_profile" in
 		profile_nogfx_min_frames=0
 		profile_max_interval_ms=30000
 		profile_first_frame_limit_ms=30000
-		profile_duration_ms=15000
+		profile_duration_ms=30000
 		profile_nogfx_duration_ms=15000
 		profile_run_nogfx=0
 		profile_delay_ms=150
@@ -317,20 +319,20 @@ start_server() {
 	fi
 
 	if [ "$case_name" = "nogfx" ]; then
-		MACRDP_PASSWORD="$password" "$server" \
+		MACRDP_AUDIO_TEST_TONE="$synthetic_audio" MACRDP_PASSWORD="$password" "$server" \
 			--port "$port" \
 			--bind-address 127.0.0.1 \
 			--no-gfx \
 			--user "$user" \
 			--config-dir "$case_dir/config" \
-			--log-level DEBUG >"$server_log" 2>&1 &
+			--log-level "$server_log_level" >"$server_log" 2>&1 &
 	else
-		MACRDP_PASSWORD="$password" "$server" \
+		MACRDP_AUDIO_TEST_TONE="$synthetic_audio" MACRDP_PASSWORD="$password" "$server" \
 			--port "$port" \
 			--bind-address 127.0.0.1 \
 			--user "$user" \
 			--config-dir "$case_dir/config" \
-			--log-level DEBUG >"$server_log" 2>&1 &
+			--log-level "$server_log_level" >"$server_log" 2>&1 &
 	fi
 	server_pid=$!
 	if ! wait_for_server "$case_name" "$server_log"; then
@@ -415,6 +417,17 @@ run_client() {
 	clipboard_client_responses=$(metric clipboard_client_data_responses_sent "$summary")
 	clipboard_matches=$(metric clipboard_matches "$summary")
 	clipboard_failures=$(metric clipboard_failures "$summary")
+	audio_server_formats=$(metric audio_server_formats "$summary")
+	audio_open_count=$(metric audio_open_count "$summary")
+	audio_play_callbacks=$(metric audio_play_callbacks "$summary")
+	audio_pcm_bytes=$(metric audio_pcm_bytes "$summary")
+	audio_first_play=$(metric audio_first_play_ms "$summary")
+	audio_max_interval=$(metric audio_max_interval_ms "$summary")
+	audio_non_pcm=$(metric audio_non_pcm_callbacks "$summary")
+	audio_format_tag=$(metric audio_format_tag "$summary")
+	audio_channels=$(metric audio_channels "$summary")
+	audio_sample_rate=$(metric audio_sample_rate "$summary")
+	audio_bits=$(metric audio_bits_per_sample "$summary")
 	gfx_frames=$(metric gfx_frames "$summary")
 	gfx_wire=$(metric gfx_wire_commands "$summary")
 	gfx_avc420=$(metric gfx_avc420 "$summary")
@@ -469,6 +482,22 @@ run_client() {
 	fi
 	if [ "${clipboard_failures:-0}" -ne 0 ]; then
 		fail "$case_name had $clipboard_failures clipboard verification failures"
+	fi
+	if [ "$synthetic_audio" != "0" ]; then
+		if [ "${audio_server_formats:-0}" -lt 1 ] \
+			|| [ "${audio_open_count:-0}" -lt 1 ] \
+			|| [ "${audio_play_callbacks:-0}" -lt 1 ] \
+			|| [ "${audio_pcm_bytes:-0}" -le 0 ]; then
+			fail "$case_name did not receive RDPSND audio"
+		fi
+		if [ "${audio_first_play:-0}" -le 0 ] || [ "${audio_first_play:-0}" -gt "$first_frame_limit_ms" ]; then
+			fail "$case_name first audio callback latency is ${audio_first_play:-missing} ms"
+		fi
+		if [ "${audio_non_pcm:-0}" -ne 0 ] || [ "${audio_format_tag:-0}" -ne 1 ] \
+			|| [ "${audio_channels:-0}" -ne 2 ] || [ "${audio_sample_rate:-0}" -ne 44100 ] \
+			|| [ "${audio_bits:-0}" -ne 16 ]; then
+			fail "$case_name negotiated unexpected audio format: tag=${audio_format_tag:-missing} channels=${audio_channels:-missing} rate=${audio_sample_rate:-missing} bits=${audio_bits:-missing} non_pcm=${audio_non_pcm:-missing}"
+		fi
 	fi
 	server_case=$case_name
 	if [ "$server_case" != "gfx" ] && [ "$server_case" != "nogfx" ]; then

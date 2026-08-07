@@ -1,0 +1,7 @@
+macrdp-cpp
+Copyright 2026 Xian Zhang
+
+This project uses FreeRDP 3.30.0 as an external build dependency. FreeRDP and
+its source files retain their own copyright notices and Apache License 2.0
+terms. FreeRDP is downloaded at configure time and is not committed to this
+repository.
