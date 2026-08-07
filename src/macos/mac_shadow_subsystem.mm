@@ -515,10 +515,10 @@ UINT16 release_flags_for_key_identity(std::uint16_t key_identity) {
     return flags;
 }
 
-void release_stale_modifier_state() {
+void release_stale_modifier_state(const char* reason) {
     // A previous server process can terminate after posting a modifier-down
     // event. The ownership ledger cannot survive that process boundary, so
-    // clear the eight RDP modifier identities when the input worker starts.
+    // clear only RDP modifiers that CoreGraphics still reports as held.
     struct Modifier {
         UINT16 flags;
         UINT8 code;
@@ -534,17 +534,31 @@ void release_stale_modifier_state() {
         {KBD_FLAGS_EXTENDED, 0x5C},       // right Windows/Command
     };
 
-    bool success = true;
+    unsigned attempted = 0;
+    unsigned skipped = 0;
+    unsigned failures = 0;
     for (const auto& modifier : modifiers) {
+        const auto key_code = mac_key_code(modifier.flags, modifier.code);
+        if (!key_code.has_value()
+            || !CGEventSourceKeyState(
+                kCGEventSourceStateHIDSystemState,
+                *key_code)) {
+            ++skipped;
+            continue;
+        }
+        ++attempted;
         if (!post_keyboard_event(
                 modifier.flags | KBD_FLAGS_RELEASE,
                 modifier.code)) {
-            success = false;
+            ++failures;
         }
     }
     WLog_INFO(TAG,
-              "Reset stale macOS modifier state: %s",
-              success ? "complete" : "partial");
+              "Reset stale macOS modifier state (%s): attempted=%u skipped=%u failures=%u",
+              reason == nullptr ? "unspecified" : reason,
+              attempted,
+              skipped,
+              failures);
 }
 
 bool synchronize_toggle_keys(UINT32 flags) {
@@ -1267,6 +1281,16 @@ void release_input_state_for_client(
     if (released.buttons[static_cast<std::size_t>(macrdp::InputButton::x2)]) {
         subsystem->x_button_2_down = false;
     }
+    const auto released_buttons = static_cast<unsigned>(std::count(
+        released.buttons.begin(),
+        released.buttons.end(),
+        true));
+    WLog_INFO(TAG,
+              "Input state reset: client=%" PRIu64 " keys=%zu unicode=%zu buttons=%u",
+              client_id,
+              released.keys.size(),
+              released.unicode.size(),
+              released_buttons);
     emit_release_state(subsystem, released);
 }
 
@@ -1280,6 +1304,15 @@ void release_input_state(MacShadowSubsystem* subsystem) {
     subsystem->other_button_down = false;
     subsystem->x_button_1_down = false;
     subsystem->x_button_2_down = false;
+    const auto released_buttons = static_cast<unsigned>(std::count(
+        released.buttons.begin(),
+        released.buttons.end(),
+        true));
+    WLog_INFO(TAG,
+              "Input state reset: client=all keys=%zu unicode=%zu buttons=%u",
+              released.keys.size(),
+              released.unicode.size(),
+              released_buttons);
     emit_release_state(subsystem, released);
 }
 
@@ -1339,7 +1372,7 @@ void log_input_pipeline(MacShadowSubsystem* subsystem, bool force) {
 }
 
 void input_loop(MacShadowSubsystem* subsystem) {
-    release_stale_modifier_state();
+    release_stale_modifier_state("input worker start");
     while (true) {
         InputEvent event;
         {
@@ -2083,6 +2116,7 @@ int mac_shadow_subsystem_stop(rdpShadowSubsystem* base) {
     subsystem->input_stop_requested.store(true);
     subsystem->input_queue_condition.notify_all();
     subsystem->input_queue_space_condition.notify_all();
+    const bool input_was_running = subsystem->input_thread.joinable();
     if (subsystem->capture != nullptr) {
         subsystem->capture->stop();
     }
@@ -2098,6 +2132,12 @@ int mac_shadow_subsystem_stop(rdpShadowSubsystem* base) {
     }
     if (subsystem->input_thread.joinable()) {
         subsystem->input_thread.join();
+    }
+    if (input_was_running) {
+        // The input worker releases everything in its ownership ledger. This
+        // second pass also clears a modifier left by an earlier process whose
+        // ledger no longer exists.
+        release_stale_modifier_state("subsystem stop");
     }
     {
         std::lock_guard frame_lock(subsystem->pending_frame_mutex);
