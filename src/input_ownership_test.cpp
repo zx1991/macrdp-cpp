@@ -77,6 +77,28 @@ int main() {
     ok = expect(ownership.release_key(2, 30), "last key owner was not released") && ok;
     ok = expect(!ownership.release_key(2, 30), "unknown key release was accepted") && ok;
 
+    ok = expect(ownership.acquire_key(3, 0x015B),
+                "extended key owner was not announced") && ok;
+    ok = expect(ownership.find_key(3, 0x015B) == 0x015B,
+                "exact key identity was not found") && ok;
+    ok = expect(ownership.find_key(3, 0x025B) == std::nullopt,
+                "mismatched extended identity unexpectedly matched exactly") && ok;
+    ok = expect(ownership.find_key_by_code(3, 0x5B) == 0x015B,
+                "key release fallback did not recover the scan-code identity") && ok;
+    ok = expect(ownership.release_key(3, 0x015B),
+                "extended key owner was not released") && ok;
+
+    ok = expect(ownership.acquire_key(4, 0x001D),
+                "left modifier owner was not announced") && ok;
+    ok = expect(ownership.acquire_key(4, 0x011D),
+                "right modifier owner was not announced") && ok;
+    ok = expect(ownership.find_key_by_code(4, 0x1D) == std::nullopt,
+                "ambiguous modifier release guessed an identity") && ok;
+    ok = expect(ownership.release_key(4, 0x001D),
+                "left modifier owner was not released") && ok;
+    ok = expect(ownership.release_key(4, 0x011D),
+                "right modifier owner was not released") && ok;
+
     ok = expect(ownership.acquire_button(1, macrdp::InputButton::left),
                 "first mouse owner was not announced") && ok;
     ok = expect(!ownership.acquire_button(2, macrdp::InputButton::left),

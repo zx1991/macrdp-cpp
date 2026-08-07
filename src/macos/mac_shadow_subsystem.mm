@@ -1,5 +1,6 @@
 #include <freerdp/config.h>
 
+#import <Carbon/Carbon.h>
 #import <CoreGraphics/CoreGraphics.h>
 
 #include <freerdp/input.h>
@@ -384,7 +385,56 @@ CGPoint display_point(const MacShadowSubsystem* subsystem, UINT16 x, UINT16 y) {
         bounds.origin.y + normalized_y * std::max(0.0, bounds.size.height - 1.0));
 }
 
-CGKeyCode mac_key_code(UINT16 flags, UINT8 code) {
+std::optional<CGKeyCode> mac_modifier_key_code(UINT16 flags, UINT8 code) {
+    const bool extended = (flags & KBD_FLAGS_EXTENDED) != 0;
+    const bool extended1 = (flags & KBD_FLAGS_EXTENDED1) != 0;
+
+    // WinPR's generic Apple table has no reliable distinct entry for every
+    // right-side modifier (notably right Control). These keys are physical
+    // modifiers on macOS, so map their RDP scan-code locations explicitly.
+    switch (code) {
+        case 0x1D: // left/right Control
+            if (!extended1) {
+                return extended ? kVK_RightControl : kVK_Control;
+            }
+            break;
+        case 0x2A: // left Shift
+            if (!extended1) {
+                return kVK_Shift;
+            }
+            break;
+        case 0x36: // right Shift (and a few clients' extended variant)
+            if (!extended1) {
+                return kVK_RightShift;
+            }
+            break;
+        case 0x38: // left/right Alt
+            if (!extended1) {
+                return extended ? kVK_RightOption : kVK_Option;
+            }
+            break;
+        case 0x5B: // left Windows logo
+            if (extended && !extended1) {
+                return kVK_Command;
+            }
+            break;
+        case 0x5C: // right Windows logo
+            if (extended && !extended1) {
+                return kVK_RightCommand;
+            }
+            break;
+        default:
+            break;
+    }
+    return std::nullopt;
+}
+
+std::optional<CGKeyCode> mac_key_code(UINT16 flags, UINT8 code) {
+    if (const auto modifier = mac_modifier_key_code(flags, code);
+        modifier.has_value()) {
+        return modifier;
+    }
+
     const bool extended = (flags & KBD_FLAGS_EXTENDED) != 0;
     UINT32 scan_code = code;
     if (extended) {
@@ -392,16 +442,32 @@ CGKeyCode mac_key_code(UINT16 flags, UINT8 code) {
     }
 
     UINT32 virtual_key = GetVirtualKeyCodeFromVirtualScanCode(scan_code, 4);
+    if (virtual_key == VK_NONE) {
+        return std::nullopt;
+    }
     if (extended) {
         virtual_key |= KBDEXT;
     }
-    return static_cast<CGKeyCode>(GetKeycodeFromVirtualKeyCode(
+    const auto key_code = static_cast<CGKeyCode>(GetKeycodeFromVirtualKeyCode(
         virtual_key,
         WINPR_KEYCODE_TYPE_APPLE));
+    // Apple keycode zero is the A key. A zero result for any other virtual
+    // key means WinPR has no usable Apple mapping, not that the client sent A.
+    if (key_code == 0 && virtual_key != VK_KEY_A) {
+        return std::nullopt;
+    }
+    return key_code;
 }
 
 bool post_keyboard_event(UINT16 flags, UINT8 code) {
-    const CGKeyCode key_code = mac_key_code(flags, code);
+    const auto key_code = mac_key_code(flags, code);
+    if (!key_code.has_value()) {
+        WLog_WARN(TAG, "Ignoring unmapped keyboard event flags=0x%04" PRIx16
+                       " code=0x%02" PRIx8,
+                  flags,
+                  code);
+        return false;
+    }
 
     CGEventSourceRef source = CGEventSourceCreate(kCGEventSourceStateHIDSystemState);
     if (source == nullptr) {
@@ -413,17 +479,34 @@ bool post_keyboard_event(UINT16 flags, UINT8 code) {
     const bool key_down = (flags & KBD_FLAGS_RELEASE) == 0;
     CGEventRef event = CGEventCreateKeyboardEvent(
         source,
-        static_cast<CGKeyCode>(key_code),
+        *key_code,
         key_down);
     if (event == nullptr) {
         CFRelease(source);
         return false;
     }
 
+    WLog_DBG(TAG, "Keyboard event flags=0x%04" PRIx16 " code=0x%02" PRIx8
+             " keycode=%u action=%s",
+             flags,
+             code,
+             static_cast<unsigned>(*key_code),
+             key_down ? "down" : "up");
     CGEventPost(kCGHIDEventTap, event);
     CFRelease(event);
     CFRelease(source);
     return true;
+}
+
+UINT16 release_flags_for_key_identity(std::uint16_t key_identity) {
+    UINT16 flags = KBD_FLAGS_RELEASE;
+    if ((key_identity & kExtendedKeyIdentityBit) != 0) {
+        flags |= KBD_FLAGS_EXTENDED;
+    }
+    if ((key_identity & kExtended1KeyIdentityBit) != 0) {
+        flags |= KBD_FLAGS_EXTENDED1;
+    }
+    return flags;
 }
 
 bool synchronize_toggle_keys(UINT32 flags) {
@@ -477,21 +560,45 @@ bool inject_keyboard_event(
         | ((flags & KBD_FLAGS_EXTENDED) != 0 ? kExtendedKeyIdentityBit : 0U)
         | ((flags & KBD_FLAGS_EXTENDED1) != 0 ? kExtended1KeyIdentityBit : 0U);
     const bool key_down = (flags & KBD_FLAGS_RELEASE) == 0;
+    std::uint16_t effective_key_identity = key_identity;
+    UINT16 effective_flags = flags;
+    if (!key_down) {
+        // Match a release to the identity recorded for the key-down. Some
+        // clients lose the E0/E1 marker while forwarding a key-up; dropping
+        // that event leaves Command, Control, or Alt physically held.
+        auto tracked_key = subsystem->input_ownership.find_key(client_id, key_identity);
+        if (!tracked_key.has_value()) {
+            tracked_key = subsystem->input_ownership.find_key_by_code(
+                client_id,
+                code);
+        }
+        if (!tracked_key.has_value()) {
+            WLog_DBG(TAG, "Ignoring unknown keyboard release client=%" PRIu64
+                     " flags=0x%04" PRIx16 " code=0x%02" PRIx8,
+                     client_id,
+                     flags,
+                     code);
+            return true;
+        }
+        effective_key_identity = *tracked_key;
+        effective_flags = release_flags_for_key_identity(effective_key_identity);
+    }
+
     const bool should_post = key_down
-        ? subsystem->input_ownership.acquire_key(client_id, key_identity)
-        : subsystem->input_ownership.release_key(client_id, key_identity);
+        ? subsystem->input_ownership.acquire_key(client_id, effective_key_identity)
+        : subsystem->input_ownership.release_key(client_id, effective_key_identity);
     if (!should_post) {
         return true;
     }
-    const bool posted = post_keyboard_event(flags, code);
+    const bool posted = post_keyboard_event(effective_flags, code);
     if (!posted) {
         // The ownership transition must describe the physical event state. If
         // CoreGraphics rejects the event, undo the transition so a later
         // retry is still allowed to post it.
         if (key_down) {
-            (void)subsystem->input_ownership.release_key(client_id, key_identity);
+            (void)subsystem->input_ownership.release_key(client_id, effective_key_identity);
         } else {
-            (void)subsystem->input_ownership.acquire_key(client_id, key_identity);
+            (void)subsystem->input_ownership.acquire_key(client_id, effective_key_identity);
         }
     }
     return posted;
@@ -1016,14 +1123,9 @@ void emit_release_state(
     }
 
     for (const auto key_identity : released.keys) {
-        UINT16 flags = KBD_FLAGS_RELEASE;
-        if ((key_identity & kExtendedKeyIdentityBit) != 0) {
-            flags |= KBD_FLAGS_EXTENDED;
-        }
-        if ((key_identity & kExtended1KeyIdentityBit) != 0) {
-            flags |= KBD_FLAGS_EXTENDED1;
-        }
-        (void)post_keyboard_event(flags, static_cast<UINT8>(key_identity & UINT8_MAX));
+        (void)post_keyboard_event(
+            release_flags_for_key_identity(key_identity),
+            static_cast<UINT8>(key_identity & UINT8_MAX));
     }
     for (const auto code : released.unicode) {
         (void)post_unicode_event(KBD_FLAGS_RELEASE, code);

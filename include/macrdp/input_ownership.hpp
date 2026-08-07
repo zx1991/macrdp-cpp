@@ -3,6 +3,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -45,6 +46,43 @@ public:
         }
         decrement_count(key_counts_, key);
         return key_counts_.find(key) == key_counts_.end();
+    }
+
+    // A few RDP clients have been observed to omit or change the extended
+    // prefix on a key-up. Keep the physical identity lookup separate from
+    // release_key so callers can recover the identity used by the key-down.
+    [[nodiscard]] std::optional<std::uint16_t> find_key(
+        InputClientId client,
+        std::uint16_t key) const {
+        const auto client_it = clients_.find(client);
+        if (client_it == clients_.end()
+            || client_it->second.keys.find(key) == client_it->second.keys.end()) {
+            return std::nullopt;
+        }
+        return key;
+    }
+
+    [[nodiscard]] std::optional<std::uint16_t> find_key_by_code(
+        InputClientId client,
+        std::uint8_t code) const {
+        const auto client_it = clients_.find(client);
+        if (client_it == clients_.end()) {
+            return std::nullopt;
+        }
+
+        std::optional<std::uint16_t> match;
+        for (const auto key : client_it->second.keys) {
+            if (static_cast<std::uint8_t>(key & 0x00FFU) != code) {
+                continue;
+            }
+            // The same scan-code byte can represent distinct keys (for
+            // example left and right Control). Do not guess in that case.
+            if (match.has_value()) {
+                return std::nullopt;
+            }
+            match = key;
+        }
+        return match;
     }
 
     [[nodiscard]] bool acquire_unicode(InputClientId client, std::uint16_t code) {

@@ -956,6 +956,19 @@ static BOOL loopback_send_extended_mouse_event(
 	return result;
 }
 
+static void loopback_send_keyboard_pair(loopback_context* loop, UINT32 scan_code)
+{
+	rdpInput* input = loop->common.context.input;
+	loopback_record_input_result(
+	    loop,
+	    &loop->input_keyboard_events_sent,
+	    freerdp_input_send_keyboard_event_ex(input, TRUE, FALSE, scan_code));
+	loopback_record_input_result(
+	    loop,
+	    &loop->input_keyboard_events_sent,
+	    freerdp_input_send_keyboard_event_ex(input, FALSE, FALSE, scan_code));
+}
+
 static void loopback_send_input(loopback_context* loop)
 {
 	rdpInput* input = loop->common.context.input;
@@ -968,7 +981,10 @@ static void loopback_send_input(loopback_context* loop)
 	loop->input_sequence++;
 	if (loop->input_sequence == 1)
 	{
-		const UINT8 harmless_key = RDP_SCANCODE_CODE(RDP_SCANCODE_F24);
+		// F17 has a stable Apple key-code mapping. F24 is not represented by
+		// the macOS keyboard map and would make this protocol smoke test report
+		// an expected unmapped-key failure.
+		const UINT8 harmless_key = RDP_SCANCODE_CODE(RDP_SCANCODE_F17);
 		const UINT16 wheel_positive = PTR_FLAGS_WHEEL | 0x0078;
 		const UINT16 wheel_negative = PTR_FLAGS_WHEEL | PTR_FLAGS_WHEEL_NEGATIVE | 0x0088;
 		const UINT16 horizontal_positive = PTR_FLAGS_HWHEEL | 0x0078;
@@ -989,6 +1005,28 @@ static void loopback_send_input(loopback_context* loop)
 		    loop,
 		    &loop->input_keyboard_events_sent,
 		    freerdp_input_send_keyboard_event(input, KBD_FLAGS_RELEASE, harmless_key));
+		// Exercise each modifier independently so a failed key-up cannot hide
+		// behind a combination that changes the foreground application's action.
+		loopback_send_keyboard_pair(loop, RDP_SCANCODE_LCONTROL);
+		loopback_send_keyboard_pair(loop, RDP_SCANCODE_RCONTROL);
+		loopback_send_keyboard_pair(loop, RDP_SCANCODE_LSHIFT);
+		loopback_send_keyboard_pair(loop, RDP_SCANCODE_RSHIFT);
+		loopback_send_keyboard_pair(loop, RDP_SCANCODE_LMENU);
+		loopback_send_keyboard_pair(loop, RDP_SCANCODE_RMENU);
+		loopback_send_keyboard_pair(loop, RDP_SCANCODE_LWIN);
+		loopback_send_keyboard_pair(loop, RDP_SCANCODE_RWIN);
+		// Also cover the recovery path for clients that omit E0 on key-up.
+		loopback_record_input_result(
+		    loop,
+		    &loop->input_keyboard_events_sent,
+		    freerdp_input_send_keyboard_event_ex(input, TRUE, FALSE, RDP_SCANCODE_LWIN));
+		loopback_record_input_result(
+		    loop,
+		    &loop->input_keyboard_events_sent,
+		    freerdp_input_send_keyboard_event(
+		        input,
+		        KBD_FLAGS_RELEASE,
+		        RDP_SCANCODE_CODE(RDP_SCANCODE_LWIN)));
 		// U+0000 exercises the Unicode input path without typing visible text
 		// into the foreground macOS application during this protocol test.
 		loopback_record_input_result(
