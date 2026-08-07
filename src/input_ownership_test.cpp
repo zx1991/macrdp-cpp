@@ -92,6 +92,9 @@ int main() {
                 "left modifier owner was not announced") && ok;
     ok = expect(ownership.acquire_key(4, 0x011D),
                 "right modifier owner was not announced") && ok;
+    const auto modifier_matches = ownership.find_keys_by_code(4, 0x1D);
+    ok = expect(modifier_matches.size() == 2,
+                "ambiguous modifier release candidates were not retained") && ok;
     ok = expect(ownership.find_key_by_code(4, 0x1D) == std::nullopt,
                 "ambiguous modifier release guessed an identity") && ok;
     ok = expect(ownership.release_key(4, 0x001D),

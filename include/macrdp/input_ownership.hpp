@@ -62,27 +62,32 @@ public:
         return key;
     }
 
-    [[nodiscard]] std::optional<std::uint16_t> find_key_by_code(
+    [[nodiscard]] std::vector<std::uint16_t> find_keys_by_code(
         InputClientId client,
         std::uint8_t code) const {
+        std::vector<std::uint16_t> matches;
         const auto client_it = clients_.find(client);
         if (client_it == clients_.end()) {
-            return std::nullopt;
+            return matches;
         }
 
-        std::optional<std::uint16_t> match;
         for (const auto key : client_it->second.keys) {
             if (static_cast<std::uint8_t>(key & 0x00FFU) != code) {
                 continue;
             }
-            // The same scan-code byte can represent distinct keys (for
-            // example left and right Control). Do not guess in that case.
-            if (match.has_value()) {
-                return std::nullopt;
-            }
-            match = key;
+            matches.push_back(key);
         }
-        return match;
+        return matches;
+    }
+
+    [[nodiscard]] std::optional<std::uint16_t> find_key_by_code(
+        InputClientId client,
+        std::uint8_t code) const {
+        const auto matches = find_keys_by_code(client, code);
+        // The same scan-code byte can represent distinct keys (for example
+        // left and right Control). Do not guess when the caller only needs a
+        // single identity.
+        return matches.size() == 1 ? std::optional{matches.front()} : std::nullopt;
     }
 
     [[nodiscard]] bool acquire_unicode(InputClientId client, std::uint16_t code) {

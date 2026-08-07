@@ -52,6 +52,12 @@ tools/run_loopback_smoke.sh
 The server still needs Screen Recording and Accessibility permission because
 the loopback test exercises the actual macOS capture and input paths.
 
+For an opt-in live keyboard check, set `MACRDP_LOOPBACK_PROBE_F=1`. The client
+then sends one ordinary `F` key-down/key-up pair to the active macOS
+application, so use it only when typing one `f` there is acceptable. The
+default smoke test keeps this disabled and validates the scan-code path through
+the server counters instead.
+
 ## Network profiles
 
 The optional C proxy shapes each TCP direction independently. It adds delay,

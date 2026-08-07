@@ -1658,13 +1658,14 @@ index 5aa3ab2..8494577 100644
  
  #if defined(CHANNEL_RDPGFX_SERVER)
  		HANDLE gfxevent = rdpgfx_server_get_event_handle(client->rdpgfx);
-@@ -2707,12 +3189,36 @@ static DWORD WINAPI shadow_client_thread(LPVOID arg)
+@@ -2707,12 +3189,37 @@ static DWORD WINAPI shadow_client_thread(LPVOID arg)
  			events[nCount++] = gfxevent;
  #endif
  
 -		status = WaitForMultipleObjects(nCount, events, FALSE, INFINITE);
 +		const DWORD waitTimeout = outputBlocked ? 16 : INFINITE;
 +		status = WaitForMultipleObjects(nCount, events, FALSE, waitTimeout);
++		/* MACRDP_PATCH_VERSION_20260807 */
 +		const BOOL peerEventReady =
 +			status >= WAIT_OBJECT_0 + 1
 +			&& status < WAIT_OBJECT_0 + 1 + peerHandleCount;

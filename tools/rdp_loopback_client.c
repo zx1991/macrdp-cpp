@@ -347,6 +347,12 @@ static DWORD env_event_delay_ms(void)
 	return (DWORD)milliseconds;
 }
 
+static BOOL env_keyboard_probe_enabled(void)
+{
+	const char* value = getenv("MACRDP_LOOPBACK_PROBE_F");
+	return value && *value && *value != '0' && *value != 'n' && *value != 'N';
+}
+
 static BOOL env_gfx_enabled(void)
 {
 	const char* value = getenv("MACRDP_LOOPBACK_GFX");
@@ -1027,6 +1033,14 @@ static void loopback_send_input(loopback_context* loop)
 		        input,
 		        KBD_FLAGS_RELEASE,
 		        RDP_SCANCODE_CODE(RDP_SCANCODE_LWIN)));
+		if (env_keyboard_probe_enabled())
+		{
+			// This opt-in probe exercises the ordinary F scan-code path. It is
+			// disabled by default because it intentionally types one character
+			// into the active macOS application during a live smoke test.
+			loopback_send_keyboard_pair(loop, RDP_SCANCODE_KEY_F);
+			WLog_INFO(TAG, "sent keyboard probe F");
+		}
 		// U+0000 exercises the Unicode input path without typing visible text
 		// into the foreground macOS application during this protocol test.
 		loopback_record_input_result(

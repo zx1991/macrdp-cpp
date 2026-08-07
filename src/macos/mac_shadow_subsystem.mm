@@ -509,6 +509,38 @@ UINT16 release_flags_for_key_identity(std::uint16_t key_identity) {
     return flags;
 }
 
+void release_stale_modifier_state() {
+    // A previous server process can terminate after posting a modifier-down
+    // event. The ownership ledger cannot survive that process boundary, so
+    // clear the eight RDP modifier identities when the input worker starts.
+    struct Modifier {
+        UINT16 flags;
+        UINT8 code;
+    };
+    constexpr Modifier modifiers[] = {
+        {0, 0x1D},       // left Control
+        {KBD_FLAGS_EXTENDED, 0x1D},       // right Control
+        {0, 0x2A},       // left Shift
+        {0, 0x36},       // right Shift
+        {0, 0x38},       // left Alt/Option
+        {KBD_FLAGS_EXTENDED, 0x38},       // right Alt/Option
+        {KBD_FLAGS_EXTENDED, 0x5B},       // left Windows/Command
+        {KBD_FLAGS_EXTENDED, 0x5C},       // right Windows/Command
+    };
+
+    bool success = true;
+    for (const auto& modifier : modifiers) {
+        if (!post_keyboard_event(
+                modifier.flags | KBD_FLAGS_RELEASE,
+                modifier.code)) {
+            success = false;
+        }
+    }
+    WLog_INFO(TAG,
+              "Reset stale macOS modifier state: %s",
+              success ? "complete" : "partial");
+}
+
 bool synchronize_toggle_keys(UINT32 flags) {
     const CGEventFlags current_flags =
         CGEventSourceFlagsState(kCGEventSourceStateHIDSystemState);
@@ -560,46 +592,69 @@ bool inject_keyboard_event(
         | ((flags & KBD_FLAGS_EXTENDED) != 0 ? kExtendedKeyIdentityBit : 0U)
         | ((flags & KBD_FLAGS_EXTENDED1) != 0 ? kExtended1KeyIdentityBit : 0U);
     const bool key_down = (flags & KBD_FLAGS_RELEASE) == 0;
-    std::uint16_t effective_key_identity = key_identity;
-    UINT16 effective_flags = flags;
     if (!key_down) {
         // Match a release to the identity recorded for the key-down. Some
         // clients lose the E0/E1 marker while forwarding a key-up; dropping
         // that event leaves Command, Control, or Alt physically held.
-        auto tracked_key = subsystem->input_ownership.find_key(client_id, key_identity);
-        if (!tracked_key.has_value()) {
-            tracked_key = subsystem->input_ownership.find_key_by_code(
+        std::vector<std::uint16_t> release_candidates;
+        if (const auto tracked_key = subsystem->input_ownership.find_key(
+                client_id,
+                key_identity);
+            tracked_key.has_value()) {
+            release_candidates.push_back(*tracked_key);
+        } else {
+            release_candidates = subsystem->input_ownership.find_keys_by_code(
                 client_id,
                 code);
         }
-        if (!tracked_key.has_value()) {
+
+        if (release_candidates.empty()) {
+            // The ledger may be empty after a server restart even though the
+            // old process left a platform key-down behind. Forward the
+            // release as a best-effort recovery signal instead of silently
+            // discarding it.
             WLog_DBG(TAG, "Ignoring unknown keyboard release client=%" PRIu64
                      " flags=0x%04" PRIx16 " code=0x%02" PRIx8,
                      client_id,
                      flags,
                      code);
-            return true;
+            return post_keyboard_event(flags | KBD_FLAGS_RELEASE, code);
         }
-        effective_key_identity = *tracked_key;
-        effective_flags = release_flags_for_key_identity(effective_key_identity);
+
+        // If the E0/E1 prefix is ambiguous, release every matching identity
+        // owned by this client. Releasing both sides is preferable to leaving
+        // one global modifier held indefinitely.
+        bool success = true;
+        for (const auto release_identity : release_candidates) {
+            if (!subsystem->input_ownership.release_key(client_id, release_identity)) {
+                continue;
+            }
+            const bool posted = post_keyboard_event(
+                release_flags_for_key_identity(release_identity),
+                code);
+            if (!posted) {
+                // Keep the ownership entry when the platform rejected the
+                // key-up. The next matching release or client reset can then
+                // retry the cleanup instead of losing the only recovery path.
+                (void)subsystem->input_ownership.acquire_key(client_id, release_identity);
+                success = false;
+            }
+        }
+        return success;
     }
 
-    const bool should_post = key_down
-        ? subsystem->input_ownership.acquire_key(client_id, effective_key_identity)
-        : subsystem->input_ownership.release_key(client_id, effective_key_identity);
+    const bool should_post = subsystem->input_ownership.acquire_key(
+        client_id,
+        key_identity);
     if (!should_post) {
         return true;
     }
-    const bool posted = post_keyboard_event(effective_flags, code);
+    const bool posted = post_keyboard_event(flags, code);
     if (!posted) {
         // The ownership transition must describe the physical event state. If
         // CoreGraphics rejects the event, undo the transition so a later
         // retry is still allowed to post it.
-        if (key_down) {
-            (void)subsystem->input_ownership.release_key(client_id, effective_key_identity);
-        } else {
-            (void)subsystem->input_ownership.acquire_key(client_id, effective_key_identity);
-        }
+        (void)subsystem->input_ownership.release_key(client_id, key_identity);
     }
     return posted;
 }
@@ -1221,6 +1276,7 @@ void log_input_pipeline(MacShadowSubsystem* subsystem, bool force) {
 }
 
 void input_loop(MacShadowSubsystem* subsystem) {
+    release_stale_modifier_state();
     while (true) {
         InputEvent event;
         {
