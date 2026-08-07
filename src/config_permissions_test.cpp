@@ -37,6 +37,8 @@ int main() {
         return 1;
     }
 
+    bool success = macrdp::restrict_config_paths(root) && has_mode(root, 0700);
+
     const auto shadow = root / "shadow";
     const auto unknown = root / "unrelated.txt";
     const auto unknown_shadow = shadow / "unrelated.txt";
@@ -44,7 +46,8 @@ int main() {
     const auto certificate = shadow / "shadow.crt";
     const auto private_key = shadow / "shadow.key";
 
-    bool success = std::filesystem::create_directory(shadow, error) && !error
+    success = success
+        && std::filesystem::create_directory(shadow, error) && !error
         && write_file(unknown)
         && write_file(unknown_shadow)
         && write_file(sam)

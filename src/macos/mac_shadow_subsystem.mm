@@ -138,6 +138,7 @@ struct mac_shadow_subsystem {
     std::uint32_t last_surface_width = 0;
     std::uint32_t last_surface_height = 0;
     std::chrono::steady_clock::time_point last_slow_frame_log{};
+    std::chrono::steady_clock::time_point last_input_pipeline_log{};
     std::atomic_bool force_full_frame{true};
     std::atomic<std::uint64_t> captured_frames{0};
     std::atomic<std::uint64_t> coalesced_frames{0};
@@ -151,6 +152,13 @@ struct mac_shadow_subsystem {
     std::atomic<std::uint64_t> publish_wait_time_us_total{0};
     std::atomic<std::uint64_t> publish_wait_time_us_max{0};
     std::chrono::steady_clock::time_point last_pipeline_log{};
+    std::atomic<std::uint64_t> input_synchronize_events{0};
+    std::atomic<std::uint64_t> input_keyboard_events{0};
+    std::atomic<std::uint64_t> input_unicode_events{0};
+    std::atomic<std::uint64_t> input_mouse_events{0};
+    std::atomic<std::uint64_t> input_wheel_events{0};
+    std::atomic<std::uint64_t> input_extended_mouse_events{0};
+    std::atomic<std::uint64_t> input_injection_failures{0};
 };
 
 using MacShadowSubsystem = struct mac_shadow_subsystem;
@@ -464,7 +472,18 @@ bool inject_keyboard_event(
     if (!should_post) {
         return true;
     }
-    return post_keyboard_event(flags, code);
+    const bool posted = post_keyboard_event(flags, code);
+    if (!posted) {
+        // The ownership transition must describe the physical event state. If
+        // CoreGraphics rejects the event, undo the transition so a later
+        // retry is still allowed to post it.
+        if (key_down) {
+            (void)subsystem->input_ownership.release_key(client_id, key_identity);
+        } else {
+            (void)subsystem->input_ownership.acquire_key(client_id, key_identity);
+        }
+    }
+    return posted;
 }
 
 bool post_unicode_event(UINT16 flags, UINT16 code) {
@@ -504,7 +523,15 @@ bool inject_unicode_event(
     if (!should_post) {
         return true;
     }
-    return post_unicode_event(flags, code);
+    const bool posted = post_unicode_event(flags, code);
+    if (!posted) {
+        if (key_down) {
+            (void)subsystem->input_ownership.release_unicode(client_id, code);
+        } else {
+            (void)subsystem->input_ownership.acquire_unicode(client_id, code);
+        }
+    }
+    return posted;
 }
 
 bool post_mouse_event(
@@ -656,6 +683,18 @@ bool inject_mouse_event(
         }
         const auto button_flags = static_cast<UINT16>(flags & ~PTR_FLAGS_MOVE);
         if (!post_mouse_event(subsystem, button_flags, x, y)) {
+            if (down) {
+                (void)subsystem->input_ownership.release_button(client_id, button);
+            } else {
+                (void)subsystem->input_ownership.acquire_button(client_id, button);
+            }
+            if (button == macrdp::InputButton::left) {
+                subsystem->left_button_down = !down;
+            } else if (button == macrdp::InputButton::right) {
+                subsystem->right_button_down = !down;
+            } else {
+                subsystem->other_button_down = !down;
+            }
             success = false;
         }
     }
@@ -731,7 +770,20 @@ bool inject_extended_mouse_event(
     } else {
         subsystem->x_button_2_down = down;
     }
-    return post_extended_mouse_event(subsystem, flags, x, y);
+    const bool posted = post_extended_mouse_event(subsystem, flags, x, y);
+    if (!posted) {
+        if (down) {
+            (void)subsystem->input_ownership.release_button(client_id, button);
+        } else {
+            (void)subsystem->input_ownership.acquire_button(client_id, button);
+        }
+        if (button_1) {
+            subsystem->x_button_1_down = !down;
+        } else {
+            subsystem->x_button_2_down = !down;
+        }
+    }
+    return posted;
 }
 
 bool is_coalescible_mouse_move(const InputEvent& event) {
@@ -790,11 +842,15 @@ bool queue_keyboard_event(
     macrdp::InputClientId client_id,
     UINT16 flags,
     UINT8 code) {
+    if (subsystem == nullptr) {
+        return false;
+    }
     InputEvent event;
     event.kind = InputEventKind::keyboard;
     event.client_id = client_id;
     event.flags = flags;
     event.code = code;
+    subsystem->input_keyboard_events.fetch_add(1, std::memory_order_relaxed);
     return enqueue_input_event(subsystem, event);
 }
 
@@ -803,11 +859,15 @@ bool queue_unicode_event(
     macrdp::InputClientId client_id,
     UINT16 flags,
     UINT16 code) {
+    if (subsystem == nullptr) {
+        return false;
+    }
     InputEvent event;
     event.kind = InputEventKind::unicode;
     event.client_id = client_id;
     event.flags = flags;
     event.code = code;
+    subsystem->input_unicode_events.fetch_add(1, std::memory_order_relaxed);
     return enqueue_input_event(subsystem, event);
 }
 
@@ -815,10 +875,14 @@ bool queue_synchronize_event(
     MacShadowSubsystem* subsystem,
     macrdp::InputClientId client_id,
     UINT32 flags) {
+    if (subsystem == nullptr) {
+        return false;
+    }
     InputEvent event;
     event.kind = InputEventKind::synchronize;
     event.client_id = client_id;
     event.synchronize_flags = flags;
+    subsystem->input_synchronize_events.fetch_add(1, std::memory_order_relaxed);
     return enqueue_input_event(subsystem, event);
 }
 
@@ -846,6 +910,10 @@ bool queue_mouse_event(
     event.flags = flags;
     event.x = x;
     event.y = y;
+    subsystem->input_mouse_events.fetch_add(1, std::memory_order_relaxed);
+    if ((flags & (PTR_FLAGS_WHEEL | PTR_FLAGS_HWHEEL)) != 0) {
+        subsystem->input_wheel_events.fetch_add(1, std::memory_order_relaxed);
+    }
     return enqueue_input_event(subsystem, event);
 }
 
@@ -873,6 +941,7 @@ bool queue_extended_mouse_event(
     event.flags = flags;
     event.x = x;
     event.y = y;
+    subsystem->input_extended_mouse_events.fetch_add(1, std::memory_order_relaxed);
     return enqueue_input_event(subsystem, event);
 }
 
@@ -990,6 +1059,33 @@ void release_input_state(MacShadowSubsystem* subsystem) {
     emit_release_state(subsystem, released);
 }
 
+void log_input_pipeline(MacShadowSubsystem* subsystem, bool force) {
+    if (subsystem == nullptr) {
+        return;
+    }
+
+    const auto now = std::chrono::steady_clock::now();
+    if (!force
+        && subsystem->last_input_pipeline_log
+                != std::chrono::steady_clock::time_point{}
+        && now - subsystem->last_input_pipeline_log < std::chrono::seconds(1)) {
+        return;
+    }
+    subsystem->last_input_pipeline_log = now;
+    WLog_INFO(
+        TAG,
+        "Input pipeline: synchronize=%" PRIu64 " keyboard=%" PRIu64
+        " unicode=%" PRIu64 " mouse=%" PRIu64 " wheel=%" PRIu64
+        " extended_mouse=%" PRIu64 " injection_failures=%" PRIu64,
+        subsystem->input_synchronize_events.load(std::memory_order_relaxed),
+        subsystem->input_keyboard_events.load(std::memory_order_relaxed),
+        subsystem->input_unicode_events.load(std::memory_order_relaxed),
+        subsystem->input_mouse_events.load(std::memory_order_relaxed),
+        subsystem->input_wheel_events.load(std::memory_order_relaxed),
+        subsystem->input_extended_mouse_events.load(std::memory_order_relaxed),
+        subsystem->input_injection_failures.load(std::memory_order_relaxed));
+}
+
 void input_loop(MacShadowSubsystem* subsystem) {
     while (true) {
         InputEvent event;
@@ -1040,10 +1136,13 @@ void input_loop(MacShadowSubsystem* subsystem) {
                 break;
         }
         if (!injected) {
+            subsystem->input_injection_failures.fetch_add(1, std::memory_order_relaxed);
             WLog_WARN(TAG, "Failed to inject queued macOS input event");
         }
+        log_input_pipeline(subsystem, false);
     }
     release_input_state(subsystem);
+    log_input_pipeline(subsystem, true);
 }
 
 bool copy_frame_to_surface(MacShadowSubsystem* subsystem, const macrdp::Frame& frame) {

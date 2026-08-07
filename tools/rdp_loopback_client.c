@@ -45,6 +45,10 @@ typedef struct
 	uint64_t gfx_avc420_count;
 	uint64_t gfx_avc444_count;
 	uint64_t input_clicks_sent;
+	uint64_t input_synchronize_events_sent;
+	uint64_t input_keyboard_events_sent;
+	uint64_t input_unicode_events_sent;
+	uint64_t input_wheel_events_sent;
 	uint64_t input_send_failures;
 	uint64_t gfx_first_frame_us;
 	uint64_t gfx_last_frame_us;
@@ -338,6 +342,16 @@ static int loopback_client_stop(rdpContext* context)
 	return 0;
 }
 
+static void loopback_record_input_result(
+    loopback_context* loop,
+    uint64_t* counter,
+    BOOL result)
+{
+	(*counter)++;
+	if (!result)
+		loop->input_send_failures++;
+}
+
 static void loopback_send_input(loopback_context* loop)
 {
 	rdpInput* input = loop->common.context.input;
@@ -348,6 +362,53 @@ static void loopback_send_input(loopback_context* loop)
 		return;
 
 	loop->input_sequence++;
+	if (loop->input_sequence == 1)
+	{
+		const UINT8 harmless_key = RDP_SCANCODE_CODE(RDP_SCANCODE_F24);
+		const UINT16 wheel_positive = PTR_FLAGS_WHEEL | 0x0078;
+		const UINT16 wheel_negative = PTR_FLAGS_WHEEL | PTR_FLAGS_WHEEL_NEGATIVE | 0x0088;
+		const UINT16 horizontal_positive = PTR_FLAGS_HWHEEL | 0x0078;
+		const UINT16 horizontal_negative = PTR_FLAGS_HWHEEL | PTR_FLAGS_WHEEL_NEGATIVE | 0x0088;
+
+		loopback_record_input_result(
+		    loop,
+		    &loop->input_synchronize_events_sent,
+		    freerdp_input_send_synchronize_event(input, 0));
+		loopback_record_input_result(
+		    loop,
+		    &loop->input_keyboard_events_sent,
+		    freerdp_input_send_keyboard_event(input, KBD_FLAGS_DOWN, harmless_key));
+		loopback_record_input_result(
+		    loop,
+		    &loop->input_keyboard_events_sent,
+		    freerdp_input_send_keyboard_event(input, KBD_FLAGS_RELEASE, harmless_key));
+		// U+0000 exercises the Unicode input path without typing visible text
+		// into the foreground macOS application during this protocol test.
+		loopback_record_input_result(
+		    loop,
+		    &loop->input_unicode_events_sent,
+		    freerdp_input_send_unicode_keyboard_event(input, 0, 0));
+		loopback_record_input_result(
+		    loop,
+		    &loop->input_unicode_events_sent,
+		    freerdp_input_send_unicode_keyboard_event(input, KBD_FLAGS_RELEASE, 0));
+		loopback_record_input_result(
+		    loop,
+		    &loop->input_wheel_events_sent,
+		    freerdp_input_send_mouse_event(input, wheel_positive, x, y));
+		loopback_record_input_result(
+		    loop,
+		    &loop->input_wheel_events_sent,
+		    freerdp_input_send_mouse_event(input, wheel_negative, x, y));
+		loopback_record_input_result(
+		    loop,
+		    &loop->input_wheel_events_sent,
+		    freerdp_input_send_mouse_event(input, horizontal_positive, x, y));
+		loopback_record_input_result(
+		    loop,
+		    &loop->input_wheel_events_sent,
+		    freerdp_input_send_mouse_event(input, horizontal_negative, x, y));
+	}
 	if (!freerdp_input_send_mouse_event(input, PTR_FLAGS_MOVE, x, y))
 		loop->input_send_failures++;
 	if (!freerdp_input_send_mouse_event(input, PTR_FLAGS_BUTTON1 | PTR_FLAGS_DOWN, x, y))
@@ -468,7 +529,12 @@ int main(int argc, char** argv)
 	printf("loopback summary: frames=%" PRIu64 " first_frame_ms=%" PRIu64
 	       " avg_interval_ms=%" PRIu64 " max_interval_ms=%" PRIu64
 	       " invalid_rects=%" PRIu64 " size=%" PRIu32 "x%" PRIu32
-	       " input_clicks_sent=%" PRIu64 " input_send_failures=%" PRIu64
+	       " input_clicks_sent=%" PRIu64
+	       " input_synchronize_events_sent=%" PRIu64
+	       " input_keyboard_events_sent=%" PRIu64
+	       " input_unicode_events_sent=%" PRIu64
+	       " input_wheel_events_sent=%" PRIu64
+	       " input_send_failures=%" PRIu64
 	       " gfx_frames=%" PRIu64 " gfx_first_frame_ms=%" PRIu64
 	       " gfx_avg_interval_ms=%" PRIu64 " gfx_max_interval_ms=%" PRIu64
 	       " gfx_wire_commands=%" PRIu64 " gfx_avc420=%" PRIu64
@@ -490,6 +556,10 @@ int main(int argc, char** argv)
 	       loop->last_width,
 	       loop->last_height,
 	       loop->input_clicks_sent,
+	       loop->input_synchronize_events_sent,
+	       loop->input_keyboard_events_sent,
+	       loop->input_unicode_events_sent,
+	       loop->input_wheel_events_sent,
 	       loop->input_send_failures,
 	       loop->gfx_frame_count,
 	       loop->gfx_first_frame_us > loop->connected_us

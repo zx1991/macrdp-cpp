@@ -226,10 +226,12 @@ install to other Macs.
 
 The repository includes a small FreeRDP client used only for protocol testing.
 It connects over `127.0.0.1`, records decoded frame timing and negotiated GFX
-codec counts, sends mouse clicks, checks that the server receives them, tests a
+codec counts, sends mouse clicks plus harmless keyboard, Unicode, and vertical/
+horizontal wheel events, checks the server's aggregated input counters, tests a
 wrong NLA password, and compares GFX/AVC420 with the `--no-gfx` SurfaceBits
-path. It also fails when the server reports a slow frame stage. No third-party
-source is copied or modified by this test.
+path. It also fails when the server reports a slow frame stage. The server logs
+an `Input pipeline` line with received event counts and platform injection
+failures. No third-party source is copied or modified by this test.
 
 The normal macrdp build intentionally does not build a FreeRDP client, so
 build the test client against a separate FreeRDP client build:
@@ -252,8 +254,9 @@ tools/run_loopback_smoke.sh
 The script uses TCP port 3390 by default and refuses to touch an existing
 listener. Set `MACRDP_LOOPBACK_PORT` to use another port. Set
 `MACRDP_LOOPBACK_KEEP_TEMP=1` to retain logs, or use
-`MACRDP_LOOPBACK_DURATION_MS` and `MACRDP_LOOPBACK_MAX_INTERVAL_MS` to adjust
-the sampling duration and timing threshold. Screen Recording and Accessibility
+`MACRDP_LOOPBACK_DURATION_MS`, `MACRDP_LOOPBACK_MAX_INTERVAL_MS`, and
+`MACRDP_LOOPBACK_INPUT_SETTLE_SECONDS` to adjust the sampling duration, timing
+threshold, and post-client input drain wait. Screen Recording and Accessibility
 permissions are still required because the server captures and injects real
 macOS desktop events; the test verifies protocol delivery, not the visual
 effect of a click in an arbitrary foreground application.
@@ -312,9 +315,9 @@ priority validation still requires a graphical macOS session and a Windows
 3. Verify Retina coordinate mapping and display-mode changes on the hardware
    used for deployment. The server still captures only the main display and
    does not offer multi-monitor selection.
-4. Extend the loopback smoke test with keyboard, wheel, clipboard, resize,
-   reconnect, and slow-client cases. No FreeRDP client binary is built by this
-   repository, and `mstsc` remains the compatibility target.
+4. Extend the loopback smoke test with clipboard, resize, reconnect, and
+   slow-client cases. No FreeRDP client binary is built by this repository, and
+   `mstsc` remains the compatibility target.
 5. Validate the text-only clipboard implementation with current Windows
    `mstsc`, then add image/file redirection only if the use case requires it.
 6. Add a macOS microphone/AUDIN implementation if microphone redirection is

@@ -8,11 +8,12 @@ namespace {
 bool restrict_directory(const std::filesystem::path& path, bool allow_missing) {
     std::error_code error;
     const auto status = std::filesystem::symlink_status(path, error);
+    if (status.type() == std::filesystem::file_type::not_found) {
+        return allow_missing
+            && (!error || error == std::make_error_code(std::errc::no_such_file_or_directory));
+    }
     if (error) {
         return false;
-    }
-    if (status.type() == std::filesystem::file_type::not_found) {
-        return allow_missing;
     }
     if (std::filesystem::is_symlink(status) || !std::filesystem::is_directory(status)) {
         return false;
@@ -23,11 +24,11 @@ bool restrict_directory(const std::filesystem::path& path, bool allow_missing) {
 bool restrict_file(const std::filesystem::path& path) {
     std::error_code error;
     const auto status = std::filesystem::symlink_status(path, error);
+    if (status.type() == std::filesystem::file_type::not_found) {
+        return !error || error == std::make_error_code(std::errc::no_such_file_or_directory);
+    }
     if (error) {
         return false;
-    }
-    if (status.type() == std::filesystem::file_type::not_found) {
-        return true;
     }
     if (std::filesystem::is_symlink(status) || !std::filesystem::is_regular_file(status)) {
         return false;

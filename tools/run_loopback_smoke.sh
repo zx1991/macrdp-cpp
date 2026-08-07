@@ -27,6 +27,7 @@ case "$network_profile" in
 		profile_bandwidth_bps=0
 		profile_outage_period_ms=0
 		profile_outage_duration_ms=0
+		profile_input_settle_seconds=1
 		;;
 	wan)
 		profile_gfx_min_frames=100
@@ -40,6 +41,7 @@ case "$network_profile" in
 		profile_bandwidth_bps=5000000
 		profile_outage_period_ms=0
 		profile_outage_duration_ms=0
+		profile_input_settle_seconds=3
 		;;
 	wifi)
 		profile_gfx_min_frames=50
@@ -53,6 +55,7 @@ case "$network_profile" in
 		profile_bandwidth_bps=1000000
 		profile_outage_period_ms=5000
 		profile_outage_duration_ms=300
+		profile_input_settle_seconds=4
 		;;
 	outage)
 		profile_gfx_min_frames=50
@@ -66,6 +69,7 @@ case "$network_profile" in
 		profile_bandwidth_bps=5000000
 		profile_outage_period_ms=3000
 		profile_outage_duration_ms=500
+		profile_input_settle_seconds=4
 		;;
 	bad)
 		profile_gfx_min_frames=1
@@ -79,6 +83,7 @@ case "$network_profile" in
 		profile_bandwidth_bps=256000
 		profile_outage_period_ms=4000
 		profile_outage_duration_ms=1000
+		profile_input_settle_seconds=6
 		;;
 	*)
 		echo "unknown network profile: $network_profile (use direct, wan, wifi, outage, or bad)" >&2
@@ -93,6 +98,7 @@ max_interval_ms=${MACRDP_LOOPBACK_MAX_INTERVAL_MS:-$profile_max_interval_ms}
 first_frame_limit_ms=${MACRDP_LOOPBACK_FIRST_FRAME_LIMIT_MS:-$profile_first_frame_limit_ms}
 duration_ms=${MACRDP_LOOPBACK_DURATION_MS:-$profile_duration_ms}
 run_nogfx=${MACRDP_LOOPBACK_RUN_NOGFX:-$profile_run_nogfx}
+input_settle_seconds=${MACRDP_LOOPBACK_INPUT_SETTLE_SECONDS:-$profile_input_settle_seconds}
 proxy_delay_ms=${MACRDP_LOOPBACK_PROXY_DELAY_MS:-$profile_delay_ms}
 proxy_jitter_ms=${MACRDP_LOOPBACK_PROXY_JITTER_MS:-$profile_jitter_ms}
 proxy_bandwidth_bps=${MACRDP_LOOPBACK_PROXY_BANDWIDTH_BPS:-$profile_bandwidth_bps}
@@ -189,6 +195,24 @@ metric() {
 				exit
 			}
 		}
+	}'
+}
+
+metric_max() {
+	key=$1
+	printf '%s\n' "$2" | awk -v key="$key" '{
+		for (field_index = 1; field_index <= NF; field_index++) {
+			if ($field_index ~ ("^" key "=")) {
+				value = $field_index
+				sub(/^([^=]+=)/, "", value)
+				if (!found || value + 0 > maximum)
+					maximum = value + 0
+				found = 1
+			}
+		}
+	} END {
+		if (found)
+			print maximum
 	}'
 }
 
@@ -317,6 +341,10 @@ run_client() {
 	first_frame=$(metric first_frame_ms "$summary")
 	max_interval=$(metric max_interval_ms "$summary")
 	input_clicks=$(metric input_clicks_sent "$summary")
+	input_synchronize=$(metric input_synchronize_events_sent "$summary")
+	input_keyboard=$(metric input_keyboard_events_sent "$summary")
+	input_unicode=$(metric input_unicode_events_sent "$summary")
+	input_wheel=$(metric input_wheel_events_sent "$summary")
 	input_failures=$(metric input_send_failures "$summary")
 	gfx_frames=$(metric gfx_frames "$summary")
 	gfx_wire=$(metric gfx_wire_commands "$summary")
@@ -345,7 +373,6 @@ run_client() {
 	if [ "${input_failures:-0}" -ne 0 ]; then
 		fail "$case_name had $input_failures client-side input send failures"
 	fi
-
 	server_log="$case_dir/server.log"
 	if ! grep -q 'Frame pipeline:' "$server_log"; then
 		fail "$case_name server produced no frame pipeline diagnostics"
@@ -375,6 +402,38 @@ run_client() {
 	fi
 }
 
+check_input_pipeline() {
+	case_name=$1
+	case_dir="$temp_dir/$case_name"
+	server_log="$case_dir/server.log"
+	input_pipeline=$(grep 'Input pipeline:' "$server_log")
+	if [ -z "$input_pipeline" ]; then
+		fail "$case_name server produced no input pipeline diagnostics"
+		return
+	fi
+
+	server_synchronize=$(metric_max synchronize "$input_pipeline")
+	server_keyboard=$(metric_max keyboard "$input_pipeline")
+	server_unicode=$(metric_max unicode "$input_pipeline")
+	server_wheel=$(metric_max wheel "$input_pipeline")
+	server_failures=$(metric_max injection_failures "$input_pipeline")
+	if [ "${input_synchronize:-0}" -lt 1 ] || [ "${server_synchronize:-0}" -lt 1 ]; then
+		fail "$case_name synchronize input did not reach the server"
+	fi
+	if [ "${input_keyboard:-0}" -lt 2 ] || [ "${server_keyboard:-0}" -lt 2 ]; then
+		fail "$case_name keyboard input did not reach the server"
+	fi
+	if [ "${input_unicode:-0}" -lt 2 ] || [ "${server_unicode:-0}" -lt 2 ]; then
+		fail "$case_name Unicode input did not reach the server"
+	fi
+	if [ "${input_wheel:-0}" -lt 4 ] || [ "${server_wheel:-0}" -lt 4 ]; then
+		fail "$case_name vertical/horizontal wheel input did not reach the server"
+	fi
+	if [ "${server_failures:-0}" -ne 0 ]; then
+		fail "$case_name server reported $server_failures input injection failures"
+	fi
+}
+
 run_bad_password() {
 	case_dir="$temp_dir/gfx"
 	client_log="$case_dir/bad-password.log"
@@ -400,16 +459,19 @@ echo "loopback smoke test: server=$server client=$client profile=$network_profil
 
 if start_server gfx; then
 	run_client gfx
+	sleep "$input_settle_seconds"
 	run_bad_password
 else
 	fail "could not start gfx server"
 fi
 stop_proxy
 stop_server
+check_input_pipeline gfx
 
 if [ "$run_nogfx" = "1" ]; then
 	if start_server nogfx; then
 		run_client nogfx
+		sleep "$input_settle_seconds"
 	else
 		fail "could not start nogfx server"
 	fi
@@ -418,6 +480,9 @@ else
 fi
 stop_proxy
 stop_server
+if [ "$run_nogfx" = "1" ]; then
+	check_input_pipeline nogfx
+fi
 
 if [ "$failed" -ne 0 ]; then
 	exit 1
