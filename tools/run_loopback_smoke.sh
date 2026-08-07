@@ -236,6 +236,7 @@ case "$network_profile" in
 		profile_outage_period_ms=0
 		profile_outage_duration_ms=0
 		profile_input_settle_seconds=1
+		profile_clipboard_wait_seconds=5
 		;;
 	wan)
 		profile_gfx_min_frames=100
@@ -251,6 +252,7 @@ case "$network_profile" in
 		profile_outage_period_ms=0
 		profile_outage_duration_ms=0
 		profile_input_settle_seconds=3
+		profile_clipboard_wait_seconds=10
 		;;
 	wifi)
 		profile_gfx_min_frames=1
@@ -266,6 +268,7 @@ case "$network_profile" in
 		profile_outage_period_ms=5000
 		profile_outage_duration_ms=300
 		profile_input_settle_seconds=4
+		profile_clipboard_wait_seconds=45
 		;;
 	outage)
 		profile_gfx_min_frames=50
@@ -281,6 +284,7 @@ case "$network_profile" in
 		profile_outage_period_ms=3000
 		profile_outage_duration_ms=500
 		profile_input_settle_seconds=4
+		profile_clipboard_wait_seconds=20
 		;;
 	bad)
 		profile_gfx_min_frames=1
@@ -296,6 +300,7 @@ case "$network_profile" in
 		profile_outage_period_ms=4000
 		profile_outage_duration_ms=1000
 		profile_input_settle_seconds=6
+		profile_clipboard_wait_seconds=60
 		;;
 	*)
 		echo "unknown network profile: $network_profile (use direct, wan, wifi, outage, or bad)" >&2
@@ -315,6 +320,7 @@ slow_client_duration_ms=${MACRDP_LOOPBACK_SLOW_CLIENT_DURATION_MS:-5000}
 slow_client_event_delay_ms=${MACRDP_LOOPBACK_SLOW_CLIENT_EVENT_DELAY_MS:-250}
 run_nogfx=${MACRDP_LOOPBACK_RUN_NOGFX:-$profile_run_nogfx}
 input_settle_seconds=${MACRDP_LOOPBACK_INPUT_SETTLE_SECONDS:-$profile_input_settle_seconds}
+clipboard_wait_seconds=${MACRDP_LOOPBACK_CLIPBOARD_WAIT_SECONDS:-$profile_clipboard_wait_seconds}
 proxy_delay_ms=${MACRDP_LOOPBACK_PROXY_DELAY_MS:-$profile_delay_ms}
 proxy_jitter_ms=${MACRDP_LOOPBACK_PROXY_JITTER_MS:-$profile_jitter_ms}
 proxy_bandwidth_bps=${MACRDP_LOOPBACK_PROXY_BANDWIDTH_BPS:-$profile_bandwidth_bps}
@@ -328,6 +334,13 @@ proxy_options=(
 	--outage-duration-ms "$proxy_outage_duration_ms"
 	--seed 1
 )
+
+case "$clipboard_wait_seconds" in
+	''|*[!0-9]*)
+		echo "MACRDP_LOOPBACK_CLIPBOARD_WAIT_SECONDS must be a non-negative integer" >&2
+		exit 2
+		;;
+esac
 
 if [ ! -x "$server" ]; then
 	echo "server executable not found or not executable: $server" >&2
@@ -408,7 +421,11 @@ fail() {
 wait_for_log() {
 	log_file=$1
 	pattern=$2
-	for attempt in $(seq 1 100); do
+	wait_seconds=${3:-5}
+	if [ "$wait_seconds" -eq 0 ]; then
+		return 1
+	fi
+	for attempt in $(seq 1 $((wait_seconds * 20))); do
 		if grep -q "$pattern" "$log_file"; then
 			return 0
 		fi
@@ -740,7 +757,7 @@ run_client() {
 		server_case=gfx
 	fi
 	server_log="$temp_dir/$server_case/server.log"
-	if ! wait_for_log "$server_log" 'Received client clipboard data:'; then
+	if ! wait_for_log "$server_log" 'Received client clipboard data:' "$clipboard_wait_seconds"; then
 		fail "$case_name server did not receive client clipboard data"
 	fi
 	if ! wait_for_log "$server_log" 'Frame pipeline:'; then
@@ -748,6 +765,20 @@ run_client() {
 	fi
 	if grep -q 'Failed to drain FreeRDP output buffer' "$server_log"; then
 		fail "$case_name server reported an unexplained output drain failure"
+	fi
+	output_diagnostics=$(grep 'Output pipeline: blocked=' "$server_log" || true)
+	if [ -z "$output_diagnostics" ]; then
+		fail "$case_name server produced no output queue diagnostics"
+	else
+		for output_metric in queue_depth queue_capacity queue_max \
+			transport_queue_bytes transport_queue_max transport_queue_limit \
+			video_deferred video_coalesced h264_deferred h264_output_deferred \
+			audio_queued audio_dropped blocked_ms blocked_max_ms \
+			blocked_events drain_attempts; do
+			if [ -z "$(metric "$output_metric" "$output_diagnostics")" ]; then
+				fail "$case_name output diagnostics did not report $output_metric"
+			fi
+		done
 	fi
 	output_pipeline=$(grep -E 'Output pipeline (blocked|recovered):' "$server_log" || true)
 	if [ -n "$output_pipeline" ]; then

@@ -44,13 +44,18 @@ The smoke script uses a real TCP connection to the server and checks:
 
 The server's `Input pipeline` diagnostics also report the current and maximum
 input queue depth, coalesced or discarded pointer motion, and time spent
-waiting for queue capacity. A nonzero critical-event wait is input backpressure;
-it is distinct from a macOS injection failure. The `H.264 pipeline` diagnostic
-reports encoder time, coalesced frames, and `output_deferred`, the number of
-completed encodes held until the transport became writable. The `Output
-pipeline` diagnostic reports output-blocked intervals, drain attempts, and
-recovery; a normal disconnect while draining is logged as transport closure,
-not as a server-internal drain failure.
+waiting for queue capacity. A nonzero critical-event wait is input
+backpressure; it is distinct from a macOS injection failure. The `H.264
+pipeline` diagnostic reports encoder time, coalesced frames, and
+`output_deferred`, the number of completed encodes held until the transport
+became writable. The regular `Output pipeline` diagnostic reports the current
+and maximum FreeRDP message-queue depth and capacity, the current and maximum
+bytes in the non-blocking transport queue, deferred/coalesced video updates,
+audio queue state, output-blocked intervals, drain attempts, and recovery.
+`Output pipeline final` repeats the counters when a client disconnects, so
+short sessions still leave a usable summary. A normal disconnect while
+draining is logged as transport closure, not as a server-internal drain
+failure.
 
 Run the direct profile with:
 
@@ -62,6 +67,11 @@ tools/run_loopback_smoke.sh
 
 The server still needs Screen Recording and Accessibility permission because
 the loopback test exercises the actual macOS capture and input paths.
+
+Clipboard verification uses a profile-specific wait after the client exits so
+low-bandwidth runs are not mistaken for protocol failures. Override it with
+`MACRDP_LOOPBACK_CLIPBOARD_WAIT_SECONDS` when testing a slower or faster custom
+profile.
 
 When a shadow subsystem starts or stops, the server logs a stale-modifier reset
 with its reason and failure count. A normal run should report zero failures;

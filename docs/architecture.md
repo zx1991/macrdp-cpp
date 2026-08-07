@@ -53,9 +53,10 @@ format negotiation and data transfer under a channel lock.
 - Shutdown joins capture, audio, publish, input, and encoder workers in a
   defined order before FreeRDP state is released.
 
-The output scheduler records blocked intervals and drain attempts per client.
-This distinguishes network backpressure from capture or encoder delay without
-turning a normal client disconnect into an internal-error diagnostic.
+The output scheduler records message-queue depth, transport-queue bytes,
+blocked intervals, deferred/coalesced video updates, and drain attempts per
+client. This distinguishes network backpressure from capture or encoder delay
+without turning a normal client disconnect into an internal-error diagnostic.
 
 The exact backpressure behavior is part of the protocol adaptation patch. The
 patch adds bounded message budgets, a non-blocking output queue, and input-first

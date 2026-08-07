@@ -6,8 +6,6 @@ release dates.
 
 ## Near term
 
-- Make the output scheduler and per-client media queues observable with stable
-  counters for queue depth, dropped video, write stalls, and recovery time.
 - Compare direct AVC420, FFmpeg AVC420, AVC444, and SurfaceBits using the same
   measured test matrix.
 - Improve automated tests for repeated reconnects, resolution changes, and

@@ -213,6 +213,11 @@ for the client publish barrier. A `Slow frame update` warning reports the same
 surface-copy and publish-wait stages for an individual slow update.
 `Slow client frame handling` reports time spent in the FreeRDP client loop,
 including protocol output and completion delivery.
+`Output pipeline` reports per-client message-queue depth/capacity, non-blocking
+transport bytes, deferred or coalesced video updates, audio drops, and output
+blocking/recovery counters. `Output pipeline final` records the same lifetime
+counters when the client disconnects, which makes short or failed sessions
+diagnosable.
 When the direct encoder is active, the log also contains `Using direct macOS
 VideoToolbox H264 bridge`. If that line is replaced by a fallback warning,
 the session is using software H.264 encoding.
@@ -278,6 +283,9 @@ threshold, and post-client input drain wait. Set
 `MACRDP_LOOPBACK_NOGFX_DURATION_MS` when the classic SurfaceBits path needs a
 different observation window; the Wi-Fi profile defaults this to 30 seconds
 because its 1 Mbps link can take several seconds per full-screen update.
+Clipboard verification waits according to the selected network profile after
+the client exits. Set `MACRDP_LOOPBACK_CLIPBOARD_WAIT_SECONDS` when a custom
+bandwidth or outage profile needs a different drain window.
 Screen Recording and Accessibility permissions are still required because the
 server captures and injects real macOS desktop events; the test verifies
 protocol delivery, not the visual effect of a click in an arbitrary foreground

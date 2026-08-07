@@ -1,0 +1,197 @@
+diff --git a/include/freerdp/server/shadow.h b/include/freerdp/server/shadow.h
+--- a/include/freerdp/server/shadow.h
++++ b/include/freerdp/server/shadow.h
+@@ -131,8 +131,14 @@
+ 		UINT64 macrdpH264LastDiagnostics;
+ 		/* MACRDP_CLIENT_FRAME_SNAPSHOT */
+ 		/* MACRDP_AUDIO_QUEUE_BOUND */
+ 		LONG macrdpAudioMessageQueued;
+ 		LONG macrdpAudioMessagesDropped;
+ 		LONGLONG macrdpAudioSuppressedUntil;
++		UINT64 macrdpOutputQueueMaxDepth;
++		UINT64 macrdpOutputQueueMaxCapacity;
++		UINT64 macrdpTransportQueueMaxBytes;
++		UINT64 macrdpVideoUpdatesDeferred;
++		UINT64 macrdpVideoUpdatesCoalesced;
++		/* MACRDP_OUTPUT_DIAGNOSTICS */
+ 		rdpShadowServer* server;
+ 		rdpShadowEncoder* encoder;
+ 
+diff --git a/libfreerdp/core/transport.h b/libfreerdp/core/transport.h
+--- a/libfreerdp/core/transport.h
++++ b/libfreerdp/core/transport.h
+@@ -163,8 +163,14 @@
+ WINPR_ATTR_NODISCARD
+ FREERDP_LOCAL BOOL transport_is_write_blocked(rdpTransport* transport);
+ 
+ /* MACRDP_OUTPUT_PRIORITY: allow the shadow loop to classify control PDUs. */
+ FREERDP_LOCAL void transport_set_output_priority(rdpTransport* transport, BOOL priority);
+ 
++/* MACRDP_OUTPUT_QUEUE_DIAGNOSTICS */
++WINPR_ATTR_NODISCARD
++FREERDP_LOCAL size_t transport_get_write_queue_size(rdpTransport* transport);
++WINPR_ATTR_NODISCARD
++FREERDP_LOCAL size_t transport_get_write_queue_limit(void);
++
+ FREERDP_LOCAL int transport_drain_output_buffer(rdpTransport* transport);
+ 
+diff --git a/libfreerdp/core/transport.c b/libfreerdp/core/transport.c
+--- a/libfreerdp/core/transport.c
++++ b/libfreerdp/core/transport.c
+@@ -162,11 +162,28 @@
+ void transport_set_output_priority(rdpTransport* transport, BOOL priority)
+ {
+ 	if (transport)
+ 		transport->outputPriority = priority;
+ }
+ 
++/* MACRDP_OUTPUT_QUEUE_DIAGNOSTICS */
++size_t transport_get_write_queue_size(rdpTransport* transport)
++{
++	size_t bytes = 0;
++	if (!transport || !transport->haveWriteLock)
++		return 0;
++	EnterCriticalSection(&(transport->WriteLock));
++	bytes = transport->writeQueueBytes;
++	LeaveCriticalSection(&(transport->WriteLock));
++	return bytes;
++}
++
++size_t transport_get_write_queue_limit(void)
++{
++	return MACRDP_WRITE_QUEUE_LIMIT;
++}
++
+ static BOOL transport_write_queue_append(rdpTransport* transport, wStream* stream, size_t offset,
+                                          size_t length, BOOL priority, BOOL continuation)
+ {
+ 	if (length == 0)
+ 		return TRUE;
+diff --git a/server/shadow/shadow_client.c b/server/shadow/shadow_client.c
+--- a/server/shadow/shadow_client.c
++++ b/server/shadow/shadow_client.c
+@@ -3179,6 +3179,7 @@
+ 	UINT64 outputBlockedMaxMs = 0;
+ 	ULONGLONG outputBlockedSince = 0;
+ 	ULONGLONG outputLastDiagnostics = 0;
++	ULONGLONG outputLastQueueDiagnostics = 0;
+ 
+ 	update = peer->context->update;
+ 	WINPR_ASSERT(update);
+@@ -3363,7 +3364,13 @@
+ 					WLog_ERR(TAG, "Failed to defer surface update while output is blocked");
+ 					break;
+ 				}
+ 				if (client->activated && !client->suppressOutput)
++				{
++					if (frameDeferred)
++						client->macrdpVideoUpdatesCoalesced++;
++					else
++						client->macrdpVideoUpdatesDeferred++;
+ 					frameDeferred = TRUE;
++				}
+ 			}
+ 			else if (client->activated && !client->suppressOutput)
+@@ -3417,6 +3422,64 @@
+ 		}
+		outputBlocked = peer->IsWriteBlocked && peer->IsWriteBlocked(peer);
+
++		/* MACRDP_OUTPUT_DIAGNOSTICS */
++		const size_t outputQueueDepth = MessageQueue_Size(MsgQueue);
++		const size_t outputQueueCapacity = MessageQueue_Capacity(MsgQueue);
++		rdpTransport* outputTransport =
++			peer->context->rdp ? peer->context->rdp->transport : nullptr;
++		const size_t transportQueueBytes = outputTransport
++			? transport_get_write_queue_size(outputTransport)
++			: 0;
++		const size_t transportQueueLimit = transport_get_write_queue_limit();
++		if ((UINT64)outputQueueDepth > client->macrdpOutputQueueMaxDepth)
++			client->macrdpOutputQueueMaxDepth = (UINT64)outputQueueDepth;
++		if ((UINT64)outputQueueCapacity > client->macrdpOutputQueueMaxCapacity)
++			client->macrdpOutputQueueMaxCapacity = (UINT64)outputQueueCapacity;
++		if ((UINT64)transportQueueBytes > client->macrdpTransportQueueMaxBytes)
++			client->macrdpTransportQueueMaxBytes = (UINT64)transportQueueBytes;
++		if (outputLastQueueDiagnostics == 0 ||
++		    outputNow - outputLastQueueDiagnostics >= 5000)
++		{
++			const UINT64 currentBlockedMs = outputBlocked && outputBlockedSince != 0
++				? (UINT64)(outputNow - outputBlockedSince)
++				: 0;
++			const LONG audioQueued = InterlockedCompareExchange(
++				&client->macrdpAudioMessageQueued, 0, 0);
++			const LONG audioDropped = InterlockedCompareExchange(
++				&client->macrdpAudioMessagesDropped, 0, 0);
++			WLog_INFO(TAG,
++			          "Output pipeline: blocked=%u queue_depth=%" PRIuz
++			          " queue_capacity=%" PRIuz " queue_max=%" PRIu64
++			          " transport_queue_bytes=%" PRIuz
++			          " transport_queue_max=%" PRIu64
++			          " transport_queue_limit=%" PRIuz
++			          " video_deferred=%" PRIu64
++			          " video_coalesced=%" PRIu64
++			          " h264_deferred=%" PRIu64
++			          " h264_output_deferred=%" PRIu64
++			          " audio_queued=%ld audio_dropped=%ld"
++			          " blocked_ms=%" PRIu64 " blocked_max_ms=%" PRIu64
++			          " blocked_events=%" PRIu64 " drain_attempts=%" PRIu64,
++			          (unsigned)outputBlocked,
++			          outputQueueDepth,
++			          outputQueueCapacity,
++			          client->macrdpOutputQueueMaxDepth,
++			          transportQueueBytes,
++			          client->macrdpTransportQueueMaxBytes,
++			          transportQueueLimit,
++			          client->macrdpVideoUpdatesDeferred,
++			          client->macrdpVideoUpdatesCoalesced,
++			          client->macrdpH264DeferredFrames,
++			          client->macrdpH264OutputDeferredFrames,
++			          (long)audioQueued,
++			          (long)audioDropped,
++			          outputBlockedTotalMs + currentBlockedMs,
++			          outputBlockedMaxMs,
++			          outputBlockedEvents,
++			          outputDrainAttempts);
++			outputLastQueueDiagnostics = outputNow;
++		}
++
+ 		if (client->activated &&
+ 		    WTSVirtualChannelManagerIsChannelJoined(client->vcm, DRDYNVC_SVC_CHANNEL_NAME))
+ 		{
+@@ -3650,6 +3700,37 @@
+ 	}
+ 
+ out:
++	if (client)
++	{
++		const ULONGLONG outputNow = GetTickCount64();
++		const UINT64 currentBlockedMs = outputBlocked && outputBlockedSince != 0
++			? (UINT64)(outputNow - outputBlockedSince)
++			: 0;
++		const size_t outputQueueDepth = MessageQueue_Size(client->MsgQueue);
++		if (outputQueueDepth > client->macrdpOutputQueueMaxDepth)
++			client->macrdpOutputQueueMaxDepth = (UINT64)outputQueueDepth;
++		WLog_INFO(TAG,
++		          "Output pipeline final: queue_depth=%" PRIuz
++		          " queue_max=%" PRIu64 " transport_queue_max=%" PRIu64
++		          " video_deferred=%" PRIu64 " video_coalesced=%" PRIu64
++		          " h264_deferred=%" PRIu64 " h264_output_deferred=%" PRIu64
++		          " audio_dropped=%ld blocked_ms=%" PRIu64
++		          " blocked_max_ms=%" PRIu64 " blocked_events=%" PRIu64
++		          " drain_attempts=%" PRIu64,
++		          outputQueueDepth,
++		          client->macrdpOutputQueueMaxDepth,
++		          client->macrdpTransportQueueMaxBytes,
++		          client->macrdpVideoUpdatesDeferred,
++		          client->macrdpVideoUpdatesCoalesced,
++		          client->macrdpH264DeferredFrames,
++		          client->macrdpH264OutputDeferredFrames,
++		          (long)InterlockedCompareExchange(
++		              &client->macrdpAudioMessagesDropped, 0, 0),
++		          outputBlockedTotalMs + currentBlockedMs,
++		          outputBlockedMaxMs,
++		          outputBlockedEvents,
++		          outputDrainAttempts);
++	}
+ 	WINPR_ASSERT(peer->Disconnect);
+ 	peer->Disconnect(peer);
+ 	freerdp_peer_context_free(peer);
