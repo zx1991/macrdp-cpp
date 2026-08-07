@@ -201,6 +201,18 @@ fail() {
 	failed=1
 }
 
+wait_for_log() {
+	log_file=$1
+	pattern=$2
+	for attempt in $(seq 1 100); do
+		if grep -q "$pattern" "$log_file"; then
+			return 0
+		fi
+		sleep 0.05
+	done
+	return 1
+}
+
 set_test_clipboard() {
 	if ! printf '%s' "$clipboard_server_text" | pbcopy; then
 		echo "could not set the macOS test pasteboard" >&2
@@ -459,10 +471,10 @@ run_client() {
 		server_case=gfx
 	fi
 	server_log="$temp_dir/$server_case/server.log"
-	if ! grep -q 'Received client clipboard data:' "$server_log"; then
+	if ! wait_for_log "$server_log" 'Received client clipboard data:'; then
 		fail "$case_name server did not receive client clipboard data"
 	fi
-	if ! grep -q 'Frame pipeline:' "$server_log"; then
+	if ! wait_for_log "$server_log" 'Frame pipeline:'; then
 		fail "$case_name server produced no frame pipeline diagnostics"
 	fi
 	if grep -q 'Slow frame update\|Slow client frame handling' "$server_log"; then
@@ -474,7 +486,7 @@ run_client() {
 			echo "$case_name: slow frame stages observed under network profile $network_profile"
 		fi
 	fi
-	if ! grep -q 'shadow_input_mouse_event' "$server_log"; then
+	if ! wait_for_log "$server_log" 'shadow_input_mouse_event'; then
 		fail "$case_name server did not receive a mouse event"
 	fi
 

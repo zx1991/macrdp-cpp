@@ -586,9 +586,11 @@ static BOOL loopback_pre_connect(freerdp* instance)
 	if (PubSub_SubscribeChannelConnected(
 	        instance->context->pubSub, loopback_on_channel_connected) < 0
 	    || PubSub_SubscribeChannelDisconnected(
-           instance->context->pubSub, loopback_on_channel_disconnected) < 0)
+	           instance->context->pubSub, loopback_on_channel_disconnected) < 0)
 		return FALSE;
 
+	/* FreeRDP uses rdpdr during activation even though this test does not
+	 * exercise device data redirection. Audio remains disabled below. */
 	if (!freerdp_settings_set_bool(settings, FreeRDP_SupportGraphicsPipeline, gfx_enabled)
 	    || !freerdp_settings_set_bool(settings, FreeRDP_GfxH264, gfx_enabled)
 	    || !freerdp_settings_set_bool(settings, FreeRDP_GfxAVC444, FALSE)
@@ -599,9 +601,12 @@ static BOOL loopback_pre_connect(freerdp* instance)
 	    || !freerdp_settings_set_bool(settings, FreeRDP_GfxProgressiveV2, FALSE)
 	    || !freerdp_settings_set_bool(settings, FreeRDP_GfxPlanar, FALSE)
 	    || !freerdp_settings_set_bool(settings, FreeRDP_DeviceRedirection, TRUE)
-	    || !freerdp_settings_set_bool(settings, FreeRDP_NetworkAutoDetect, TRUE)
+	    || !freerdp_settings_set_bool(settings, FreeRDP_AudioPlayback, FALSE)
+	    || !freerdp_settings_set_bool(settings, FreeRDP_NetworkAutoDetect, FALSE)
+	    || !freerdp_settings_set_bool(settings, FreeRDP_SupportSkipChannelJoin, FALSE)
 	    || !freerdp_settings_set_bool(settings, FreeRDP_SupportHeartbeatPdu, FALSE)
 	    || !freerdp_settings_set_bool(settings, FreeRDP_SupportMultitransport, FALSE)
+	    || !freerdp_settings_set_uint32(settings, FreeRDP_MultitransportFlags, 0)
 	    || !freerdp_settings_set_bool(settings, FreeRDP_UnicodeInput, TRUE)
 	    || !freerdp_settings_set_bool(settings, FreeRDP_HasExtendedMouseEvent, TRUE)
 	    || !freerdp_settings_set_bool(settings, FreeRDP_HasHorizontalWheel, TRUE)

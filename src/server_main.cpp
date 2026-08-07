@@ -592,6 +592,9 @@ bool configure_server(rdpShadowServer* server, const Options& options, const std
         options.max_height,
         options.frame_rate);
 
+    // This server currently exposes only the TCP RDP transport. These
+    // features use the MCS message channel and must stay off until their
+    // negotiation and transport paths are implemented here.
     if (!set_security(server->settings, options.security)
         || !freerdp_settings_set_uint32(server->settings, FreeRDP_ColorDepth, 32)
         || !freerdp_settings_set_bool(server->settings, FreeRDP_NSCodec, TRUE)
@@ -603,7 +606,11 @@ bool configure_server(rdpShadowServer* server, const Options& options, const std
         || !freerdp_settings_set_bool(server->settings, FreeRDP_GfxProgressiveV2, TRUE)
         || !freerdp_settings_set_bool(server->settings, FreeRDP_GfxPlanar, TRUE)
         || !freerdp_settings_set_bool(server->settings, FreeRDP_MouseUseRelativeMove, FALSE)
-        || !freerdp_settings_set_bool(server->settings, FreeRDP_HasRelativeMouseEvent, FALSE)) {
+        || !freerdp_settings_set_bool(server->settings, FreeRDP_HasRelativeMouseEvent, FALSE)
+        || !freerdp_settings_set_bool(server->settings, FreeRDP_NetworkAutoDetect, FALSE)
+        || !freerdp_settings_set_bool(server->settings, FreeRDP_SupportHeartbeatPdu, FALSE)
+        || !freerdp_settings_set_bool(server->settings, FreeRDP_SupportMultitransport, FALSE)
+        || !freerdp_settings_set_uint32(server->settings, FreeRDP_MultitransportFlags, 0)) {
         return false;
     }
 
