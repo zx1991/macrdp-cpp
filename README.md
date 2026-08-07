@@ -227,11 +227,14 @@ install to other Macs.
 The repository includes a small FreeRDP client used only for protocol testing.
 It connects over `127.0.0.1`, records decoded frame timing and negotiated GFX
 codec counts, sends mouse clicks plus harmless keyboard, Unicode, and vertical/
-horizontal wheel events, checks the server's aggregated input counters, tests a
-wrong NLA password, and compares GFX/AVC420 with the `--no-gfx` SurfaceBits
-path. It also fails when the server reports a slow frame stage. The server logs
-an `Input pipeline` line with received event counts and platform injection
-failures. No third-party source is copied or modified by this test.
+horizontal wheel events, checks the server's aggregated input counters, verifies
+bidirectional text clipboard transfer, tests a wrong NLA password, and compares
+GFX/AVC420 with the `--no-gfx` SurfaceBits path. The direct profile also checks
+reconnects, requested desktop sizes, and a deliberately slow client event loop.
+The client-reported frame pacing is the primary slow-client metric; server slow
+stage diagnostics are supplementary observations. The server logs an `Input
+pipeline` line with received event counts and platform injection failures. No
+third-party source is copied or modified by this test.
 
 The normal macrdp build intentionally does not build a FreeRDP client, so
 build the test client against a separate FreeRDP client build:
@@ -256,10 +259,14 @@ listener. Set `MACRDP_LOOPBACK_PORT` to use another port. Set
 `MACRDP_LOOPBACK_KEEP_TEMP=1` to retain logs, or use
 `MACRDP_LOOPBACK_DURATION_MS`, `MACRDP_LOOPBACK_MAX_INTERVAL_MS`, and
 `MACRDP_LOOPBACK_INPUT_SETTLE_SECONDS` to adjust the sampling duration, timing
-threshold, and post-client input drain wait. Screen Recording and Accessibility
-permissions are still required because the server captures and injects real
-macOS desktop events; the test verifies protocol delivery, not the visual
-effect of a click in an arbitrary foreground application.
+threshold, and post-client input drain wait. Set
+`MACRDP_LOOPBACK_NOGFX_DURATION_MS` when the classic SurfaceBits path needs a
+different observation window; the Wi-Fi profile defaults this to 30 seconds
+because its 1 Mbps link can take several seconds per full-screen update.
+Screen Recording and Accessibility permissions are still required because the
+server captures and injects real macOS desktop events; the test verifies
+protocol delivery, not the visual effect of a click in an arbitrary foreground
+application.
 
 The optional C TCP proxy applies deterministic one-way delay, jitter, per-
 direction bandwidth shaping, and periodic forwarding outages. Build it once:
@@ -283,13 +290,13 @@ Available profiles are `direct` (no proxy), `wan` (50 ms one-way delay,
 300 ms outage every 5 seconds), `outage` (50 ms delay, 50 ms jitter, 5 Mbps,
 and a 500 ms outage every 3 seconds), and `bad` (150 ms delay, 100 ms jitter,
 256 Kbps, and a 1 second outage every 4 seconds). The bandwidth is applied
-independently in each direction. The `bad` profile intentionally runs the
-GFX path only: a classic full-screen SurfaceBits update can take longer than
-the short stress-test window at 256 Kbps. Frame thresholds are mode-specific
-so a low-bandwidth test checks delivery and recovery without requiring the
-same frame rate as a direct connection. An outage pauses forwarding without
-discarding TCP bytes, so it models a stalled link and recovery rather than
-packet loss or a dropped connection.
+independently in each direction. The `wifi` classic path gets a longer default
+window so the test checks eventual delivery under low bandwidth; the `bad`
+profile intentionally runs the GFX path only. Frame thresholds are
+mode-specific so a low-bandwidth test checks delivery and recovery without
+requiring the same frame rate as a direct connection. An outage pauses
+forwarding without discarding TCP bytes, so it models a stalled link and
+recovery rather than packet loss or a dropped connection.
 
 ## Layout
 
@@ -301,28 +308,24 @@ packet loss or a dropped connection.
 
 ## Remaining work
 
-The local unit tests cover frame coalescing, display-size calculation, H.264,
-the asynchronous encoder worker, and multi-client input ownership. The highest
-priority validation still requires a graphical macOS session and a Windows
-`mstsc` client:
+The local unit tests and loopback smoke test cover frame coalescing,
+display-size calculation, H.264, the asynchronous encoder worker, multi-client
+input ownership, NLA failure handling, keyboard/Unicode/mouse/wheel input,
+bidirectional text clipboard, reconnects, requested sizes, slow clients, and
+deterministic delay/bandwidth/outage profiles. The remaining validation that
+requires a graphical macOS session and a Windows `mstsc` client is:
 
-1. Run a current-build matrix for NLA, keyboard, Unicode input, left/right and
-   side buttons, drag, wheel, text clipboard in both directions, reconnect,
-   window resize, and a slow client.
-2. Collect fresh `Slow client frame handling` and `Frame barrier` logs. Logs
-   from before the asynchronous worker and non-blocking output changes are not
-   evidence about the current build.
-3. Verify Retina coordinate mapping and display-mode changes on the hardware
+1. Verify NLA, keyboard, Unicode input, left/right and side buttons, drag,
+   wheel, text clipboard in both directions, reconnect, window resize, and
+   behavior after a current-build connection is interrupted.
+2. Verify Retina coordinate mapping and display-mode changes on the hardware
    used for deployment. The server still captures only the main display and
    does not offer multi-monitor selection.
-4. Extend the loopback smoke test with clipboard, resize, reconnect, and
-   slow-client cases. No FreeRDP client binary is built by this repository, and
-   `mstsc` remains the compatibility target.
-5. Validate the text-only clipboard implementation with current Windows
+3. Validate the text-only clipboard implementation with current Windows
    `mstsc`, then add image/file redirection only if the use case requires it.
-6. Add a macOS microphone/AUDIN implementation if microphone redirection is
+4. Add a macOS microphone/AUDIN implementation if microphone redirection is
    required. The current server supports audio output through RDPSND only.
-7. Add Developer ID signing and notarization for distribution. The local
+5. Add Developer ID signing and notarization for distribution. The local
    package now carries its non-system runtime dependency closure, but it still
    includes the full FFmpeg dependency graph and needs a distribution identity.
 

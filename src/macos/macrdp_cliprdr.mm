@@ -323,6 +323,10 @@ UINT client_format_data_response(
         response->requestedFormatData,
         response->common.dataLen,
         format_id);
+    WLog_INFO(TAG,
+              "Received client clipboard data: format=%" PRIu32 " bytes=%" PRIu32,
+              format_id,
+              response->common.dataLen);
     if (!text.has_value() || !write_pasteboard(*text)) {
         return ERROR_INVALID_DATA;
     }

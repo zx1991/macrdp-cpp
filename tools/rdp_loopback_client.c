@@ -2,6 +2,7 @@
 
 #include <freerdp/client.h>
 #include <freerdp/client/channels.h>
+#include <freerdp/client/cliprdr.h>
 #include <freerdp/client/cmdline.h>
 #include <freerdp/client/rdpgfx.h>
 #include <freerdp/constants.h>
@@ -24,6 +25,14 @@
 #include <time.h>
 
 #define TAG CLIENT_TAG("macrdp-loopback")
+
+#define LOOPBACK_CF_TEXT 1U
+#define LOOPBACK_CF_UNICODETEXT 13U
+
+static const char* loopback_client_clipboard_default =
+	"macrdp loopback client clipboard text";
+static const char* loopback_server_clipboard_default =
+	"macrdp loopback server clipboard text";
 
 typedef struct
 {
@@ -50,11 +59,26 @@ typedef struct
 	uint64_t input_unicode_events_sent;
 	uint64_t input_wheel_events_sent;
 	uint64_t input_send_failures;
+	uint64_t clipboard_server_format_lists_received;
+	uint64_t clipboard_server_format_list_responses_sent;
+	uint64_t clipboard_server_data_requests_sent;
+	uint64_t clipboard_server_data_responses_received;
+	uint64_t clipboard_client_format_lists_sent;
+	uint64_t clipboard_client_format_list_responses_received;
+	uint64_t clipboard_client_data_requests_received;
+	uint64_t clipboard_client_data_responses_sent;
+	uint64_t clipboard_matches;
+	uint64_t clipboard_failures;
 	uint64_t gfx_first_frame_us;
 	uint64_t gfx_last_frame_us;
 	uint64_t gfx_frame_interval_total_us;
 	uint64_t gfx_frame_interval_max_us;
 	RdpgfxClientContext* gfx;
+	CliprdrClientContext* cliprdr;
+	UINT32 clipboard_server_format;
+	BOOL clipboard_monitor_ready;
+	BOOL clipboard_server_data_received;
+	BOOL clipboard_client_format_list_sent;
 	uint32_t last_width;
 	uint32_t last_height;
 } loopback_context;
@@ -84,10 +108,308 @@ static uint64_t env_duration_us(void)
 	return (uint64_t)milliseconds * UINT64_C(1000);
 }
 
+static DWORD env_event_delay_ms(void)
+{
+	const char* value = getenv("MACRDP_LOOPBACK_EVENT_DELAY_MS");
+	char* end = NULL;
+	unsigned long long milliseconds = 0;
+
+	if (!value || !*value)
+		return 0;
+	milliseconds = strtoull(value, &end, 10);
+	if (end == value || *end != '\0' || milliseconds > UINT32_MAX)
+		return 0;
+	return (DWORD)milliseconds;
+}
+
 static BOOL env_gfx_enabled(void)
 {
 	const char* value = getenv("MACRDP_LOOPBACK_GFX");
 	return !(value && (*value == '0' || *value == 'n' || *value == 'N'));
+}
+
+static const char* env_clipboard_text(const char* name, const char* fallback)
+{
+	const char* value = getenv(name);
+	return value && *value ? value : fallback;
+}
+
+static const char* loopback_client_clipboard_text(void)
+{
+	return env_clipboard_text(
+	    "MACRDP_LOOPBACK_CLIENT_CLIPBOARD_TEXT", loopback_client_clipboard_default);
+}
+
+static const char* loopback_server_clipboard_text(void)
+{
+	return env_clipboard_text(
+	    "MACRDP_LOOPBACK_SERVER_CLIPBOARD_TEXT", loopback_server_clipboard_default);
+}
+
+static BOOL loopback_clipboard_format_supported(UINT32 format_id)
+{
+	return format_id == LOOPBACK_CF_UNICODETEXT || format_id == LOOPBACK_CF_TEXT;
+}
+
+static size_t loopback_encode_clipboard(
+    const char* text,
+    UINT32 format_id,
+    BYTE** output)
+{
+	const size_t length = strlen(text);
+	BYTE* data = NULL;
+
+	*output = NULL;
+	if (!loopback_clipboard_format_supported(format_id))
+		return 0;
+
+	if (format_id == LOOPBACK_CF_UNICODETEXT)
+	{
+		if (length > (SIZE_MAX / 2U) - 1U)
+			return 0;
+		data = (BYTE*)malloc((length + 1U) * 2U);
+		if (!data)
+			return 0;
+		for (size_t index = 0; index < length; index++)
+		{
+			if ((unsigned char)text[index] > 0x7FU)
+			{
+				free(data);
+				return 0;
+			}
+			data[index * 2U] = (BYTE)text[index];
+			data[index * 2U + 1U] = 0;
+		}
+		data[length * 2U] = 0;
+		data[length * 2U + 1U] = 0;
+		*output = data;
+		return (length + 1U) * 2U;
+	}
+
+	data = (BYTE*)malloc(length + 1U);
+	if (!data)
+		return 0;
+	memcpy(data, text, length);
+	data[length] = 0;
+	*output = data;
+	return length + 1U;
+}
+
+static BOOL loopback_clipboard_data_matches(
+    const CLIPRDR_FORMAT_DATA_RESPONSE* response,
+    UINT32 format_id,
+    const char* expected)
+{
+	const size_t expected_length = strlen(expected);
+	const BYTE* data = response->requestedFormatData;
+	size_t length = response->common.dataLen;
+
+	if ((response->common.msgFlags & CB_RESPONSE_FAIL) != 0
+	    || (data == NULL && length != 0)
+	    || !loopback_clipboard_format_supported(format_id))
+		return FALSE;
+
+	if (format_id == LOOPBACK_CF_UNICODETEXT)
+	{
+		if ((length & 1U) != 0)
+			return FALSE;
+		while (length >= 2U && data[length - 1U] == 0 && data[length - 2U] == 0)
+			length -= 2U;
+		if (length != expected_length * 2U)
+			return FALSE;
+		for (size_t index = 0; index < expected_length; index++)
+		{
+			if (data[index * 2U] != (BYTE)expected[index] || data[index * 2U + 1U] != 0)
+				return FALSE;
+		}
+		return TRUE;
+	}
+
+	while (length > 0 && data[length - 1U] == 0)
+		length--;
+	return length == expected_length
+	    && memcmp(data, expected, expected_length) == 0;
+}
+
+static UINT loopback_send_client_format_list(loopback_context* loop)
+{
+	CLIPRDR_FORMAT formats[2] = { 0 };
+	CLIPRDR_FORMAT_LIST list = { 0 };
+	UINT status = ERROR_INVALID_HANDLE;
+
+	if (!loop || !loop->cliprdr || !loop->cliprdr->ClientFormatList)
+		return status;
+
+	formats[0].formatId = LOOPBACK_CF_UNICODETEXT;
+	formats[1].formatId = LOOPBACK_CF_TEXT;
+	list.common.msgType = CB_FORMAT_LIST;
+	list.numFormats = ARRAYSIZE(formats);
+	list.formats = formats;
+	status = loop->cliprdr->ClientFormatList(loop->cliprdr, &list);
+	if (status == CHANNEL_RC_OK)
+	{
+		loop->clipboard_client_format_lists_sent++;
+		WLog_INFO(TAG, "sent client clipboard format list");
+	}
+	else
+	{
+		loop->clipboard_failures++;
+		WLog_ERR(TAG, "failed to send client clipboard format list: %" PRIu32, status);
+	}
+	return status;
+}
+
+static UINT loopback_monitor_ready(
+    CliprdrClientContext* context,
+    const CLIPRDR_MONITOR_READY* monitor_ready)
+{
+	loopback_context* loop = context ? (loopback_context*)context->custom : NULL;
+	WINPR_UNUSED(monitor_ready);
+	if (!loop)
+		return ERROR_INVALID_PARAMETER;
+	loop->clipboard_monitor_ready = TRUE;
+	WLog_INFO(TAG, "clipboard monitor ready");
+	return CHANNEL_RC_OK;
+}
+
+static UINT loopback_server_format_list(
+    CliprdrClientContext* context,
+    const CLIPRDR_FORMAT_LIST* format_list)
+{
+	loopback_context* loop = context ? (loopback_context*)context->custom : NULL;
+	CLIPRDR_FORMAT_LIST_RESPONSE response = { 0 };
+	CLIPRDR_FORMAT_DATA_REQUEST request = { 0 };
+	UINT32 selected_format = 0;
+	UINT status = CHANNEL_RC_OK;
+
+	if (!loop || !format_list || (format_list->numFormats != 0 && !format_list->formats))
+		return ERROR_INVALID_PARAMETER;
+
+	loop->clipboard_server_format_lists_received++;
+	WLog_INFO(TAG, "received server clipboard format list: formats=%" PRIu32,
+	          format_list->numFormats);
+	for (UINT32 index = 0; index < format_list->numFormats; index++)
+	{
+		const UINT32 format_id = format_list->formats[index].formatId;
+		if (format_id == LOOPBACK_CF_UNICODETEXT)
+		{
+			selected_format = format_id;
+			break;
+		}
+		if (format_id == LOOPBACK_CF_TEXT)
+			selected_format = format_id;
+	}
+
+	response.common.msgType = CB_FORMAT_LIST_RESPONSE;
+	response.common.msgFlags = selected_format ? CB_RESPONSE_OK : CB_RESPONSE_FAIL;
+	if (!context->ClientFormatListResponse)
+		return ERROR_INVALID_HANDLE;
+	status = context->ClientFormatListResponse(context, &response);
+	WLog_INFO(TAG, "sent server clipboard format list response: status=%" PRIu32, status);
+	if (status != CHANNEL_RC_OK)
+	{
+		loop->clipboard_failures++;
+		return status;
+	}
+	loop->clipboard_server_format_list_responses_sent++;
+	if (!selected_format)
+	{
+		loop->clipboard_failures++;
+		return CHANNEL_RC_OK;
+	}
+
+	loop->clipboard_server_format = selected_format;
+	request.common.msgType = CB_FORMAT_DATA_REQUEST;
+	request.requestedFormatId = selected_format;
+	if (!context->ClientFormatDataRequest)
+		return ERROR_INVALID_HANDLE;
+	status = context->ClientFormatDataRequest(context, &request);
+	WLog_INFO(TAG, "sent server clipboard data request: status=%" PRIu32, status);
+	if (status == CHANNEL_RC_OK)
+		loop->clipboard_server_data_requests_sent++;
+	else
+		loop->clipboard_failures++;
+	return status;
+}
+
+static UINT loopback_server_format_data_response(
+    CliprdrClientContext* context,
+    const CLIPRDR_FORMAT_DATA_RESPONSE* response)
+{
+	loopback_context* loop = context ? (loopback_context*)context->custom : NULL;
+
+	if (!loop || !response)
+		return ERROR_INVALID_PARAMETER;
+	loop->clipboard_server_data_responses_received++;
+	if (!loopback_clipboard_data_matches(
+	        response, loop->clipboard_server_format, loopback_server_clipboard_text()))
+	{
+		loop->clipboard_failures++;
+		WLog_ERR(TAG, "server-to-client clipboard content did not match");
+		return ERROR_INVALID_DATA;
+	}
+	loop->clipboard_server_data_received = TRUE;
+	loop->clipboard_matches++;
+	WLog_INFO(TAG, "server-to-client clipboard content matched");
+	return CHANNEL_RC_OK;
+}
+
+static UINT loopback_server_format_list_response(
+    CliprdrClientContext* context,
+    const CLIPRDR_FORMAT_LIST_RESPONSE* response)
+{
+	loopback_context* loop = context ? (loopback_context*)context->custom : NULL;
+
+	if (!loop || !response)
+		return ERROR_INVALID_PARAMETER;
+	loop->clipboard_client_format_list_responses_received++;
+	if ((response->common.msgFlags & CB_RESPONSE_FAIL) != 0)
+		loop->clipboard_failures++;
+	return CHANNEL_RC_OK;
+}
+
+static UINT loopback_server_format_data_request(
+    CliprdrClientContext* context,
+    const CLIPRDR_FORMAT_DATA_REQUEST* request)
+{
+	loopback_context* loop = context ? (loopback_context*)context->custom : NULL;
+	CLIPRDR_FORMAT_DATA_RESPONSE response = { 0 };
+	BYTE* data = NULL;
+	const char* text = NULL;
+	UINT status = CHANNEL_RC_OK;
+
+	if (!loop || !request)
+		return ERROR_INVALID_PARAMETER;
+	loop->clipboard_client_data_requests_received++;
+	WLog_INFO(TAG, "received server clipboard data request: format=%" PRIu32,
+	          request->requestedFormatId);
+	text = loopback_client_clipboard_text();
+	response.common.msgType = CB_FORMAT_DATA_RESPONSE;
+	response.common.msgFlags = CB_RESPONSE_OK;
+	response.common.dataLen = (UINT32)loopback_encode_clipboard(
+	    text, request->requestedFormatId, &data);
+	response.requestedFormatData = data;
+	if (!loopback_clipboard_format_supported(request->requestedFormatId)
+	    || !data || response.common.dataLen == 0)
+	{
+		response.common.msgFlags = CB_RESPONSE_FAIL;
+		response.common.dataLen = 0;
+		response.requestedFormatData = NULL;
+	}
+	if (!context->ClientFormatDataResponse)
+		status = ERROR_INVALID_HANDLE;
+	else
+		status = context->ClientFormatDataResponse(context, &response);
+	free(data);
+	if (status == CHANNEL_RC_OK && response.common.msgFlags == CB_RESPONSE_OK)
+	{
+		loop->clipboard_client_data_responses_sent++;
+		WLog_INFO(TAG, "sent client clipboard data response: bytes=%" PRIu32,
+		          response.common.dataLen);
+	}
+	else
+		loop->clipboard_failures++;
+	return status;
 }
 
 static BOOL loopback_begin_paint(rdpContext* context)
@@ -160,6 +482,19 @@ static void loopback_on_channel_connected(
 
 	if (strcmp(event->name, RDPGFX_DVC_CHANNEL_NAME) == 0)
 		loop->gfx = (RdpgfxClientContext*)event->pInterface;
+	if (strcmp(event->name, CLIPRDR_SVC_CHANNEL_NAME) == 0)
+	{
+		loop->cliprdr = (CliprdrClientContext*)event->pInterface;
+		if (loop->cliprdr)
+		{
+			loop->cliprdr->custom = loop;
+			loop->cliprdr->MonitorReady = loopback_monitor_ready;
+			loop->cliprdr->ServerFormatList = loopback_server_format_list;
+			loop->cliprdr->ServerFormatListResponse = loopback_server_format_list_response;
+			loop->cliprdr->ServerFormatDataRequest = loopback_server_format_data_request;
+			loop->cliprdr->ServerFormatDataResponse = loopback_server_format_data_response;
+		}
+	}
 
 	freerdp_client_OnChannelConnectedEventHandler(&loop->common, event);
 }
@@ -176,6 +511,8 @@ static void loopback_on_channel_disconnected(
 	freerdp_client_OnChannelDisconnectedEventHandler(&loop->common, event);
 	if (strcmp(event->name, RDPGFX_DVC_CHANNEL_NAME) == 0)
 		loop->gfx = NULL;
+	if (strcmp(event->name, CLIPRDR_SVC_CHANNEL_NAME) == 0)
+		loop->cliprdr = NULL;
 }
 
 static BOOL loopback_end_paint(rdpContext* context)
@@ -267,7 +604,8 @@ static BOOL loopback_pre_connect(freerdp* instance)
 	    || !freerdp_settings_set_bool(settings, FreeRDP_SupportMultitransport, FALSE)
 	    || !freerdp_settings_set_bool(settings, FreeRDP_UnicodeInput, TRUE)
 	    || !freerdp_settings_set_bool(settings, FreeRDP_HasExtendedMouseEvent, TRUE)
-	    || !freerdp_settings_set_bool(settings, FreeRDP_HasHorizontalWheel, TRUE))
+	    || !freerdp_settings_set_bool(settings, FreeRDP_HasHorizontalWheel, TRUE)
+	    || !freerdp_settings_set_bool(settings, FreeRDP_RedirectClipboard, TRUE))
 		return FALSE;
 
 	return TRUE;
@@ -428,6 +766,8 @@ static DWORD loopback_run(loopback_context* loop)
 	DWORD status = 0;
 	DWORD count = 0;
 	DWORD result = 0;
+	const DWORD event_delay_ms = env_event_delay_ms();
+	const uint64_t slow_start_us = loop->connected_us + UINT64_C(2000000);
 
 	if (!freerdp_connect(instance))
 	{
@@ -447,6 +787,12 @@ static DWORD loopback_run(loopback_context* loop)
 		{
 			loopback_send_input(loop);
 			loop->next_input_us = now + UINT64_C(1000000);
+		}
+		if (loop->clipboard_monitor_ready && loop->clipboard_server_data_received
+		    && !loop->clipboard_client_format_list_sent)
+		{
+			if (loopback_send_client_format_list(loop) == CHANNEL_RC_OK)
+				loop->clipboard_client_format_list_sent = TRUE;
 		}
 
 		count = freerdp_get_event_handles(context, handles, ARRAYSIZE(handles));
@@ -470,6 +816,11 @@ static DWORD loopback_run(loopback_context* loop)
 				WLog_ERR(TAG, "event handling failed: 0x%08" PRIx32, result);
 			break;
 		}
+		/* Let protocol setup and the first desktop frame complete before
+		 * deliberately slowing the client event loop. */
+		if (event_delay_ms > 0 && loop->gfx_frame_count > 0
+		    && monotonic_us() >= slow_start_us)
+			Sleep(event_delay_ms);
 		loopback_sample_gfx(loop, monotonic_us());
 	}
 
@@ -535,6 +886,16 @@ int main(int argc, char** argv)
 	       " input_unicode_events_sent=%" PRIu64
 	       " input_wheel_events_sent=%" PRIu64
 	       " input_send_failures=%" PRIu64
+	       " clipboard_server_format_lists_received=%" PRIu64
+	       " clipboard_server_format_list_responses_sent=%" PRIu64
+	       " clipboard_server_data_requests_sent=%" PRIu64
+	       " clipboard_server_data_responses_received=%" PRIu64
+	       " clipboard_client_format_lists_sent=%" PRIu64
+	       " clipboard_client_format_list_responses_received=%" PRIu64
+	       " clipboard_client_data_requests_received=%" PRIu64
+	       " clipboard_client_data_responses_sent=%" PRIu64
+	       " clipboard_matches=%" PRIu64
+	       " clipboard_failures=%" PRIu64
 	       " gfx_frames=%" PRIu64 " gfx_first_frame_ms=%" PRIu64
 	       " gfx_avg_interval_ms=%" PRIu64 " gfx_max_interval_ms=%" PRIu64
 	       " gfx_wire_commands=%" PRIu64 " gfx_avc420=%" PRIu64
@@ -561,6 +922,16 @@ int main(int argc, char** argv)
 	       loop->input_unicode_events_sent,
 	       loop->input_wheel_events_sent,
 	       loop->input_send_failures,
+	       loop->clipboard_server_format_lists_received,
+	       loop->clipboard_server_format_list_responses_sent,
+	       loop->clipboard_server_data_requests_sent,
+	       loop->clipboard_server_data_responses_received,
+	       loop->clipboard_client_format_lists_sent,
+	       loop->clipboard_client_format_list_responses_received,
+	       loop->clipboard_client_data_requests_received,
+	       loop->clipboard_client_data_responses_sent,
+	       loop->clipboard_matches,
+	       loop->clipboard_failures,
 	       loop->gfx_frame_count,
 	       loop->gfx_first_frame_us > loop->connected_us
 	           ? (loop->gfx_first_frame_us - loop->connected_us) / UINT64_C(1000)

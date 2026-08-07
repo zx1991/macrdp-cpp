@@ -244,7 +244,7 @@
 +
 +struct rdp_transport_write_item
 +{
-+	wStream* stream;
++	BYTE* data;
 +	size_t offset;
 +	size_t length;
 +	rdpTransportWriteItem* next;
@@ -263,7 +263,7 @@
  	UINT64 written;
  	HANDLE rereadEvent;
  	BOOL haveMoreBytesToRead;
-@@ -104,7 +120,140 @@
+@@ -104,7 +120,152 @@
  	rdpTransportLayer pub;
  	void* userContextShadowPtr;
  } rdpTransportLayerInt;
@@ -274,7 +274,7 @@
 +	while (item)
 +	{
 +		rdpTransportWriteItem* next = item->next;
-+		Stream_Release(item->stream);
++		free(item->data);
 +		free(item);
 +		item = next;
 +	}
@@ -302,9 +302,20 @@
 +	if (!item)
 +		return FALSE;
 +
-+	Stream_AddRef(stream);
-+	item->stream = stream;
-+	item->offset = offset;
++	if (offset > Stream_Length(stream) || length > Stream_Length(stream) - offset)
++	{
++		free(item);
++		return FALSE;
++	}
++
++	item->data = (BYTE*)malloc(length);
++	if (!item->data)
++	{
++		free(item);
++		return FALSE;
++	}
++	memcpy(item->data, Stream_Buffer(stream) + offset, length);
++	item->offset = 0;
 +	item->length = length;
 +	if (transport->writeQueueTail)
 +		transport->writeQueueTail->next = item;
@@ -321,6 +332,7 @@
 +static int transport_write_queue_drain(rdpTransport* transport, BOOL wait)
 +{
 +	/* MACRDP_NONBLOCKING_WRITE_QUEUE */
++	/* MACRDP_WRITE_QUEUE_COPY: queued bytes must not alias a reusable wStream. */
 +	size_t budget = wait ? SIZE_MAX : MACRDP_WRITE_BUDGET;
 +	while (transport->writeQueueHead)
 +	{
@@ -366,7 +378,7 @@
 +			const size_t bounded = (chunk > budget) ? budget : chunk;
 +			const int towrite = (int)bounded;
 +			const int status = BIO_write(transport->frontBio,
-+			                             Stream_Buffer(item->stream) + item->offset,
++			                             item->data + item->offset,
 +			                             towrite);
 +			if (status > 0)
 +			{
@@ -394,7 +406,7 @@
 +		transport->writeQueueHead = item->next;
 +		if (!transport->writeQueueHead)
 +			transport->writeQueueTail = nullptr;
-+		Stream_Release(item->stream);
++		free(item->data);
 +		free(item);
 +	}
 +
