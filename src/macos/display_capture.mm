@@ -14,6 +14,7 @@
 #include <limits>
 #include <mutex>
 #include <utility>
+#include <vector>
 
 namespace {
 
@@ -65,10 +66,24 @@ struct CaptureState {
     mutable std::mutex mutex;
     std::condition_variable condition;
     std::optional<macrdp::Frame> latest_frame;
+    std::optional<macrdp::Frame> reusable_frame;
     std::string error;
     bool accepting_frames = false;
     bool stopped = true;
 };
+
+void recycle_frame_locked(CaptureState& state, macrdp::Frame frame) noexcept {
+    try {
+        frame.dirty_rects.clear();
+        if (!state.reusable_frame.has_value()
+            || state.reusable_frame->bgra.capacity() < frame.bgra.capacity()) {
+            state.reusable_frame = std::move(frame);
+        }
+    } catch (...) {
+        // Recycling is only an allocation optimization; a frame can still be
+        // released normally when storage cannot be retained.
+    }
+}
 
 bool sample_status_is_usable(CMSampleBufferRef sample_buffer) {
     CFArrayRef attachments = CMSampleBufferGetSampleAttachmentsArray(
@@ -188,27 +203,43 @@ bool copy_sample_buffer(CMSampleBufferRef sample_buffer, macrdp::Frame& frame) {
         return false;
     }
 
-    macrdp::Frame copied;
-    copied.width = static_cast<std::uint32_t>(width);
-    copied.height = static_cast<std::uint32_t>(height);
-    copied.stride = bytes_per_row;
-    copied.timestamp_us = timestamp_us();
-    copied.bgra.resize(bytes_per_row * height);
+    const auto copy_started = std::chrono::steady_clock::now();
+    try {
+        frame.bgra.resize(bytes_per_row * height);
+    } catch (...) {
+        CVPixelBufferUnlockBaseAddress(pixel_buffer, kCVPixelBufferLock_ReadOnly);
+        return false;
+    }
+
+    frame.width = static_cast<std::uint32_t>(width);
+    frame.height = static_cast<std::uint32_t>(height);
+    frame.stride = bytes_per_row;
+    frame.timestamp_us = timestamp_us();
+    frame.capture_copy_time_us = 0;
+    frame.dirty_rects.clear();
 
     for (std::size_t y = 0; y < height; ++y) {
         std::memcpy(
-            copied.bgra.data() + y * bytes_per_row,
+            frame.bgra.data() + y * bytes_per_row,
             base_address + y * bytes_per_row,
             bytes_per_row);
     }
 
     CVPixelBufferUnlockBaseAddress(pixel_buffer, kCVPixelBufferLock_ReadOnly);
-    copy_dirty_rects(
-        sample_buffer,
-        copied.width,
-        copied.height,
-        copied);
-    frame = std::move(copied);
+    try {
+        copy_dirty_rects(
+            sample_buffer,
+            frame.width,
+            frame.height,
+            frame);
+    } catch (...) {
+        // Missing metadata is intentionally treated as a full-frame update.
+        frame.dirty_rects.clear();
+    }
+    frame.capture_copy_time_us = static_cast<std::uint64_t>(
+        std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now() - copy_started)
+            .count());
     return true;
 }
 
@@ -299,23 +330,56 @@ std::pair<std::size_t, std::size_t> output_size(
         return;
     }
 
-    macrdp::Frame frame;
-    if (!copy_sample_buffer(sampleBuffer, frame)) {
-        return;
-    }
-
     const auto state = state_;
+    macrdp::Frame frame;
+    std::vector<macrdp::FrameRect> dropped_dirty_rects;
+    std::uint32_t dropped_width = 0;
+    std::uint32_t dropped_height = 0;
+    bool reused_pending_frame = false;
     {
         std::lock_guard lock(state->mutex);
         if (!state->accepting_frames) {
             return;
         }
 
-        // Keep only the newest pixels. If an older pending frame is replaced,
-        // preserve its dirty area so skipped changes cannot remain stale on
-        // the RDP surface.
         if (state->latest_frame.has_value()) {
-            macrdp::coalesce_dropped_frame_dirty_regions(*state->latest_frame, frame);
+            frame = std::move(*state->latest_frame);
+            state->latest_frame.reset();
+            dropped_width = frame.width;
+            dropped_height = frame.height;
+            dropped_dirty_rects = std::move(frame.dirty_rects);
+            reused_pending_frame = true;
+        } else if (state->reusable_frame.has_value()) {
+            frame = std::move(*state->reusable_frame);
+            state->reusable_frame.reset();
+        }
+    }
+
+    if (!copy_sample_buffer(sampleBuffer, frame)) {
+        std::lock_guard lock(state->mutex);
+        if (reused_pending_frame && state->accepting_frames
+            && !state->latest_frame.has_value()) {
+            frame.dirty_rects = std::move(dropped_dirty_rects);
+            state->latest_frame = std::move(frame);
+        } else {
+            recycle_frame_locked(*state, std::move(frame));
+        }
+        return;
+    }
+
+    if (reused_pending_frame) {
+        macrdp::Frame dropped_metadata;
+        dropped_metadata.width = dropped_width;
+        dropped_metadata.height = dropped_height;
+        dropped_metadata.dirty_rects = std::move(dropped_dirty_rects);
+        macrdp::coalesce_dropped_frame_dirty_regions(dropped_metadata, frame);
+    }
+
+    {
+        std::lock_guard lock(state->mutex);
+        if (!state->accepting_frames) {
+            recycle_frame_locked(*state, std::move(frame));
+            return;
         }
         state->latest_frame = std::move(frame);
     }
@@ -353,6 +417,7 @@ struct DisplayCapture::Impl {
     [[nodiscard]] bool start();
     [[nodiscard]] bool start_locked();
     [[nodiscard]] std::optional<Frame> next_frame(std::chrono::milliseconds timeout);
+    void recycle_frame(Frame frame) noexcept;
     [[nodiscard]] bool reconfigure(DisplayCaptureOptions next_options);
     void stop() noexcept;
     [[nodiscard]] std::string last_error() const;
@@ -399,6 +464,9 @@ void stop_stream(SCStream* stream, MacCaptureOutput* output) {
 bool DisplayCapture::Impl::start_locked() {
     {
         std::lock_guard lock(state->mutex);
+        if (state->latest_frame.has_value()) {
+            recycle_frame_locked(*state, std::move(*state->latest_frame));
+        }
         state->latest_frame.reset();
         state->error.clear();
         state->accepting_frames = false;
@@ -558,6 +626,18 @@ std::optional<Frame> DisplayCapture::Impl::next_frame(
     return frame;
 }
 
+void DisplayCapture::Impl::recycle_frame(Frame frame) noexcept {
+    try {
+        std::lock_guard lock(state->mutex);
+        if (!state->accepting_frames || state->stopped) {
+            return;
+        }
+        recycle_frame_locked(*state, std::move(frame));
+    } catch (...) {
+        // Recycling must never affect shutdown or the publish thread.
+    }
+}
+
 void DisplayCapture::Impl::stop() noexcept {
     std::lock_guard lifecycle_lock(lifecycle_mutex);
     {
@@ -594,6 +674,10 @@ bool DisplayCapture::start() {
 
 std::optional<Frame> DisplayCapture::next_frame(std::chrono::milliseconds timeout) {
     return impl_->next_frame(timeout);
+}
+
+void DisplayCapture::recycle_frame(Frame frame) noexcept {
+    impl_->recycle_frame(std::move(frame));
 }
 
 bool DisplayCapture::reconfigure(DisplayCaptureOptions options) {

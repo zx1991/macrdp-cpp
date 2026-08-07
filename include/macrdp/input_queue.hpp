@@ -8,6 +8,20 @@
 
 namespace macrdp {
 
+// Replace only the trailing event when both events are safe to coalesce. A
+// caller can use this for pointer motion while preserving clicks and keys.
+template <typename Event, typename Predicate>
+bool replace_trailing_coalescible(
+    std::deque<Event>& queue,
+    const Event& event,
+    Predicate predicate) {
+    if (!predicate(event) || queue.empty() || !predicate(queue.back())) {
+        return false;
+    }
+    queue.back() = event;
+    return true;
+}
+
 // A disconnect reset is a barrier for one client's queued input. Discarding
 // that client's stale events prevents a late key-up or click from running
 // after its state has already been released.

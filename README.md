@@ -196,9 +196,12 @@ but NLA is the default and recommended mode. Empty passwords are rejected.
 
 The server logs the captured frame size and RDP surface size once per change.
 They should normally match; a difference means the captured image is being
-scaled to the RDP surface. A `Slow frame update` warning reports capture-copy
-and frame-publish time. `Slow client frame handling` reports time spent in the
-FreeRDP client loop, including protocol output and completion delivery.
+scaled to the RDP surface. `Frame pipeline` reports capture-copy time,
+surface-copy time, the number of coalesced frames, and the time spent waiting
+for the client publish barrier. A `Slow frame update` warning reports the same
+surface-copy and publish-wait stages for an individual slow update.
+`Slow client frame handling` reports time spent in the FreeRDP client loop,
+including protocol output and completion delivery.
 When the direct encoder is active, the log also contains `Using direct macOS
 VideoToolbox H264 bridge`. If that line is replaced by a fallback warning,
 the session is using software H.264 encoding.

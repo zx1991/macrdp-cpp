@@ -22,6 +22,8 @@ struct QueuedEvent {
     macrdp::InputClientId client_id = 0;
     int sequence = 0;
     bool reset = false;
+    bool motion = false;
+    int x = 0;
 };
 
 bool test_reset_priority() {
@@ -40,10 +42,32 @@ bool test_reset_priority() {
                    "other client input order changed");
 }
 
+bool test_motion_coalescing() {
+    const auto is_motion = [](const QueuedEvent& event) { return event.motion; };
+    std::deque<QueuedEvent> queue{{1, 10, false, true, 100},
+                                  {1, 11, false, false, 110}};
+
+    const bool click_preserved = !macrdp::replace_trailing_coalescible(
+        queue,
+        QueuedEvent{1, 12, false, true, 120},
+        is_motion);
+    queue.pop_back();
+    const bool motion_replaced = macrdp::replace_trailing_coalescible(
+        queue,
+        QueuedEvent{1, 13, false, true, 130},
+        is_motion);
+    return expect(click_preserved, "coalescing replaced a trailing click")
+        && expect(motion_replaced, "coalescing did not replace trailing motion")
+        && expect(queue.size() == 1 && queue.back().sequence == 13
+                      && queue.back().x == 130,
+                   "coalescing did not retain the newest pointer position");
+}
+
 } // namespace
 
 int main() {
     bool ok = test_reset_priority();
+    ok = test_motion_coalescing() && ok;
     macrdp::InputOwnership ownership;
 
     ok = expect(ownership.acquire_key(1, 30), "first key owner was not announced") && ok;

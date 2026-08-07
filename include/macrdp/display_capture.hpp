@@ -49,6 +49,10 @@ public:
     [[nodiscard]] std::optional<Frame> next_frame(
         std::chrono::milliseconds timeout = std::chrono::milliseconds{1000});
 
+    // Returns a consumed frame's allocated pixel storage to the capture
+    // callback. The frame may be dropped when the stream is stopping.
+    void recycle_frame(Frame frame) noexcept;
+
     // Rebuilds the ScreenCaptureKit stream with new output limits. This is
     // used when macOS changes the selected display's pixel dimensions.
     [[nodiscard]] bool reconfigure(DisplayCaptureOptions options);

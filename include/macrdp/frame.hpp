@@ -25,6 +25,8 @@ struct Frame {
     std::uint32_t height = 0;
     std::size_t stride = 0;
     std::uint64_t timestamp_us = 0;
+    // Time spent by ScreenCaptureKit's callback copying this sample into BGRA.
+    std::uint64_t capture_copy_time_us = 0;
     // Pixels are tightly represented as BGRA rows with `stride` bytes per row.
     std::vector<std::uint8_t> bgra;
     // ScreenCaptureKit reports the portions redrawn for this frame. An empty

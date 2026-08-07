@@ -144,6 +144,12 @@ struct mac_shadow_subsystem {
     std::atomic<std::uint64_t> published_frames{0};
     std::atomic<std::uint64_t> changed_frames{0};
     std::atomic<std::uint64_t> copied_bytes{0};
+    std::atomic<std::uint64_t> capture_copy_time_us_total{0};
+    std::atomic<std::uint64_t> capture_copy_time_us_max{0};
+    std::atomic<std::uint64_t> surface_copy_time_us_total{0};
+    std::atomic<std::uint64_t> surface_copy_time_us_max{0};
+    std::atomic<std::uint64_t> publish_wait_time_us_total{0};
+    std::atomic<std::uint64_t> publish_wait_time_us_max{0};
     std::chrono::steady_clock::time_point last_pipeline_log{};
 };
 
@@ -152,6 +158,19 @@ using MacShadowSubsystem = struct mac_shadow_subsystem;
 constexpr std::size_t kInputQueueLimit = 4096;
 constexpr std::uint16_t kExtendedKeyIdentityBit = 0x0100U;
 constexpr std::uint16_t kExtended1KeyIdentityBit = 0x0200U;
+
+void record_atomic_max(
+    std::atomic<std::uint64_t>& target,
+    std::uint64_t value) noexcept {
+    auto current = target.load(std::memory_order_relaxed);
+    while (value > current
+           && !target.compare_exchange_weak(
+               current,
+               value,
+               std::memory_order_relaxed,
+               std::memory_order_relaxed)) {
+    }
+}
 
 macrdp::InputClientId register_input_client(
     MacShadowSubsystem* subsystem,
@@ -737,9 +756,10 @@ bool enqueue_input_event(MacShadowSubsystem* subsystem, InputEvent event) {
     // pending motion with the newest point instead of letting it build
     // latency behind clicks and keystrokes.
     if (is_coalescible_mouse_move(event)) {
-        if (!subsystem->input_queue.empty()
-            && is_coalescible_mouse_move(subsystem->input_queue.back())) {
-            subsystem->input_queue.back() = event;
+        if (macrdp::replace_trailing_coalescible(
+                subsystem->input_queue,
+                event,
+                is_coalescible_mouse_move)) {
             lock.unlock();
             subsystem->input_queue_condition.notify_one();
             return true;
@@ -1172,6 +1192,16 @@ bool copy_frame_to_surface(MacShadowSubsystem* subsystem, const macrdp::Frame& f
     }
     LeaveCriticalSection(&surface->lock);
 
+    const auto copy_finished = std::chrono::steady_clock::now();
+    const auto copy_elapsed_us = static_cast<std::uint64_t>(
+        std::chrono::duration_cast<std::chrono::microseconds>(
+            copy_finished - copy_started)
+            .count());
+    subsystem->surface_copy_time_us_total.fetch_add(
+        copy_elapsed_us,
+        std::memory_order_relaxed);
+    record_atomic_max(subsystem->surface_copy_time_us_max, copy_elapsed_us);
+
     subsystem->published_frames.fetch_add(1, std::memory_order_relaxed);
     subsystem->copied_bytes.fetch_add(copied_bytes, std::memory_order_relaxed);
     if (changed) {
@@ -1183,7 +1213,6 @@ bool copy_frame_to_surface(MacShadowSubsystem* subsystem, const macrdp::Frame& f
         return true;
     }
 
-    const auto copy_finished = std::chrono::steady_clock::now();
     // The surface lock must be released before this barrier: clients take
     // the same lock while consuming the published frame.
     shadow_subsystem_frame_update(&subsystem->common);
@@ -1193,6 +1222,14 @@ bool copy_frame_to_surface(MacShadowSubsystem* subsystem, const macrdp::Frame& f
         copy_finished - copy_started);
     const auto publish_wait = std::chrono::duration_cast<std::chrono::milliseconds>(
         update_finished - copy_finished);
+    const auto publish_wait_us = static_cast<std::uint64_t>(
+        std::chrono::duration_cast<std::chrono::microseconds>(
+            update_finished - copy_finished)
+            .count());
+    subsystem->publish_wait_time_us_total.fetch_add(
+        publish_wait_us,
+        std::memory_order_relaxed);
+    record_atomic_max(subsystem->publish_wait_time_us_max, publish_wait_us);
     if (copy_time >= std::chrono::milliseconds{100}
         || publish_wait >= std::chrono::milliseconds{200}) {
         const auto now = std::chrono::steady_clock::now();
@@ -1285,6 +1322,12 @@ void capture_loop(MacShadowSubsystem* subsystem) {
         auto frame = subsystem->capture->next_frame(std::chrono::milliseconds{250});
         if (frame.has_value()) {
             subsystem->captured_frames.fetch_add(1, std::memory_order_relaxed);
+            subsystem->capture_copy_time_us_total.fetch_add(
+                frame->capture_copy_time_us,
+                std::memory_order_relaxed);
+            record_atomic_max(
+                subsystem->capture_copy_time_us_max,
+                frame->capture_copy_time_us);
             {
                 std::lock_guard lock(subsystem->pending_frame_mutex);
                 if (subsystem->stop_requested.load()) {
@@ -1348,7 +1391,9 @@ void publish_loop(MacShadowSubsystem* subsystem) {
             subsystem->pending_frame.reset();
         }
 
-        if (!copy_frame_to_surface(subsystem, *frame)) {
+        const bool copy_succeeded = copy_frame_to_surface(subsystem, *frame);
+        subsystem->capture->recycle_frame(std::move(*frame));
+        if (!copy_succeeded) {
             request_capture_stop(subsystem, "Could not copy ScreenCaptureKit frame to RDP surface");
             break;
         }
@@ -1356,14 +1401,32 @@ void publish_loop(MacShadowSubsystem* subsystem) {
         const auto now = std::chrono::steady_clock::now();
         if (subsystem->last_pipeline_log.time_since_epoch().count() == 0
             || now - subsystem->last_pipeline_log >= std::chrono::seconds{5}) {
+            const auto captured = subsystem->captured_frames.load(std::memory_order_relaxed);
+            const auto published = subsystem->published_frames.load(std::memory_order_relaxed);
+            const auto changed = subsystem->changed_frames.load(std::memory_order_relaxed);
+            const auto capture_total_us = subsystem->capture_copy_time_us_total.load(
+                std::memory_order_relaxed);
+            const auto surface_total_us = subsystem->surface_copy_time_us_total.load(
+                std::memory_order_relaxed);
+            const auto publish_total_us = subsystem->publish_wait_time_us_total.load(
+                std::memory_order_relaxed);
             WLog_INFO(TAG,
                       "Frame pipeline: captured=%" PRIu64 " published=%" PRIu64
-                      " changed=%" PRIu64 " coalesced=%" PRIu64 " copied=%" PRIu64 " bytes",
-                      subsystem->captured_frames.load(std::memory_order_relaxed),
-                      subsystem->published_frames.load(std::memory_order_relaxed),
-                      subsystem->changed_frames.load(std::memory_order_relaxed),
+                      " changed=%" PRIu64 " coalesced=%" PRIu64 " copied=%" PRIu64
+                      " bytes capture_copy_avg=%" PRIu64 "ms capture_copy_max=%" PRIu64
+                      "ms surface_copy_avg=%" PRIu64 "ms surface_copy_max=%" PRIu64
+                      "ms publish_wait_avg=%" PRIu64 "ms publish_wait_max=%" PRIu64 "ms",
+                      captured,
+                      published,
+                      changed,
                       subsystem->coalesced_frames.load(std::memory_order_relaxed),
-                      subsystem->copied_bytes.load(std::memory_order_relaxed));
+                      subsystem->copied_bytes.load(std::memory_order_relaxed),
+                      captured == 0 ? 0 : capture_total_us / captured / 1000,
+                      subsystem->capture_copy_time_us_max.load(std::memory_order_relaxed) / 1000,
+                      published == 0 ? 0 : surface_total_us / published / 1000,
+                      subsystem->surface_copy_time_us_max.load(std::memory_order_relaxed) / 1000,
+                      changed == 0 ? 0 : publish_total_us / changed / 1000,
+                      subsystem->publish_wait_time_us_max.load(std::memory_order_relaxed) / 1000);
             subsystem->last_pipeline_log = now;
         }
     }
@@ -1429,6 +1492,12 @@ int mac_shadow_subsystem_start(rdpShadowSubsystem* base) {
     subsystem->published_frames.store(0, std::memory_order_relaxed);
     subsystem->changed_frames.store(0, std::memory_order_relaxed);
     subsystem->copied_bytes.store(0, std::memory_order_relaxed);
+    subsystem->capture_copy_time_us_total.store(0, std::memory_order_relaxed);
+    subsystem->capture_copy_time_us_max.store(0, std::memory_order_relaxed);
+    subsystem->surface_copy_time_us_total.store(0, std::memory_order_relaxed);
+    subsystem->surface_copy_time_us_max.store(0, std::memory_order_relaxed);
+    subsystem->publish_wait_time_us_total.store(0, std::memory_order_relaxed);
+    subsystem->publish_wait_time_us_max.store(0, std::memory_order_relaxed);
     subsystem->last_pipeline_log = {};
     {
         std::lock_guard input_lock(subsystem->input_queue_mutex);
