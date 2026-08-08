@@ -355,6 +355,12 @@ static BOOL env_keyboard_probe_enabled(void)
 	return value && *value && *value != '0' && *value != 'n' && *value != 'N';
 }
 
+static BOOL env_fastpath_input_enabled(void)
+{
+	const char* value = getenv("MACRDP_LOOPBACK_FASTPATH_INPUT");
+	return !(value && (*value == '0' || *value == 'n' || *value == 'N'));
+}
+
 static BOOL env_gfx_enabled(void)
 {
 	const char* value = getenv("MACRDP_LOOPBACK_GFX");
@@ -818,6 +824,7 @@ static BOOL loopback_pre_connect(freerdp* instance)
 	rdpSettings* settings = NULL;
 	const BOOL gfx_enabled = env_gfx_enabled();
 	const BOOL gfx_avc444 = gfx_enabled && env_gfx_avc444();
+	const BOOL fastpath_input = env_fastpath_input_enabled();
 	const char* audio_format = getenv("MACRDP_LOOPBACK_AUDIO_FORMAT");
 	const char* audio_channel[] = { RDPSND_CHANNEL_NAME, "sys:macrdp", NULL,
 	                              "rate:44100", "channel:2" };
@@ -861,6 +868,7 @@ static BOOL loopback_pre_connect(freerdp* instance)
 	    || !freerdp_settings_set_bool(settings, FreeRDP_DeviceRedirection, TRUE)
 	    || !freerdp_settings_set_bool(settings, FreeRDP_AudioPlayback, TRUE)
 	    || !freerdp_settings_set_bool(settings, FreeRDP_NetworkAutoDetect, FALSE)
+	    || !freerdp_settings_set_bool(settings, FreeRDP_FastPathInput, fastpath_input)
 	    || !freerdp_settings_set_bool(settings, FreeRDP_SupportSkipChannelJoin, FALSE)
 	    || !freerdp_settings_set_bool(settings, FreeRDP_SupportHeartbeatPdu, FALSE)
 	    || !freerdp_settings_set_bool(settings, FreeRDP_SupportMultitransport, FALSE)
@@ -893,8 +901,10 @@ static BOOL loopback_post_connect(freerdp* instance)
 	instance->context->update->BeginPaint = loopback_begin_paint;
 	instance->context->update->EndPaint = loopback_end_paint;
 	instance->context->update->DesktopResize = loopback_desktop_resize;
-	WLog_INFO(TAG, "connected; duration=%" PRIu64 "ms gfx=%s",
-	          loop->duration_us / UINT64_C(1000), env_gfx_enabled() ? "on" : "off");
+	WLog_INFO(TAG, "connected; duration=%" PRIu64 "ms gfx=%s input=%s",
+	          loop->duration_us / UINT64_C(1000),
+	          env_gfx_enabled() ? "on" : "off",
+	          env_fastpath_input_enabled() ? "fastpath" : "slowpath");
 	return TRUE;
 }
 
@@ -950,11 +960,21 @@ static int loopback_client_stop(rdpContext* context)
 }
 
 static void loopback_record_input_result(
-    loopback_context* loop,
-    uint64_t* counter,
-    BOOL result)
+	loopback_context* loop,
+	uint64_t* counter,
+	BOOL result)
 {
 	(*counter)++;
+	if (!result)
+		loop->input_send_failures++;
+}
+
+static void loopback_record_keyboard_batch_result(
+	loopback_context* loop,
+	uint64_t event_count,
+	BOOL result)
+{
+	loop->input_keyboard_events_sent += event_count;
 	if (!result)
 		loop->input_send_failures++;
 }
@@ -1018,6 +1038,15 @@ static void loopback_send_keyboard_repeat_sequence(loopback_context* loop, UINT3
 	    freerdp_input_send_keyboard_event_ex(input, FALSE, FALSE, scan_code));
 }
 
+static void loopback_send_keyboard_pause_sequence(loopback_context* loop)
+{
+	rdpInput* input = loop->common.context.input;
+	loopback_record_keyboard_batch_result(
+	    loop,
+	    4,
+	    freerdp_input_send_keyboard_pause_event(input));
+}
+
 static void loopback_send_input(loopback_context* loop)
 {
 	rdpInput* input = loop->common.context.input;
@@ -1067,6 +1096,23 @@ static void loopback_send_input(loopback_context* loop)
 		        input,
 		        KBD_FLAGS_RELEASE,
 		        RDP_SCANCODE_CODE(RDP_SCANCODE_LWIN)));
+		// Exercise the E1 Pause sequence used by mstsc. The shadow API receives
+		// its four constituent scan-code events rather than a separate Pause
+		// callback, so this also verifies that the synthetic Control event does
+		// not remain owned after the sequence completes.
+		loopback_send_keyboard_pause_sequence(loop);
+		// Check recovery for a right-side modifier as well as the Windows key.
+		loopback_record_input_result(
+		    loop,
+		    &loop->input_keyboard_events_sent,
+		    freerdp_input_send_keyboard_event_ex(input, TRUE, FALSE, RDP_SCANCODE_RCONTROL));
+		loopback_record_input_result(
+		    loop,
+		    &loop->input_keyboard_events_sent,
+		    freerdp_input_send_keyboard_event(
+		        input,
+		        KBD_FLAGS_RELEASE,
+		        RDP_SCANCODE_CODE(RDP_SCANCODE_RCONTROL)));
 		if (env_keyboard_probe_enabled())
 		{
 			// This opt-in probe exercises the ordinary F scan-code path. It is
@@ -1275,6 +1321,7 @@ int main(int argc, char** argv)
 	       " input_synchronize_events_sent=%" PRIu64
 	       " input_keyboard_events_sent=%" PRIu64
 	       " input_keyboard_repeats_sent=%" PRIu64
+	       " input_fastpath=%u"
 	       " input_unicode_events_sent=%" PRIu64
 	       " input_wheel_events_sent=%" PRIu64
 	       " input_right_button_events_sent=%" PRIu64
@@ -1330,6 +1377,7 @@ int main(int argc, char** argv)
 	       loop->input_synchronize_events_sent,
 	       loop->input_keyboard_events_sent,
 	       loop->input_keyboard_repeats_sent,
+	       env_fastpath_input_enabled() ? 1U : 0U,
 	       loop->input_unicode_events_sent,
 	       loop->input_wheel_events_sent,
 	       loop->input_right_button_events_sent,

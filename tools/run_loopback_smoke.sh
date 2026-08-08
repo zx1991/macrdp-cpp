@@ -32,6 +32,10 @@ case "$keyboard_probe" in
 	""|0|n|N) ;;
 	*) keyboard_probe_enabled=1 ;;
 esac
+expected_keyboard_events=28
+if [ "$keyboard_probe_enabled" = "1" ]; then
+	expected_keyboard_events=30
+fi
 
 usage() {
 	cat <<EOF
@@ -725,6 +729,14 @@ run_client() {
 	mkdir -p "$case_dir"
 	client_log="$case_dir/client.log"
 	client_gfx=0
+	client_fastpath_input=${MACRDP_LOOPBACK_FASTPATH_INPUT:-}
+	if [ -z "$client_fastpath_input" ]; then
+		if [ "$client_mode" = "nogfx" ]; then
+			client_fastpath_input=0
+		else
+			client_fastpath_input=1
+		fi
+	fi
 	client_command=(
 		"$client"
 		/v:127.0.0.1:"$client_port"
@@ -750,6 +762,7 @@ run_client() {
 		MACRDP_LOOPBACK_GFX_CODEC="$gfx_codec" \
 		MACRDP_LOOPBACK_AUDIO_FORMAT="$audio_format" \
 		MACRDP_LOOPBACK_EVENT_DELAY_MS="$event_delay_ms" \
+		MACRDP_LOOPBACK_FASTPATH_INPUT="$client_fastpath_input" \
 		MACRDP_LOOPBACK_CLIENT_CLIPBOARD_TEXT="$client_test_clipboard_text" \
 		MACRDP_LOOPBACK_SERVER_CLIPBOARD_TEXT="$server_test_clipboard_text" \
 		"${client_command[@]}" >"$client_log" 2>&1; then
@@ -774,6 +787,7 @@ run_client() {
 	input_synchronize=$(metric input_synchronize_events_sent "$summary")
 	input_keyboard=$(metric input_keyboard_events_sent "$summary")
 	input_keyboard_repeats=$(metric input_keyboard_repeats_sent "$summary")
+	input_fastpath=$(metric input_fastpath "$summary")
 	input_unicode=$(metric input_unicode_events_sent "$summary")
 	input_wheel=$(metric input_wheel_events_sent "$summary")
 	input_right_button=$(metric input_right_button_events_sent "$summary")
@@ -846,8 +860,11 @@ run_client() {
 	if [ "${input_keyboard_repeats:-0}" -lt 2 ]; then
 		fail "$case_name keyboard repeat probe did not send two repeated key-down events"
 	fi
-	if [ "$keyboard_probe_enabled" = "1" ] && [ "${input_keyboard:-0}" -lt 24 ]; then
-		fail "$case_name keyboard probe did not send the expected F key pair"
+	if [ "${input_keyboard:-0}" -lt "$expected_keyboard_events" ]; then
+		fail "$case_name sent only ${input_keyboard:-0} of the expected $expected_keyboard_events keyboard events"
+	fi
+	if [ -z "$input_fastpath" ] || [ "$input_fastpath" != "$client_fastpath_input" ]; then
+		fail "$case_name did not report the requested input path (expected=$client_fastpath_input actual=${input_fastpath:-missing})"
 	fi
 	if [ "${clipboard_server_lists:-0}" -lt 1 ] \
 		|| [ "${clipboard_server_list_responses:-0}" -lt 1 ] \
@@ -1061,20 +1078,33 @@ check_input_pipeline() {
 	server_keyboard=$(metric_max keyboard "$input_pipeline")
 	server_keyboard_repeats=$(metric_max keyboard_repeats "$input_pipeline")
 	server_keyboard_recoveries=$(metric_max keyboard_release_recoveries "$input_pipeline")
+	server_keyboard_unmatched=$(metric_max keyboard_unmatched_releases "$input_pipeline")
+	server_keyboard_delay=$(metric_max keyboard_queue_delay_max_us "$input_pipeline")
+	server_processed=$(metric_max processed "$input_pipeline")
 	server_unicode=$(metric_max unicode "$input_pipeline")
 	server_wheel=$(metric_max wheel "$input_pipeline")
 	server_failures=$(metric_max injection_failures "$input_pipeline")
 	if [ "${input_synchronize:-0}" -lt 1 ] || [ "${server_synchronize:-0}" -lt 1 ]; then
 		fail "$case_name synchronize input did not reach the server"
 	fi
-	if [ "${input_keyboard:-0}" -lt 2 ] || [ "${server_keyboard:-0}" -lt 2 ]; then
+	if [ "${input_keyboard:-0}" -lt "$expected_keyboard_events" ] \
+		|| [ "${server_keyboard:-0}" -lt "$expected_keyboard_events" ]; then
 		fail "$case_name keyboard input did not reach the server"
 	fi
 	if [ "${input_keyboard_repeats:-0}" -lt 2 ] || [ "${server_keyboard_repeats:-0}" -lt 2 ]; then
 		fail "$case_name keyboard repeat events did not reach the server"
 	fi
-	if [ "${server_keyboard_recoveries:-0}" -lt 1 ]; then
-		fail "$case_name did not exercise keyboard release identity recovery"
+	if [ "${server_keyboard_recoveries:-0}" -lt 2 ]; then
+		fail "$case_name did not exercise both keyboard release identity recovery cases"
+	fi
+	if [ -z "$server_keyboard_delay" ] || [ -z "$server_processed" ]; then
+		fail "$case_name input diagnostics did not report queue delay metrics"
+	fi
+	if [ "${server_processed:-0}" -lt "$expected_keyboard_events" ]; then
+		fail "$case_name input diagnostics reported only ${server_processed:-0} processed events"
+	fi
+	if [ "${server_keyboard_unmatched:-0}" -ne 0 ]; then
+		fail "$case_name reported ${server_keyboard_unmatched} unmatched keyboard releases"
 	fi
 	if [ "${input_unicode:-0}" -lt 2 ] || [ "${server_unicode:-0}" -lt 2 ]; then
 		fail "$case_name Unicode input did not reach the server"

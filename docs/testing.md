@@ -50,16 +50,22 @@ The smoke script uses a real TCP connection to the server and checks:
 - first-frame and inter-frame timing;
 - NLA failure with an incorrect password;
 - mouse buttons, drag, wheel, keyboard, Unicode, and synchronization input;
-- initial, repeated, and released keyboard events, including modifier cleanup;
+- initial, repeated, and released keyboard events, including modifier cleanup,
+  the mstsc-style Pause/E1 sequence, and both FastPath and classic slow-path
+  keyboard delivery;
 - bidirectional text clipboard traffic;
 - PCM and compressed RDPSND negotiation and delivery;
 - reconnect, requested sizes, and changing bidirectional clipboard content;
 - an intentionally slow client event loop on the direct profile.
 
 The server's `Input pipeline` diagnostics also report the current and maximum
-input queue depth, coalesced or discarded pointer motion, and time spent
-waiting for queue capacity. A nonzero critical-event wait is input
-backpressure; it is distinct from a macOS injection failure. The `H.264
+input queue depth, coalesced or discarded pointer motion, time spent waiting
+for queue capacity, and the average/maximum delay from RDP callback enqueue to
+the macOS input worker. A nonzero critical-event wait is input backpressure; it
+is distinct from a macOS injection failure. With `--log-level DEBUG`, keyboard
+diagnostics include the client id, raw flags, scan code, E0/E1 markers, resolved
+macOS key code, and whether the event was recovered or treated as autorepeat.
+The `H.264
 pipeline` diagnostic reports encoder time, coalesced frames, and
 `output_deferred`, the number of completed encodes held until the transport
 became writable. The regular `Output pipeline` diagnostic reports the current
@@ -105,6 +111,11 @@ counters, so a run cannot pass merely because an unrelated encoder or GFX
 codec was used. The profile's separate `nogfx` phase uses classic SurfaceBits
 and is unaffected by `--gfx-codec`.
 
+The smoke script runs normal GFX clients with FastPath input enabled and uses
+the `nogfx` client phase to force classic slow-path input. To select a path for
+an individual loopback client invocation, set
+`MACRDP_LOOPBACK_FASTPATH_INPUT=1` or `MACRDP_LOOPBACK_FASTPATH_INPUT=0`.
+
 Clipboard verification uses a profile-specific wait after the client exits so
 low-bandwidth runs are not mistaken for protocol failures. Override it with
 `MACRDP_LOOPBACK_CLIPBOARD_WAIT_SECONDS` when testing a slower or faster custom
@@ -132,8 +143,10 @@ It also sends a left Windows key-up without its E0 prefix after a matching
 key-down. The server must count this as `keyboard_release_recoveries` and
 release the tracked macOS Command key by its scan-code identity. This catches
 the modifier-sticking failure mode seen with clients that do not preserve the
-extended flag on key-up. `keyboard_unmatched_releases` is a stricter subset
-for releases received without a corresponding key-down in the current session.
+extended flag on key-up. The same recovery is checked for right Control, and
+the four constituent events of the mstsc Pause/E1 sequence are checked for
+balanced ownership. `keyboard_unmatched_releases` is a stricter subset for
+releases received without a corresponding key-down in the current session.
 
 ## Network profiles
 

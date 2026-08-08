@@ -248,7 +248,9 @@ The repository includes a small FreeRDP client used only for protocol testing.
 It connects over `127.0.0.1`, records decoded frame timing and negotiated GFX
 codec counts, sends left/right/middle clicks, a drag, X1/X2 extended mouse
 events, plus harmless keyboard, Unicode, and vertical/horizontal wheel events,
-checks the server's aggregated input counters, verifies bidirectional text
+checks the server's aggregated input counters, exercises the mstsc-style
+Pause/E1 keyboard sequence and both FastPath and classic slow-path input,
+verifies bidirectional text
 clipboard transfer, tests a wrong NLA password, and compares
 GFX/AVC420 (or AVC444 when selected with `--gfx-codec AVC444`) with the
 `--no-gfx` SurfaceBits path. Pass `--h264-encoder ffmpeg` with AVC420 to
@@ -261,8 +263,10 @@ session. The direct profile additionally runs a deliberately slow client event
 loop.
 The client-reported frame pacing is the primary slow-client metric; server slow
 stage diagnostics are supplementary observations. The server logs an `Input
-pipeline` line with received event counts and platform injection failures, and
-an `H.264 pipeline` line with encoder/coalescing statistics and completed
+pipeline` line with received event counts, platform injection failures, and
+RDP-to-input-worker queue delay. With `--log-level DEBUG`, it also records raw
+keyboard flags, scan codes, E0/E1 markers, and resolved macOS key codes. The
+`H.264 pipeline` line has encoder/coalescing statistics and completed
 encodes deferred by a blocked output socket. When output backpressure occurs,
 an `Output pipeline` line reports blocked intervals, drain attempts, and
 recovery. No third-party source is copied or modified by this test.
@@ -307,6 +311,10 @@ tools/run_loopback_smoke.sh --gfx-codec AVC444
 
 The classic SurfaceBits phase is still run separately by the direct profile;
 its updates do not use the selected GFX codec.
+
+The smoke script uses FastPath input for GFX clients and forces classic
+slow-path input in the `--no-gfx` phase. For a standalone loopback client, set
+`MACRDP_LOOPBACK_FASTPATH_INPUT=1` or `MACRDP_LOOPBACK_FASTPATH_INPUT=0`.
 
 To compare software and hardware AVC420 under the same profile, use:
 

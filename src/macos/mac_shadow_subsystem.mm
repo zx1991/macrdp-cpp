@@ -102,6 +102,7 @@ struct InputEvent {
     UINT32 synchronize_flags = 0;
     UINT16 x = 0;
     UINT16 y = 0;
+    std::chrono::steady_clock::time_point enqueued_at{};
 };
 
 struct mac_shadow_subsystem {
@@ -175,6 +176,12 @@ struct mac_shadow_subsystem {
     std::atomic<std::uint64_t> input_drag_events{0};
     std::atomic<std::uint64_t> input_extended_mouse_events{0};
     std::atomic<std::uint64_t> input_injection_failures{0};
+    std::atomic<std::uint64_t> input_events_processed{0};
+    std::atomic<std::uint64_t> input_keyboard_events_processed{0};
+    std::atomic<std::uint64_t> input_event_queue_delay_us_total{0};
+    std::atomic<std::uint64_t> input_event_queue_delay_us_max{0};
+    std::atomic<std::uint64_t> input_keyboard_queue_delay_us_total{0};
+    std::atomic<std::uint64_t> input_keyboard_queue_delay_us_max{0};
     std::atomic<std::uint64_t> input_motion_coalesced{0};
     std::atomic<std::uint64_t> input_motion_dropped{0};
     std::atomic<std::uint64_t> input_queue_wait_events{0};
@@ -188,6 +195,16 @@ using MacShadowSubsystem = struct mac_shadow_subsystem;
 constexpr std::size_t kInputQueueLimit = 4096;
 constexpr std::uint16_t kExtendedKeyIdentityBit = 0x0100U;
 constexpr std::uint16_t kExtended1KeyIdentityBit = 0x0200U;
+
+std::uint16_t keyboard_key_identity(UINT16 flags, UINT8 code) noexcept {
+    return static_cast<std::uint16_t>(code)
+        | ((flags & KBD_FLAGS_EXTENDED) != 0 ? kExtendedKeyIdentityBit : 0U)
+        | ((flags & KBD_FLAGS_EXTENDED1) != 0 ? kExtended1KeyIdentityBit : 0U);
+}
+
+const char* keyboard_action(UINT16 flags) noexcept {
+    return (flags & KBD_FLAGS_RELEASE) != 0 ? "up" : "down";
+}
 
 void record_atomic_max(
     std::atomic<std::uint64_t>& target,
@@ -627,10 +644,21 @@ bool inject_keyboard_event(
         return false;
     }
 
-    const auto key_identity = static_cast<std::uint16_t>(code)
-        | ((flags & KBD_FLAGS_EXTENDED) != 0 ? kExtendedKeyIdentityBit : 0U)
-        | ((flags & KBD_FLAGS_EXTENDED1) != 0 ? kExtended1KeyIdentityBit : 0U);
+    const auto key_identity = keyboard_key_identity(flags, code);
     const bool key_down = (flags & KBD_FLAGS_RELEASE) == 0;
+    WLog_DBG(TAG,
+             "RDP keyboard dispatch: client=%" PRIu64
+             " flags=0x%04" PRIx16 " code=0x%02" PRIx8
+             " identity=0x%04" PRIx16 " action=%s repeat_flag=%u"
+             " extended=%u extended1=%u",
+             client_id,
+             flags,
+             code,
+             key_identity,
+             keyboard_action(flags),
+             (flags & KBD_FLAGS_DOWN) != 0 ? 1U : 0U,
+             (flags & KBD_FLAGS_EXTENDED) != 0 ? 1U : 0U,
+             (flags & KBD_FLAGS_EXTENDED1) != 0 ? 1U : 0U);
     if (!key_down) {
         // Match a release to the identity recorded for the key-down. Some
         // clients lose the E0/E1 marker while forwarding a key-up; dropping
@@ -1057,6 +1085,7 @@ bool enqueue_input_event(MacShadowSubsystem* subsystem, InputEvent event) {
     // pending motion with the newest point instead of letting it build
     // latency behind clicks and keystrokes.
     if (is_coalescible_mouse_move(event)) {
+        event.enqueued_at = std::chrono::steady_clock::now();
         if (macrdp::replace_trailing_coalescible(
                 subsystem->input_queue,
                 event,
@@ -1110,6 +1139,7 @@ bool enqueue_input_event(MacShadowSubsystem* subsystem, InputEvent event) {
             record_atomic_max(subsystem->input_queue_wait_time_us_max, wait_elapsed_us);
         }
     }
+    event.enqueued_at = std::chrono::steady_clock::now();
     subsystem->input_queue.push_back(event);
     record_atomic_max(
         subsystem->input_queue_max_depth,
@@ -1132,6 +1162,19 @@ bool queue_keyboard_event(
     event.client_id = client_id;
     event.flags = flags;
     event.code = code;
+    WLog_DBG(TAG,
+             "RDP keyboard received: client=%" PRIu64
+             " flags=0x%04" PRIx16 " code=0x%02" PRIx8
+             " identity=0x%04" PRIx16 " action=%s repeat_flag=%u"
+             " extended=%u extended1=%u",
+             client_id,
+             flags,
+             code,
+             keyboard_key_identity(flags, code),
+             keyboard_action(flags),
+             (flags & KBD_FLAGS_DOWN) != 0 ? 1U : 0U,
+             (flags & KBD_FLAGS_EXTENDED) != 0 ? 1U : 0U,
+             (flags & KBD_FLAGS_EXTENDED1) != 0 ? 1U : 0U);
     subsystem->input_keyboard_events.fetch_add(1, std::memory_order_relaxed);
     return enqueue_input_event(subsystem, event);
 }
@@ -1388,6 +1431,18 @@ void log_input_pipeline(MacShadowSubsystem* subsystem, bool force) {
         ? 0
         : subsystem->input_queue_wait_time_us_total.load(std::memory_order_relaxed)
             / queue_wait_events;
+    const auto events_processed = subsystem->input_events_processed.load(
+        std::memory_order_relaxed);
+    const auto event_queue_delay_average_us = events_processed == 0
+        ? 0
+        : subsystem->input_event_queue_delay_us_total.load(std::memory_order_relaxed)
+            / events_processed;
+    const auto keyboard_events_processed = subsystem->input_keyboard_events_processed.load(
+        std::memory_order_relaxed);
+    const auto keyboard_queue_delay_average_us = keyboard_events_processed == 0
+        ? 0
+        : subsystem->input_keyboard_queue_delay_us_total.load(std::memory_order_relaxed)
+            / keyboard_events_processed;
     WLog_INFO(
         TAG,
         "Input pipeline: synchronize=%" PRIu64 " keyboard=%" PRIu64
@@ -1401,7 +1456,12 @@ void log_input_pipeline(MacShadowSubsystem* subsystem, bool force) {
         " queue_depth=%" PRIuz " queue_max=%" PRIu64
         " motion_coalesced=%" PRIu64 " motion_dropped=%" PRIu64
         " queue_wait_events=%" PRIu64 " queue_wait_avg_us=%" PRIu64
-        " queue_wait_max_us=%" PRIu64,
+        " queue_wait_max_us=%" PRIu64
+        " processed=%" PRIu64
+        " event_queue_delay_avg_us=%" PRIu64
+        " event_queue_delay_max_us=%" PRIu64
+        " keyboard_queue_delay_avg_us=%" PRIu64
+        " keyboard_queue_delay_max_us=%" PRIu64,
         subsystem->input_synchronize_events.load(std::memory_order_relaxed),
         subsystem->input_keyboard_events.load(std::memory_order_relaxed),
         subsystem->input_keyboard_repeats.load(std::memory_order_relaxed),
@@ -1422,7 +1482,12 @@ void log_input_pipeline(MacShadowSubsystem* subsystem, bool force) {
         subsystem->input_motion_dropped.load(std::memory_order_relaxed),
         queue_wait_events,
         queue_wait_average_us,
-        subsystem->input_queue_wait_time_us_max.load(std::memory_order_relaxed));
+        subsystem->input_queue_wait_time_us_max.load(std::memory_order_relaxed),
+        events_processed,
+        event_queue_delay_average_us,
+        subsystem->input_event_queue_delay_us_max.load(std::memory_order_relaxed),
+        keyboard_queue_delay_average_us,
+        subsystem->input_keyboard_queue_delay_us_max.load(std::memory_order_relaxed));
 }
 
 void input_loop(MacShadowSubsystem* subsystem) {
@@ -1445,6 +1510,40 @@ void input_loop(MacShadowSubsystem* subsystem) {
             subsystem->input_queue.pop_front();
         }
         subsystem->input_queue_space_condition.notify_one();
+
+        const auto dequeued_at = std::chrono::steady_clock::now();
+        std::uint64_t queue_delay_us = 0;
+        if (event.enqueued_at != std::chrono::steady_clock::time_point{}) {
+            queue_delay_us = static_cast<std::uint64_t>(
+                std::chrono::duration_cast<std::chrono::microseconds>(
+                    dequeued_at - event.enqueued_at)
+                    .count());
+            subsystem->input_events_processed.fetch_add(1, std::memory_order_relaxed);
+            subsystem->input_event_queue_delay_us_total.fetch_add(
+                queue_delay_us,
+                std::memory_order_relaxed);
+            record_atomic_max(subsystem->input_event_queue_delay_us_max, queue_delay_us);
+            if (event.kind == InputEventKind::keyboard) {
+                subsystem->input_keyboard_events_processed.fetch_add(
+                    1,
+                    std::memory_order_relaxed);
+                subsystem->input_keyboard_queue_delay_us_total.fetch_add(
+                    queue_delay_us,
+                    std::memory_order_relaxed);
+                record_atomic_max(
+                    subsystem->input_keyboard_queue_delay_us_max,
+                    queue_delay_us);
+                WLog_DBG(TAG,
+                         "RDP keyboard queued delay: client=%" PRIu64
+                         " flags=0x%04" PRIx16 " code=0x%02" PRIx16
+                         " action=%s queue_delay_us=%" PRIu64,
+                         event.client_id,
+                         event.flags,
+                         event.code,
+                         keyboard_action(event.flags),
+                         queue_delay_us);
+            }
+        }
 
         bool injected = false;
         switch (event.kind) {
@@ -2108,6 +2207,26 @@ int mac_shadow_subsystem_start(rdpShadowSubsystem* base) {
     subsystem->audio_published_chunks.store(0, std::memory_order_relaxed);
     subsystem->audio_delivered_clients.store(0, std::memory_order_relaxed);
     subsystem->audio_dropped_frames.store(0, std::memory_order_relaxed);
+    subsystem->input_synchronize_events.store(0, std::memory_order_relaxed);
+    subsystem->input_keyboard_events.store(0, std::memory_order_relaxed);
+    subsystem->input_keyboard_repeats.store(0, std::memory_order_relaxed);
+    subsystem->input_keyboard_release_recoveries.store(0, std::memory_order_relaxed);
+    subsystem->input_keyboard_unmatched_releases.store(0, std::memory_order_relaxed);
+    subsystem->input_unicode_events.store(0, std::memory_order_relaxed);
+    subsystem->input_mouse_events.store(0, std::memory_order_relaxed);
+    subsystem->input_wheel_events.store(0, std::memory_order_relaxed);
+    subsystem->input_left_button_events.store(0, std::memory_order_relaxed);
+    subsystem->input_right_button_events.store(0, std::memory_order_relaxed);
+    subsystem->input_middle_button_events.store(0, std::memory_order_relaxed);
+    subsystem->input_drag_events.store(0, std::memory_order_relaxed);
+    subsystem->input_extended_mouse_events.store(0, std::memory_order_relaxed);
+    subsystem->input_injection_failures.store(0, std::memory_order_relaxed);
+    subsystem->input_events_processed.store(0, std::memory_order_relaxed);
+    subsystem->input_keyboard_events_processed.store(0, std::memory_order_relaxed);
+    subsystem->input_event_queue_delay_us_total.store(0, std::memory_order_relaxed);
+    subsystem->input_event_queue_delay_us_max.store(0, std::memory_order_relaxed);
+    subsystem->input_keyboard_queue_delay_us_total.store(0, std::memory_order_relaxed);
+    subsystem->input_keyboard_queue_delay_us_max.store(0, std::memory_order_relaxed);
     subsystem->input_motion_coalesced.store(0, std::memory_order_relaxed);
     subsystem->input_motion_dropped.store(0, std::memory_order_relaxed);
     subsystem->input_queue_wait_events.store(0, std::memory_order_relaxed);
@@ -2116,6 +2235,7 @@ int mac_shadow_subsystem_start(rdpShadowSubsystem* base) {
     subsystem->input_queue_max_depth.store(0, std::memory_order_relaxed);
     subsystem->last_pipeline_log = {};
     subsystem->last_audio_log = {};
+    subsystem->last_input_pipeline_log = {};
     {
         std::lock_guard input_lock(subsystem->input_queue_mutex);
         subsystem->input_queue.clear();
