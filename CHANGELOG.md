@@ -14,3 +14,5 @@ This project has not published a stable release yet.
   loopback comparisons.
 - Serialized macOS pasteboard access and expanded shaped-link reconnect,
   resize, and clipboard-change validation.
+- Added explicit `--reconnect` and `--no-reconnect` controls for running the
+  long-budget Wi-Fi and bad-link reconnect profiles.

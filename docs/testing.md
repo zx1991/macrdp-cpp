@@ -142,19 +142,22 @@ deterministic jitter, a byte-rate limit, and periodic forwarding stalls. It does
 not model packet loss, packet reordering, NAT, UDP, or a real Wi-Fi radio.
 
 The smoke script keeps one proxy alive across the primary session and the
-reconnect checks for `direct`, `wan`, and `outage`. Those reconnect checks use
-1280x720 and 1024x768 in separate connections and change the expected text on
-both sides of the clipboard channel between connections. The `wifi` and `bad`
-profiles reserve their longer link budget for the primary session and do not
-run the repeated reconnect phase by default.
+reconnect checks. By default, `direct`, `wan`, and `outage` run two additional
+connections using 1280x720 and 1024x768 and change the expected text on both
+sides of the clipboard channel between connections. The `wifi` and `bad`
+profiles reserve their longer link budget for the primary session and skip that
+phase by default. Pass `--reconnect` to run it for either profile, or
+`--no-reconnect` to skip it for a shorter run. The per-connection budget is
+controlled by `MACRDP_LOOPBACK_RECONNECT_DURATION_MS`; the default is 15 seconds
+for `wifi` and 30 seconds for `bad`.
 
 | Profile | Delay | Jitter | Bandwidth | Stall | Purpose |
 | --- | ---: | ---: | ---: | ---: | --- |
 | `direct` | 0 ms | 0 ms | unlimited | none | baseline, reconnect, resize, slow client |
 | `wan` | 50 ms | 10 ms | 5 Mbps | none | ordinary remote link, reconnect, resize, clipboard changes |
-| `wifi` | 75 ms | 40 ms | 1 Mbps | 300 ms / 5 s | variable consumer link |
+| `wifi` | 75 ms | 40 ms | 1 Mbps | 300 ms / 5 s | variable consumer link, optional reconnect |
 | `outage` | 50 ms | 50 ms | 5 Mbps | 500 ms / 3 s | stalled forwarding, reconnect, resize, clipboard changes |
-| `bad` | 150 ms | 100 ms | 256 Kbps | 1 s / 4 s | extreme backpressure |
+| `bad` | 150 ms | 100 ms | 256 Kbps | 1 s / 4 s | extreme backpressure, optional reconnect |
 
 Build and run a shaped profile:
 
@@ -164,6 +167,13 @@ MACRDP_SERVER=./build/macrdp-server \
 MACRDP_LOOPBACK_CLIENT=/tmp/macrdp-loopback-client \
 MACRDP_LOOPBACK_PROXY=/tmp/macrdp-loopback-proxy \
 tools/run_loopback_smoke.sh --profile wifi
+```
+
+Run the longer profile's reconnect phase explicitly:
+
+```bash
+tools/run_loopback_smoke.sh --profile wifi --reconnect
+tools/run_loopback_smoke.sh --profile bad --reconnect
 ```
 
 The smoke script can pass the server's video settings through unchanged so

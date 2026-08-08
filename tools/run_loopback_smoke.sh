@@ -23,6 +23,7 @@ synthetic_audio=${MACRDP_LOOPBACK_SYNTHETIC_AUDIO:-1}
 disable_audio=${MACRDP_LOOPBACK_DISABLE_AUDIO:-0}
 audio_format=${MACRDP_LOOPBACK_AUDIO_FORMAT:-auto}
 expected_audio_format=${MACRDP_LOOPBACK_EXPECT_AUDIO_FORMAT:-auto}
+reconnect_mode=${MACRDP_LOOPBACK_RUN_RECONNECT:-auto}
 clipboard_client_text=${MACRDP_LOOPBACK_CLIENT_CLIPBOARD_TEXT:-macrdp\ loopback\ client\ clipboard\ text}
 clipboard_server_text=${MACRDP_LOOPBACK_SERVER_CLIPBOARD_TEXT:-macrdp\ loopback\ server\ clipboard\ text}
 keyboard_probe=${MACRDP_LOOPBACK_PROBE_F:-0}
@@ -47,6 +48,8 @@ Options:
   --audio-format FORMAT  Request a WAVE format tag, or auto-negotiate.
   --expect-audio-format FORMAT  Expect a WAVE format tag, or auto for compressed audio.
   --no-audio      Disable audio capture and RDPSND for this run.
+  --reconnect     Run the repeated reconnect/resize/clipboard phase.
+  --no-reconnect  Skip the repeated reconnect/resize/clipboard phase.
   -h, --help      Show this help.
 
 The positional SERVER and CLIENT form is retained for compatibility. The
@@ -189,6 +192,14 @@ while [ "$#" -gt 0 ]; do
 			;;
 		--no-audio)
 			disable_audio=1
+			shift
+			;;
+		--reconnect)
+			reconnect_mode=1
+			shift
+			;;
+		--no-reconnect)
+			reconnect_mode=0
 			shift
 			;;
 		-h|--help)
@@ -393,10 +404,36 @@ case "$network_profile" in
 		profile_reconnect_duration_ms=12000
 		;;
 	bad)
-		profile_reconnect_duration_ms=0
+		profile_reconnect_duration_ms=30000
 		;;
 esac
 reconnect_duration_ms=${MACRDP_LOOPBACK_RECONNECT_DURATION_MS:-$profile_reconnect_duration_ms}
+case "$reconnect_mode" in
+	auto|AUTO|'')
+		case "$network_profile" in
+			direct|wan|outage)
+				run_reconnect=1
+				;;
+			wifi|bad)
+				run_reconnect=0
+				;;
+		esac
+		;;
+	1|y|Y|yes|YES|true|TRUE)
+		run_reconnect=1
+		;;
+	0|n|N|no|NO|false|FALSE)
+		run_reconnect=0
+		;;
+	*)
+		echo "MACRDP_LOOPBACK_RUN_RECONNECT must be auto or a boolean value" >&2
+		exit 2
+		;;
+esac
+reconnect_label=off
+if [ "$run_reconnect" = "1" ]; then
+	reconnect_label=on
+fi
 reconnect_first_client_clipboard_text="$clipboard_client_text / reconnect first"
 reconnect_first_server_clipboard_text="$clipboard_server_text / reconnect first"
 reconnect_second_client_clipboard_text="$clipboard_client_text / reconnect second"
@@ -1092,25 +1129,24 @@ echo "loopback smoke test: server=$server client=$client profile=$network_profil
 	"bitrate=${server_bitrate:-default} fps=${server_fps:-default} "\
 	"gfx_codec=$gfx_codec h264_encoder=$h264_encoder "\
 	"audio=$audio_label audio_format=$audio_format expected_audio_format=$expected_audio_label "\
+	"reconnect=$reconnect_label "\
+	"reconnect_duration=${reconnect_duration_ms}ms "\
 	"nogfx_duration=${nogfx_duration_ms}ms"
 
 if start_server gfx; then
 	run_client gfx
 	check_h264_encoder gfx
-	case "$network_profile" in
-		direct|wan|outage)
-			run_client reconnect-first resize 1280 720 0 "$reconnect_duration_ms" \
-				"$reconnect_first_client_clipboard_text" \
-				"$reconnect_first_server_clipboard_text"
-			run_client reconnect-second resize 1024 768 0 "$reconnect_duration_ms" \
-				"$reconnect_second_client_clipboard_text" \
-				"$reconnect_second_server_clipboard_text"
-			check_reconnect_and_resize
-			;;
-		*)
-			echo "reconnect/resize: skipped for network profile $network_profile (link budget is reserved for the primary session)"
-			;;
-	esac
+	if [ "$run_reconnect" = "1" ]; then
+		run_client reconnect-first resize 1280 720 0 "$reconnect_duration_ms" \
+			"$reconnect_first_client_clipboard_text" \
+			"$reconnect_first_server_clipboard_text"
+		run_client reconnect-second resize 1024 768 0 "$reconnect_duration_ms" \
+			"$reconnect_second_client_clipboard_text" \
+			"$reconnect_second_server_clipboard_text"
+		check_reconnect_and_resize
+	else
+		echo "reconnect/resize: skipped for network profile $network_profile (use --reconnect or MACRDP_LOOPBACK_RUN_RECONNECT=1 to enable)"
+	fi
 	if [ "$network_profile" = "direct" ]; then
 		run_client slow-client slow "" "" "$slow_client_event_delay_ms" "$slow_client_duration_ms"
 		check_slow_client

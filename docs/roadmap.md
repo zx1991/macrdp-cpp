@@ -9,8 +9,9 @@ release dates.
 - Compare direct AVC420, FFmpeg AVC420, AVC444, and SurfaceBits using the same
   measured test matrix. The loopback harness selects AVC420 or AVC444, can
   force either AVC420 encoder, and verifies the selected path.
-- Extend shaped-network reconnect, resolution, and clipboard-change coverage
-  to the longer `wifi` and `bad` profiles when their runtime budgets permit it.
+- Exercise the opt-in shaped-network reconnect, resolution, and clipboard-change
+  coverage for the longer `wifi` and `bad` profiles, then decide whether the
+  runtime budget is suitable for a regular CI job.
 
 ## Protocol and platform work
 

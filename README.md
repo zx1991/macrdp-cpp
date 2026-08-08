@@ -253,9 +253,12 @@ clipboard transfer, tests a wrong NLA password, and compares
 GFX/AVC420 (or AVC444 when selected with `--gfx-codec AVC444`) with the
 `--no-gfx` SurfaceBits path. Pass `--h264-encoder ffmpeg` with AVC420 to
 measure the software encoder, or `--h264-encoder videotoolbox` to require the
-direct macOS bridge. The direct, WAN, and outage profiles also check reconnects,
-requested desktop sizes, and changing clipboard content across connections. The
-direct profile additionally runs a deliberately slow client event loop.
+direct macOS bridge. The direct, WAN, and outage profiles check reconnects,
+requested desktop sizes, and changing clipboard content across connections by
+default. Use `--reconnect` to enable the same phase for the longer Wi-Fi and
+bad-link profiles; use `--no-reconnect` when measuring only the primary
+session. The direct profile additionally runs a deliberately slow client event
+loop.
 The client-reported frame pacing is the primary slow-client metric; server slow
 stage diagnostics are supplementary observations. The server logs an `Input
 pipeline` line with received event counts and platform injection failures, and
@@ -321,6 +324,10 @@ threshold, and post-client input drain wait. Set
 `MACRDP_LOOPBACK_NOGFX_DURATION_MS` when the classic SurfaceBits path needs a
 different observation window; the Wi-Fi profile defaults this to 30 seconds
 because its 1 Mbps link can take several seconds per full-screen update.
+Reconnect checks run automatically for `direct`, `wan`, and `outage`. They are
+skipped for `wifi` and `bad` unless `--reconnect` is supplied. The equivalent
+environment override is `MACRDP_LOOPBACK_RUN_RECONNECT=auto`, `1`, or `0`;
+`MACRDP_LOOPBACK_RECONNECT_DURATION_MS` controls the per-connection budget.
 Clipboard verification waits according to the selected network profile after
 the client exits. Set `MACRDP_LOOPBACK_CLIPBOARD_WAIT_SECONDS` when a custom
 bandwidth or outage profile needs a different drain window.
