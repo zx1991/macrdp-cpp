@@ -53,7 +53,8 @@ The smoke script uses a real TCP connection to the server and checks:
 - initial, repeated, and released keyboard events, including modifier cleanup;
 - bidirectional text clipboard traffic;
 - PCM and compressed RDPSND negotiation and delivery;
-- reconnect, requested sizes, and an intentionally slow client event loop.
+- reconnect, requested sizes, and changing bidirectional clipboard content;
+- an intentionally slow client event loop on the direct profile.
 
 The server's `Input pipeline` diagnostics also report the current and maximum
 input queue depth, coalesced or discarded pointer motion, and time spent
@@ -140,12 +141,19 @@ The optional C proxy shapes each TCP direction independently. It adds delay,
 deterministic jitter, a byte-rate limit, and periodic forwarding stalls. It does
 not model packet loss, packet reordering, NAT, UDP, or a real Wi-Fi radio.
 
+The smoke script keeps one proxy alive across the primary session and the
+reconnect checks for `direct`, `wan`, and `outage`. Those reconnect checks use
+1280x720 and 1024x768 in separate connections and change the expected text on
+both sides of the clipboard channel between connections. The `wifi` and `bad`
+profiles reserve their longer link budget for the primary session and do not
+run the repeated reconnect phase by default.
+
 | Profile | Delay | Jitter | Bandwidth | Stall | Purpose |
 | --- | ---: | ---: | ---: | ---: | --- |
 | `direct` | 0 ms | 0 ms | unlimited | none | baseline, reconnect, resize, slow client |
-| `wan` | 50 ms | 10 ms | 5 Mbps | none | ordinary remote link |
+| `wan` | 50 ms | 10 ms | 5 Mbps | none | ordinary remote link, reconnect, resize, clipboard changes |
 | `wifi` | 75 ms | 40 ms | 1 Mbps | 300 ms / 5 s | variable consumer link |
-| `outage` | 50 ms | 50 ms | 5 Mbps | 500 ms / 3 s | stalled forwarding and recovery |
+| `outage` | 50 ms | 50 ms | 5 Mbps | 500 ms / 3 s | stalled forwarding, reconnect, resize, clipboard changes |
 | `bad` | 150 ms | 100 ms | 256 Kbps | 1 s / 4 s | extreme backpressure |
 
 Build and run a shaped profile:
@@ -197,7 +205,10 @@ payload counters in the loopback summary show what was actually delivered.
 During shaped-link backpressure, the server's `Output pipeline` diagnostics
 include `audio_dropped`. A nonzero value means stale per-client audio messages
 were rejected before entering the message queue; it is expected for the Wi-Fi,
-outage, and bad profiles with audio enabled. `Audio pipeline`'s
+outage, and bad profiles with audio enabled. The shaped `nogfx` phase therefore
+requires RDPSND negotiation and callback delivery, but permits all audio payload
+bytes to be dropped when classic full-screen updates consume the output budget.
+`Audio pipeline`'s
 `dropped_frames` measures capture-side loss and is independent of this queue
 bound.
 

@@ -12,3 +12,5 @@ This project has not published a stable release yet.
   stress profiles.
 - Explicit H.264 encoder selection for VideoToolbox, FFmpeg, and AVC444
   loopback comparisons.
+- Serialized macOS pasteboard access and expanded shaped-link reconnect,
+  resize, and clipboard-change validation.

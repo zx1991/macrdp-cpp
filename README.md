@@ -253,8 +253,9 @@ clipboard transfer, tests a wrong NLA password, and compares
 GFX/AVC420 (or AVC444 when selected with `--gfx-codec AVC444`) with the
 `--no-gfx` SurfaceBits path. Pass `--h264-encoder ffmpeg` with AVC420 to
 measure the software encoder, or `--h264-encoder videotoolbox` to require the
-direct macOS bridge. The direct profile also checks reconnects, requested
-desktop sizes, and a deliberately slow client event loop.
+direct macOS bridge. The direct, WAN, and outage profiles also check reconnects,
+requested desktop sizes, and changing clipboard content across connections. The
+direct profile additionally runs a deliberately slow client event loop.
 The client-reported frame pacing is the primary slow-client metric; server slow
 stage diagnostics are supplementary observations. The server logs an `Input
 pipeline` line with received event counts and platform injection failures, and
@@ -399,8 +400,9 @@ overhead, while AAC is much smaller.
 The local unit tests and loopback smoke test cover frame coalescing,
 display-size calculation, H.264, the asynchronous encoder worker, multi-client
 input ownership, NLA failure handling, keyboard/Unicode/mouse/wheel input,
-bidirectional text clipboard, reconnects, requested sizes, slow clients, and
-deterministic delay/bandwidth/outage profiles. The remaining validation that
+bidirectional text clipboard, reconnects and requested sizes under direct/WAN/
+outage shaping, slow clients, and deterministic delay/bandwidth/outage profiles.
+The remaining validation that
 requires a graphical macOS session and a Windows `mstsc` client is:
 
 1. Verify NLA, keyboard, Unicode input, left/right and side buttons, drag,

@@ -27,6 +27,7 @@ namespace {
 constexpr UINT32 kCfText = 1;
 constexpr UINT32 kCfUnicodeText = 13;
 constexpr std::size_t kMaxClipboardBytes = 16U * 1024U * 1024U;
+std::mutex pasteboard_mutex;
 
 struct PasteboardSnapshot {
     NSInteger change_count = 0;
@@ -51,6 +52,7 @@ CliprdrState* state_for(CliprdrServerContext* context) {
 
 PasteboardSnapshot read_pasteboard() {
     PasteboardSnapshot snapshot;
+    std::lock_guard lock(pasteboard_mutex);
     @autoreleasepool {
         NSPasteboard* pasteboard = [NSPasteboard generalPasteboard];
         snapshot.change_count = pasteboard.changeCount;
@@ -76,6 +78,7 @@ bool write_pasteboard(const std::string& text) {
         return false;
     }
 
+    std::lock_guard lock(pasteboard_mutex);
     @autoreleasepool {
         NSString* value = [[NSString alloc]
             initWithBytes:text.data()

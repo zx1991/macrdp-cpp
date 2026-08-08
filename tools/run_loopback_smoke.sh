@@ -379,7 +379,28 @@ max_interval_ms=${MACRDP_LOOPBACK_MAX_INTERVAL_MS:-$profile_max_interval_ms}
 first_frame_limit_ms=${MACRDP_LOOPBACK_FIRST_FRAME_LIMIT_MS:-$profile_first_frame_limit_ms}
 duration_ms=${MACRDP_LOOPBACK_DURATION_MS:-$profile_duration_ms}
 nogfx_duration_ms=${MACRDP_LOOPBACK_NOGFX_DURATION_MS:-$profile_nogfx_duration_ms}
-reconnect_duration_ms=${MACRDP_LOOPBACK_RECONNECT_DURATION_MS:-4000}
+case "$network_profile" in
+	direct)
+		profile_reconnect_duration_ms=4000
+		;;
+	wan)
+		profile_reconnect_duration_ms=10000
+		;;
+	wifi)
+		profile_reconnect_duration_ms=15000
+		;;
+	outage)
+		profile_reconnect_duration_ms=12000
+		;;
+	bad)
+		profile_reconnect_duration_ms=0
+		;;
+esac
+reconnect_duration_ms=${MACRDP_LOOPBACK_RECONNECT_DURATION_MS:-$profile_reconnect_duration_ms}
+reconnect_first_client_clipboard_text="$clipboard_client_text / reconnect first"
+reconnect_first_server_clipboard_text="$clipboard_server_text / reconnect first"
+reconnect_second_client_clipboard_text="$clipboard_client_text / reconnect second"
+reconnect_second_server_clipboard_text="$clipboard_server_text / reconnect second"
 slow_client_duration_ms=${MACRDP_LOOPBACK_SLOW_CLIENT_DURATION_MS:-5000}
 slow_client_event_delay_ms=${MACRDP_LOOPBACK_SLOW_CLIENT_EVENT_DELAY_MS:-250}
 run_nogfx=${MACRDP_LOOPBACK_RUN_NOGFX:-$profile_run_nogfx}
@@ -499,10 +520,27 @@ wait_for_log() {
 }
 
 set_test_clipboard() {
-	if ! printf '%s' "$clipboard_server_text" | pbcopy; then
+	clipboard_value=${1:-$clipboard_server_text}
+	if ! printf '%s' "$clipboard_value" | pbcopy; then
 		echo "could not set the macOS test pasteboard" >&2
 		return 1
 	fi
+}
+
+wait_for_pasteboard() {
+	expected=$1
+	wait_seconds=${2:-5}
+	if [ "$wait_seconds" -eq 0 ]; then
+		return 1
+	fi
+	for attempt in $(seq 1 $((wait_seconds * 20))); do
+		actual=$(pbpaste 2>/dev/null || true)
+		if [ "$actual" = "$expected" ]; then
+			return 0
+		fi
+		sleep 0.05
+	done
+	return 1
 }
 
 metric() {
@@ -644,6 +682,8 @@ run_client() {
 	requested_height=${4:-}
 	event_delay_ms=${5:-0}
 	duration_override=${6:-$duration_ms}
+	client_test_clipboard_text=${7:-$clipboard_client_text}
+	server_test_clipboard_text=${8:-$clipboard_server_text}
 	case_dir="$temp_dir/$case_name"
 	mkdir -p "$case_dir"
 	client_log="$case_dir/client.log"
@@ -663,7 +703,7 @@ run_client() {
 	if [ -n "$requested_width" ] && [ -n "$requested_height" ]; then
 		client_command+=(/w:"$requested_width" /h:"$requested_height")
 	fi
-	if ! set_test_clipboard; then
+	if ! set_test_clipboard "$server_test_clipboard_text"; then
 		fail "$case_name could not prepare the test pasteboard"
 		return
 	fi
@@ -673,8 +713,8 @@ run_client() {
 		MACRDP_LOOPBACK_GFX_CODEC="$gfx_codec" \
 		MACRDP_LOOPBACK_AUDIO_FORMAT="$audio_format" \
 		MACRDP_LOOPBACK_EVENT_DELAY_MS="$event_delay_ms" \
-		MACRDP_LOOPBACK_CLIENT_CLIPBOARD_TEXT="$clipboard_client_text" \
-		MACRDP_LOOPBACK_SERVER_CLIPBOARD_TEXT="$clipboard_server_text" \
+		MACRDP_LOOPBACK_CLIENT_CLIPBOARD_TEXT="$client_test_clipboard_text" \
+		MACRDP_LOOPBACK_SERVER_CLIPBOARD_TEXT="$server_test_clipboard_text" \
 		"${client_command[@]}" >"$client_log" 2>&1; then
 		client_status=0
 	else
@@ -796,11 +836,20 @@ run_client() {
 			fail "$case_name received audio even though audio capture is disabled"
 		fi
 	elif [ "$synthetic_audio" != "0" ]; then
+		audio_payload_required=1
+		if [ "$client_mode" = "nogfx" ] && [ "$network_profile" != "direct" ]; then
+			# Classic full-screen updates can consume the entire shaped output
+			# budget. The server may legitimately drop stale audio in this case;
+			# keep checking that RDPSND negotiated and reached its callback path.
+			audio_payload_required=0
+		fi
 		if [ "${audio_server_formats:-0}" -lt 1 ] \
 			|| [ "${audio_open_count:-0}" -lt 1 ] \
 			|| [ "${audio_play_callbacks:-0}" -lt 1 ] \
-			|| [ "${audio_pcm_bytes:-0}" -le 0 ]; then
+			|| { [ "$audio_payload_required" -eq 1 ] && [ "${audio_pcm_bytes:-0}" -le 0 ]; }; then
 			fail "$case_name did not receive RDPSND audio"
+		elif [ "$audio_payload_required" -eq 0 ] && [ "${audio_pcm_bytes:-0}" -le 0 ]; then
+			echo "$case_name: shaped full-screen path negotiated RDPSND but dropped all audio payloads"
 		fi
 		if [ "${audio_first_play:-0}" -le 0 ] || [ "${audio_first_play:-0}" -gt "$first_frame_limit_ms" ]; then
 			fail "$case_name first audio callback latency is ${audio_first_play:-missing} ms"
@@ -831,6 +880,8 @@ run_client() {
 	server_log="$temp_dir/$server_case/server.log"
 	if ! wait_for_log "$server_log" 'Received client clipboard data:' "$clipboard_wait_seconds"; then
 		fail "$case_name server did not receive client clipboard data"
+	elif ! wait_for_pasteboard "$client_test_clipboard_text" "$clipboard_wait_seconds"; then
+		fail "$case_name server pasteboard did not contain the expected client clipboard text"
 	fi
 	if ! wait_for_log "$server_log" 'Frame pipeline:'; then
 		fail "$case_name server produced no frame pipeline diagnostics"
@@ -875,8 +926,8 @@ run_client() {
 	fi
 	if [ "$keyboard_probe_enabled" = "1" ]; then
 		if [ "$server_log_level" = "DEBUG" ]; then
-			if ! grep -Eq 'post_keyboard_event.*code=0x21 keycode=3 action=down' "$server_log" \
-				|| ! grep -Eq 'post_keyboard_event.*code=0x21 keycode=3 action=up' "$server_log"; then
+			if ! grep -Eq 'Keyboard event .*code=0x21 keycode=3 action=down' "$server_log" \
+				|| ! grep -Eq 'Keyboard event .*code=0x21 keycode=3 action=up' "$server_log"; then
 				fail "$case_name server did not map the F probe to macOS keycode 3 down/up"
 			fi
 		else
@@ -1046,10 +1097,21 @@ echo "loopback smoke test: server=$server client=$client profile=$network_profil
 if start_server gfx; then
 	run_client gfx
 	check_h264_encoder gfx
+	case "$network_profile" in
+		direct|wan|outage)
+			run_client reconnect-first resize 1280 720 0 "$reconnect_duration_ms" \
+				"$reconnect_first_client_clipboard_text" \
+				"$reconnect_first_server_clipboard_text"
+			run_client reconnect-second resize 1024 768 0 "$reconnect_duration_ms" \
+				"$reconnect_second_client_clipboard_text" \
+				"$reconnect_second_server_clipboard_text"
+			check_reconnect_and_resize
+			;;
+		*)
+			echo "reconnect/resize: skipped for network profile $network_profile (link budget is reserved for the primary session)"
+			;;
+	esac
 	if [ "$network_profile" = "direct" ]; then
-		run_client reconnect-first resize 1280 720 0 "$reconnect_duration_ms"
-		run_client reconnect-second resize 1024 768 0 "$reconnect_duration_ms"
-		check_reconnect_and_resize
 		run_client slow-client slow "" "" "$slow_client_event_delay_ms" "$slow_client_duration_ms"
 		check_slow_client
 	fi
