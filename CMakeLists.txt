@@ -930,3 +930,22 @@ add_test(
         --password test
 )
 set_tests_properties(server_invalid_fps PROPERTIES WILL_FAIL TRUE)
+
+add_test(
+    NAME server_invalid_h264_encoder
+    COMMAND macrdp-server
+        --h264-encoder invalid
+        --user macrdp-test-user
+        --password test
+)
+set_tests_properties(server_invalid_h264_encoder PROPERTIES WILL_FAIL TRUE)
+
+add_test(
+    NAME server_incompatible_h264_encoder
+    COMMAND macrdp-server
+        --avc444
+        --h264-encoder videotoolbox
+        --user macrdp-test-user
+        --password test
+)
+set_tests_properties(server_incompatible_h264_encoder PROPERTIES WILL_FAIL TRUE)

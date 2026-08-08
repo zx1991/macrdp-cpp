@@ -7,8 +7,8 @@ release dates.
 ## Near term
 
 - Compare direct AVC420, FFmpeg AVC420, AVC444, and SurfaceBits using the same
-  measured test matrix. The loopback harness now selects AVC420 or AVC444 and
-  verifies the negotiated codec; forcing the FFmpeg AVC420 path remains open.
+  measured test matrix. The loopback harness selects AVC420 or AVC444, can
+  force either AVC420 encoder, and verifies the selected path.
 - Improve automated tests for repeated reconnects, resolution changes, and
   clipboard changes while the network is shaped.
 

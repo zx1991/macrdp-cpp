@@ -18,6 +18,7 @@ server_log_level=${MACRDP_LOOPBACK_SERVER_LOG_LEVEL:-DEBUG}
 server_bitrate=${MACRDP_LOOPBACK_SERVER_BITRATE:-}
 server_fps=${MACRDP_LOOPBACK_SERVER_FPS:-}
 gfx_codec=${MACRDP_LOOPBACK_GFX_CODEC:-AVC420}
+h264_encoder=${MACRDP_LOOPBACK_H264_ENCODER:-auto}
 synthetic_audio=${MACRDP_LOOPBACK_SYNTHETIC_AUDIO:-1}
 disable_audio=${MACRDP_LOOPBACK_DISABLE_AUDIO:-0}
 audio_format=${MACRDP_LOOPBACK_AUDIO_FORMAT:-auto}
@@ -42,6 +43,7 @@ Options:
   --bitrate RATE  Pass --bitrate RATE to the server for reproducible tuning.
   --fps NUMBER    Pass --fps NUMBER to the server for reproducible tuning.
   --gfx-codec NAME  Use AVC420 or AVC444 for the GFX phase (default: AVC420).
+  --h264-encoder NAME  Use auto, videotoolbox, or ffmpeg on the server.
   --audio-format FORMAT  Request a WAVE format tag, or auto-negotiate.
   --expect-audio-format FORMAT  Expect a WAVE format tag, or auto for compressed audio.
   --no-audio      Disable audio capture and RDPSND for this run.
@@ -146,6 +148,19 @@ while [ "$#" -gt 0 ]; do
 			gfx_codec=${1#--gfx-codec=}
 			shift
 			;;
+		--h264-encoder)
+			if [ "$#" -lt 2 ]; then
+				echo "--h264-encoder requires a value" >&2
+				usage >&2
+				exit 2
+			fi
+			h264_encoder=$2
+			shift 2
+			;;
+		--h264-encoder=*)
+			h264_encoder=${1#--h264-encoder=}
+			shift
+			;;
 		--audio-format)
 			if [ "$#" -lt 2 ]; then
 				echo "--audio-format requires a value" >&2
@@ -211,6 +226,27 @@ case "$gfx_codec" in
 		exit 2
 		;;
 esac
+
+case "$h264_encoder" in
+	auto|AUTO)
+		h264_encoder=auto
+		;;
+	videotoolbox|VIDEOTOOLBOX)
+		h264_encoder=videotoolbox
+		;;
+	ffmpeg|FFMPEG)
+		h264_encoder=ffmpeg
+		;;
+	*)
+		echo "H.264 encoder must be auto, videotoolbox, or ffmpeg" >&2
+		exit 2
+		;;
+esac
+
+if [ "$gfx_codec" = "AVC444" ] && [ "$h264_encoder" = "videotoolbox" ]; then
+	echo "AVC444 cannot use the VideoToolbox H.264 encoder" >&2
+	exit 2
+fi
 
 audio_label=on
 case "$disable_audio" in
@@ -574,6 +610,9 @@ start_server() {
 	if [ -n "$server_fps" ]; then
 		server_command+=(--fps "$server_fps")
 	fi
+	if [ "$h264_encoder" != "auto" ]; then
+		server_command+=(--h264-encoder "$h264_encoder")
+	fi
 	if [ "$disable_audio" -eq 1 ]; then
 		server_command+=(--no-audio)
 	fi
@@ -863,6 +902,29 @@ run_client() {
 	fi
 }
 
+check_h264_encoder() {
+	case_name=$1
+	server_log="$temp_dir/$case_name/server.log"
+	case "$h264_encoder" in
+		ffmpeg)
+			if ! grep -q 'h264_encoder=ffmpeg' "$server_log"; then
+				fail "$case_name server did not report the requested FFmpeg H.264 encoder"
+			fi
+			if grep -q 'Using direct macOS VideoToolbox H264 bridge' "$server_log"; then
+				fail "$case_name unexpectedly used the direct VideoToolbox H.264 bridge"
+			fi
+			;;
+		videotoolbox)
+			if [ "$gfx_codec" = "AVC420" ] \
+				&& ! grep -q 'Using direct macOS VideoToolbox H264 bridge' "$server_log"; then
+				fail "$case_name did not use the requested VideoToolbox H.264 bridge"
+			fi
+			;;
+		auto)
+			;;
+	esac
+}
+
 check_reconnect_and_resize() {
 	server_log="$temp_dir/gfx/server.log"
 	if ! grep -q 'shadow_client_post_connect.*activated (1280x720@32)' "$server_log"; then
@@ -976,12 +1038,14 @@ run_bad_password() {
 echo "loopback smoke test: server=$server client=$client profile=$network_profile "\
 	"duration=${duration_ms}ms delay=${proxy_delay_ms}ms jitter=${proxy_jitter_ms}ms "\
 	"bandwidth=${proxy_bandwidth_bps}bps outage=${proxy_outage_period_ms}/${proxy_outage_duration_ms}ms "\
-	"bitrate=${server_bitrate:-default} fps=${server_fps:-default} gfx_codec=$gfx_codec "\
+	"bitrate=${server_bitrate:-default} fps=${server_fps:-default} "\
+	"gfx_codec=$gfx_codec h264_encoder=$h264_encoder "\
 	"audio=$audio_label audio_format=$audio_format expected_audio_format=$expected_audio_label "\
 	"nogfx_duration=${nogfx_duration_ms}ms"
 
 if start_server gfx; then
 	run_client gfx
+	check_h264_encoder gfx
 	if [ "$network_profile" = "direct" ]; then
 		run_client reconnect-first resize 1280 720 0 "$reconnect_duration_ms"
 		run_client reconnect-second resize 1024 768 0 "$reconnect_duration_ms"

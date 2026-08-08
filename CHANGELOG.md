@@ -10,3 +10,5 @@ This project has not published a stable release yet.
 - Text clipboard redirection and RDPSND audio output.
 - Local unit tests, FreeRDP loopback validation, and deterministic network
   stress profiles.
+- Explicit H.264 encoder selection for VideoToolbox, FFmpeg, and AVC444
+  loopback comparisons.

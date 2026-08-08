@@ -161,7 +161,8 @@ used manually with `--password-file` when LaunchAgent is not desired.
 
 For a fast local connection, the default VideoToolbox AVC420/16 Mbps profile
 is a good starting point. You can raise the bitrate or explicitly enable the
-more expensive AVC444 path:
+more expensive AVC444 path. The software FFmpeg AVC420 path is also available
+for compatibility and performance comparisons:
 
 ```bash
 printf '%s\n' 'change-this-password' | \
@@ -169,6 +170,9 @@ printf '%s\n' 'change-this-password' | \
 
 printf '%s\n' 'change-this-password' | \
   ./build/macrdp-server --user example-user --password-stdin --bitrate 24M --avc444
+
+printf '%s\n' 'change-this-password' | \
+  ./build/macrdp-server --user example-user --password-stdin --h264-encoder ffmpeg
 ```
 
 Then connect from Windows Remote Desktop (`mstsc`) to the Mac's IP address.
@@ -247,8 +251,10 @@ events, plus harmless keyboard, Unicode, and vertical/horizontal wheel events,
 checks the server's aggregated input counters, verifies bidirectional text
 clipboard transfer, tests a wrong NLA password, and compares
 GFX/AVC420 (or AVC444 when selected with `--gfx-codec AVC444`) with the
-`--no-gfx` SurfaceBits path. The direct profile also checks reconnects,
-requested desktop sizes, and a deliberately slow client event loop.
+`--no-gfx` SurfaceBits path. Pass `--h264-encoder ffmpeg` with AVC420 to
+measure the software encoder, or `--h264-encoder videotoolbox` to require the
+direct macOS bridge. The direct profile also checks reconnects, requested
+desktop sizes, and a deliberately slow client event loop.
 The client-reported frame pacing is the primary slow-client metric; server slow
 stage diagnostics are supplementary observations. The server logs an `Input
 pipeline` line with received event counts and platform injection failures, and
@@ -297,6 +303,13 @@ tools/run_loopback_smoke.sh --gfx-codec AVC444
 
 The classic SurfaceBits phase is still run separately by the direct profile;
 its updates do not use the selected GFX codec.
+
+To compare software and hardware AVC420 under the same profile, use:
+
+```bash
+tools/run_loopback_smoke.sh --gfx-codec AVC420 --h264-encoder ffmpeg
+tools/run_loopback_smoke.sh --gfx-codec AVC420 --h264-encoder videotoolbox
+```
 
 The script uses TCP port 3390 by default and refuses to touch an existing
 listener. Set `MACRDP_LOOPBACK_PORT` to use another port. Set

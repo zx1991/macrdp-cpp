@@ -41,6 +41,12 @@ enum class SecurityMode {
     rdp,
 };
 
+enum class H264EncoderMode {
+    automatic,
+    videotoolbox,
+    ffmpeg,
+};
+
 struct Options {
     std::uint16_t port = 3389;
     std::string bind_address;
@@ -54,6 +60,7 @@ struct Options {
     std::uint32_t frame_rate = 30;
     std::uint32_t max_width = 0;
     std::uint32_t max_height = 0;
+    H264EncoderMode h264_encoder = H264EncoderMode::automatic;
     bool avc444 = false;
     bool no_gfx = false;
     bool audio_enabled = true;
@@ -95,6 +102,7 @@ void print_usage(const char* program) {
         << "  --fps <number>              Capture/encode rate, 1-60 (default: 30)\n"
         << "  --max-width <pixels>        Optional capture width limit\n"
         << "  --max-height <pixels>       Optional capture height limit\n"
+        << "  --h264-encoder <mode>       H.264 encoder: auto, videotoolbox, or ffmpeg\n"
         << "  --avc444                    Use AVC444 (higher CPU and color fidelity)\n"
         << "  --no-gfx                    Use incremental SurfaceBits updates instead of GFX/H.264\n"
         << "  --no-audio                  Disable screen audio capture and RDPSND output\n"
@@ -186,6 +194,31 @@ bool parse_security(std::string_view value, SecurityMode& mode) {
         return false;
     }
     return true;
+}
+
+bool parse_h264_encoder(std::string_view value, H264EncoderMode& mode) {
+    if (value == "auto") {
+        mode = H264EncoderMode::automatic;
+    } else if (value == "videotoolbox") {
+        mode = H264EncoderMode::videotoolbox;
+    } else if (value == "ffmpeg") {
+        mode = H264EncoderMode::ffmpeg;
+    } else {
+        return false;
+    }
+    return true;
+}
+
+const char* h264_encoder_name(H264EncoderMode mode) {
+    switch (mode) {
+    case H264EncoderMode::automatic:
+        return "auto";
+    case H264EncoderMode::videotoolbox:
+        return "videotoolbox";
+    case H264EncoderMode::ffmpeg:
+        return "ffmpeg";
+    }
+    return "unknown";
 }
 
 bool next_value(int& index, int argc, char** argv, std::string& value) {
@@ -322,6 +355,12 @@ bool parse_options(int argc, char** argv, Options& options) {
                 std::cerr << "--max-height must be between 1 and 65535\n";
                 return false;
             }
+        } else if (argument == "--h264-encoder") {
+            if (!next_value(index, argc, argv, value)
+                || !parse_h264_encoder(value, options.h264_encoder)) {
+                std::cerr << "--h264-encoder must be auto, videotoolbox, or ffmpeg\n";
+                return false;
+            }
         } else if (argument == "--avc444") {
             options.avc444 = true;
         } else if (argument == "--no-gfx") {
@@ -381,6 +420,11 @@ bool parse_options(int argc, char** argv, Options& options) {
             print_usage(argv[0]);
             return false;
         }
+    }
+
+    if (options.avc444 && options.h264_encoder == H264EncoderMode::videotoolbox) {
+        std::cerr << "--h264-encoder videotoolbox cannot be used with --avc444\n";
+        return false;
     }
 
     if (options.password_from_stdin) {
@@ -590,7 +634,9 @@ bool configure_server(rdpShadowServer* server, const Options& options, const std
 
     // The direct bridge accepts AVC420/I420. AVC444 has a separate YUV444
     // stream and therefore remains on FreeRDP's FFmpeg fallback path.
-    macrdp_vt_h264_encoder_set_enabled(options.avc444 ? 0 : 1);
+    const bool use_videotoolbox = !options.avc444
+        && options.h264_encoder != H264EncoderMode::ffmpeg;
+    macrdp_vt_h264_encoder_set_enabled(use_videotoolbox ? 1 : 0);
     macrdp_shadow_set_capture_options(
         options.max_width,
         options.max_height,
@@ -778,7 +824,8 @@ int main(int argc, char** argv) {
               << (options.security == SecurityMode::nla
                       ? "NLA"
                       : options.security == SecurityMode::tls ? "TLS" : "RDP")
-              << " security\n";
+              << " security h264_encoder=" << h264_encoder_name(options.h264_encoder)
+              << std::endl;
 
     bool server_failed = false;
     while (!g_stop_requested) {

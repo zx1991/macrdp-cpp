@@ -45,8 +45,8 @@ preconfigured FreeRDP build.
 
 The smoke script uses a real TCP connection to the server and checks:
 
-- GFX/AVC420 by default, optional AVC444, and classic SurfaceBits frame
-  delivery;
+- GFX/AVC420 by default, optional AVC444, selectable H.264 encoder paths, and
+  classic SurfaceBits frame delivery;
 - first-frame and inter-frame timing;
 - NLA failure with an incorrect password;
 - mouse buttons, drag, wheel, keyboard, Unicode, and synchronization input;
@@ -89,10 +89,20 @@ tools/run_loopback_smoke.sh --gfx-codec AVC444
 
 AVC420 requests the direct macOS VideoToolbox bridge when it is available.
 AVC444 uses the server's FFmpeg path because the direct bridge currently
-accepts I420/AVC420 input. The script checks the decoded client's negotiated
-codec counters, so a run cannot pass merely because an unrelated GFX codec was
-used. The profile's separate `nogfx` phase uses classic SurfaceBits and is
-unaffected by `--gfx-codec`.
+accepts I420/AVC420 input. To force a particular AVC420 encoder, pass the
+server option through the smoke script:
+
+```bash
+tools/run_loopback_smoke.sh --gfx-codec AVC420 --h264-encoder ffmpeg
+tools/run_loopback_smoke.sh --gfx-codec AVC420 --h264-encoder videotoolbox
+```
+
+`auto` is the default. `ffmpeg` disables the direct bridge; `videotoolbox`
+requires it and the smoke test fails if it is unavailable. The script checks
+both the server's selected encoder marker and the client's decoded codec
+counters, so a run cannot pass merely because an unrelated encoder or GFX
+codec was used. The profile's separate `nogfx` phase uses classic SurfaceBits
+and is unaffected by `--gfx-codec`.
 
 Clipboard verification uses a profile-specific wait after the client exits so
 low-bandwidth runs are not mistaken for protocol failures. Override it with
