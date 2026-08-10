@@ -120,6 +120,7 @@ struct mac_shadow_subsystem {
     std::condition_variable input_queue_space_condition;
     std::deque<InputEvent> input_queue;
     std::thread input_thread;
+    CGEventSourceRef input_event_source = nullptr;
     std::atomic_bool input_stop_requested{false};
     macrdp::InputOwnership input_ownership;
     std::mutex client_ids_mutex;
@@ -488,7 +489,15 @@ std::optional<CGKeyCode> mac_key_code(UINT16 flags, UINT8 code) {
     return key_code;
 }
 
-bool post_keyboard_event(UINT16 flags, UINT8 code, bool autorepeat = false) {
+bool post_keyboard_event(
+    MacShadowSubsystem* subsystem,
+    UINT16 flags,
+    UINT8 code,
+    bool autorepeat = false) {
+    if (subsystem == nullptr || subsystem->input_event_source == nullptr) {
+        return false;
+    }
+
     const auto key_code = mac_key_code(flags, code);
     if (!key_code.has_value()) {
         WLog_WARN(TAG, "Ignoring unmapped keyboard event flags=0x%04" PRIx16
@@ -498,20 +507,14 @@ bool post_keyboard_event(UINT16 flags, UINT8 code, bool autorepeat = false) {
         return false;
     }
 
-    CGEventSourceRef source = CGEventSourceCreate(kCGEventSourceStateHIDSystemState);
-    if (source == nullptr) {
-        return false;
-    }
-
     // A missing RELEASE bit represents a key press, including the initial
     // press where KBD_FLAGS_DOWN is not set.
     const bool key_down = (flags & KBD_FLAGS_RELEASE) == 0;
     CGEventRef event = CGEventCreateKeyboardEvent(
-        source,
+        subsystem->input_event_source,
         *key_code,
         key_down);
     if (event == nullptr) {
-        CFRelease(source);
         return false;
     }
 
@@ -528,7 +531,6 @@ bool post_keyboard_event(UINT16 flags, UINT8 code, bool autorepeat = false) {
              autorepeat ? 1U : 0U);
     CGEventPost(kCGHIDEventTap, event);
     CFRelease(event);
-    CFRelease(source);
     return true;
 }
 
@@ -543,67 +545,18 @@ UINT16 release_flags_for_key_identity(std::uint16_t key_identity) {
     return flags;
 }
 
-void release_stale_modifier_state(const char* reason) {
-    // A previous server process can terminate after posting a modifier-down
-    // event. The ownership ledger cannot survive that process boundary, so
-    // clear only RDP modifiers that CoreGraphics still reports as held. The
-    // aggregate flags are logged for diagnosis, but cannot decide which side
-    // of a modifier is safe to release and may include physical user input.
-    struct Modifier {
-        UINT16 flags;
-        UINT8 code;
-    };
-    constexpr Modifier modifiers[] = {
-        {0, 0x1D},       // left Control
-        {KBD_FLAGS_EXTENDED, 0x1D},       // right Control
-        {0, 0x2A},       // left Shift
-        {0, 0x36},       // right Shift
-        {0, 0x38},       // left Alt/Option
-        {KBD_FLAGS_EXTENDED, 0x38},       // right Alt/Option
-        {KBD_FLAGS_EXTENDED, 0x5B},       // left Windows/Command
-        {KBD_FLAGS_EXTENDED, 0x5C},       // right Windows/Command
-    };
-
-    const auto hid_flags = CGEventSourceFlagsState(kCGEventSourceStateHIDSystemState);
-    unsigned attempted = 0;
-    unsigned skipped = 0;
-    unsigned failures = 0;
-    for (const auto& modifier : modifiers) {
-        const auto key_code = mac_key_code(modifier.flags, modifier.code);
-        if (!key_code.has_value()) {
-            ++skipped;
-            continue;
-        }
-        const bool hid_key_down = CGEventSourceKeyState(
-            kCGEventSourceStateHIDSystemState,
-            *key_code);
-        if (!hid_key_down) {
-            ++skipped;
-            continue;
-        }
-        ++attempted;
-        if (!post_keyboard_event(
-                modifier.flags | KBD_FLAGS_RELEASE,
-                modifier.code)) {
-            ++failures;
-        }
+bool synchronize_toggle_keys(MacShadowSubsystem* subsystem, UINT32 flags) {
+    if (subsystem == nullptr || subsystem->input_event_source == nullptr) {
+        return false;
     }
-    WLog_INFO(TAG,
-              "Reset stale macOS modifier state (%s): attempted=%u skipped=%u failures=%u "
-              "hid_flags=0x%" PRIx64,
-              reason == nullptr ? "unspecified" : reason,
-              attempted,
-              skipped,
-              failures,
-              static_cast<std::uint64_t>(hid_flags));
-}
 
-bool synchronize_toggle_keys(UINT32 flags) {
+    // Lock state is session-wide even though remote modifier and button state
+    // remains isolated in the private event source.
     const CGEventFlags current_flags =
-        CGEventSourceFlagsState(kCGEventSourceStateHIDSystemState);
+        CGEventSourceFlagsState(kCGEventSourceStateCombinedSessionState);
     bool success = true;
 
-    const auto synchronize_key = [&success](
+    const auto synchronize_key = [subsystem, &success](
                                     bool desired,
                                     bool current,
                                     UINT16 key_flags,
@@ -611,8 +564,11 @@ bool synchronize_toggle_keys(UINT32 flags) {
         if (desired == current) {
             return;
         }
-        if (!post_keyboard_event(key_flags, code)
-            || !post_keyboard_event(key_flags | KBD_FLAGS_RELEASE, code)) {
+        if (!post_keyboard_event(subsystem, key_flags, code)
+            || !post_keyboard_event(
+                subsystem,
+                key_flags | KBD_FLAGS_RELEASE,
+                code)) {
             success = false;
         }
     };
@@ -677,22 +633,15 @@ bool inject_keyboard_event(
         }
 
         if (release_candidates.empty()) {
-            // The ledger may be empty after a server restart even though the
-            // old process left a platform key-down behind. Forward the
-            // release as a best-effort recovery signal instead of silently
-            // discarding it.
-            WLog_DBG(TAG, "Forwarding unknown keyboard release client=%" PRIu64
+            WLog_DBG(TAG, "Ignoring unmatched keyboard release client=%" PRIu64
                      " flags=0x%04" PRIx16 " code=0x%02" PRIx8,
                      client_id,
                      flags,
                      code);
-            subsystem->input_keyboard_release_recoveries.fetch_add(
-                1,
-                std::memory_order_relaxed);
             subsystem->input_keyboard_unmatched_releases.fetch_add(
                 1,
                 std::memory_order_relaxed);
-            return post_keyboard_event(flags | KBD_FLAGS_RELEASE, code);
+            return true;
         }
 
         if (release_candidates.size() != 1 || release_candidates.front() != key_identity) {
@@ -720,6 +669,7 @@ bool inject_keyboard_event(
             const auto release_code = static_cast<UINT8>(
                 release_identity & UINT8_MAX);
             const bool posted = post_keyboard_event(
+                subsystem,
                 release_flags_for_key_identity(release_identity),
                 release_code);
             if (!posted) {
@@ -742,13 +692,13 @@ bool inject_keyboard_event(
         // Ownership makes that distinction without relying on the transport
         // encoding, so macOS can generate key repeat for both paths.
         subsystem->input_keyboard_repeats.fetch_add(1, std::memory_order_relaxed);
-        return post_keyboard_event(flags, code, true);
+        return post_keyboard_event(subsystem, flags, code, true);
     }
 
     if (!subsystem->input_ownership.acquire_key(client_id, key_identity)) {
         return true;
     }
-    const bool posted = post_keyboard_event(flags, code);
+    const bool posted = post_keyboard_event(subsystem, flags, code);
     if (!posted) {
         // The ownership transition must describe the physical event state. If
         // CoreGraphics rejects the event, undo the transition so a later
@@ -758,16 +708,20 @@ bool inject_keyboard_event(
     return posted;
 }
 
-bool post_unicode_event(UINT16 flags, UINT16 code) {
-    CGEventSourceRef source = CGEventSourceCreate(kCGEventSourceStateHIDSystemState);
-    if (source == nullptr) {
+bool post_unicode_event(
+    MacShadowSubsystem* subsystem,
+    UINT16 flags,
+    UINT16 code) {
+    if (subsystem == nullptr || subsystem->input_event_source == nullptr) {
         return false;
     }
 
     const bool key_down = (flags & KBD_FLAGS_RELEASE) == 0;
-    CGEventRef event = CGEventCreateKeyboardEvent(source, 0, key_down);
+    CGEventRef event = CGEventCreateKeyboardEvent(
+        subsystem->input_event_source,
+        0,
+        key_down);
     if (event == nullptr) {
-        CFRelease(source);
         return false;
     }
 
@@ -775,7 +729,6 @@ bool post_unicode_event(UINT16 flags, UINT16 code) {
     CGEventKeyboardSetUnicodeString(event, 1, &character);
     CGEventPost(kCGHIDEventTap, event);
     CFRelease(event);
-    CFRelease(source);
     return true;
 }
 
@@ -795,7 +748,7 @@ bool inject_unicode_event(
     if (!should_post) {
         return true;
     }
-    const bool posted = post_unicode_event(flags, code);
+    const bool posted = post_unicode_event(subsystem, flags, code);
     if (!posted) {
         if (key_down) {
             (void)subsystem->input_ownership.release_unicode(client_id, code);
@@ -811,12 +764,7 @@ bool post_mouse_event(
     UINT16 flags,
     UINT16 x,
     UINT16 y) {
-    if (subsystem == nullptr) {
-        return false;
-    }
-
-    CGEventSourceRef source = CGEventSourceCreate(kCGEventSourceStateHIDSystemState);
-    if (source == nullptr) {
+    if (subsystem == nullptr || subsystem->input_event_source == nullptr) {
         return false;
     }
 
@@ -830,19 +778,17 @@ bool post_mouse_event(
             ? 0
             : signed_rotation;
         CGEventRef event = CGEventCreateScrollWheelEvent(
-            source,
+            subsystem->input_event_source,
             kCGScrollEventUnitLine,
             2,
             vertical,
             horizontal);
         if (event == nullptr) {
-            CFRelease(source);
             return false;
         }
         CGEventSetLocation(event, point);
         CGEventPost(kCGHIDEventTap, event);
         CFRelease(event);
-        CFRelease(source);
         return true;
     }
 
@@ -860,12 +806,15 @@ bool post_mouse_event(
             drag_button = kCGMouseButtonCenter;
         }
 
-        CGEventRef event = CGEventCreateMouseEvent(source, move_type, point, drag_button);
+        CGEventRef event = CGEventCreateMouseEvent(
+            subsystem->input_event_source,
+            move_type,
+            point,
+            drag_button);
         if (event != nullptr) {
             CGEventPost(kCGHIDEventTap, event);
             CFRelease(event);
         } else {
-            CFRelease(source);
             return false;
         }
     }
@@ -890,16 +839,17 @@ bool post_mouse_event(
     }
 
     if (button_type != kCGEventNull) {
-        CGEventRef event = CGEventCreateMouseEvent(source, button_type, point, button);
+        CGEventRef event = CGEventCreateMouseEvent(
+            subsystem->input_event_source,
+            button_type,
+            point,
+            button);
         if (event == nullptr) {
-            CFRelease(source);
             return false;
         }
         CGEventPost(kCGHIDEventTap, event);
         CFRelease(event);
     }
-
-    CFRelease(source);
     return true;
 }
 
@@ -909,7 +859,7 @@ bool inject_mouse_event(
     UINT16 flags,
     UINT16 x,
     UINT16 y) {
-    if (subsystem == nullptr) {
+    if (subsystem == nullptr || subsystem->input_event_source == nullptr) {
         return false;
     }
 
@@ -981,7 +931,7 @@ bool post_extended_mouse_event(
     UINT16 flags,
     UINT16 x,
     UINT16 y) {
-    if (subsystem == nullptr) {
+    if (subsystem == nullptr || subsystem->input_event_source == nullptr) {
         return false;
     }
 
@@ -994,22 +944,16 @@ bool post_extended_mouse_event(
 
     const bool button_1 = (button_flags & PTR_XFLAGS_BUTTON1) != 0;
     const CGMouseButton button = static_cast<CGMouseButton>(button_1 ? 3 : 4);
-    CGEventSourceRef source = CGEventSourceCreate(kCGEventSourceStateHIDSystemState);
-    if (source == nullptr) {
-        return false;
-    }
     CGEventRef event = CGEventCreateMouseEvent(
-        source,
+        subsystem->input_event_source,
         down ? kCGEventOtherMouseDown : kCGEventOtherMouseUp,
         point,
         button);
     if (event == nullptr) {
-        CFRelease(source);
         return false;
     }
     CGEventPost(kCGHIDEventTap, event);
     CFRelease(event);
-    CFRelease(source);
     return true;
 }
 
@@ -1323,11 +1267,12 @@ void emit_release_state(
 
     for (const auto key_identity : released.keys) {
         (void)post_keyboard_event(
+            subsystem,
             release_flags_for_key_identity(key_identity),
             static_cast<UINT8>(key_identity & UINT8_MAX));
     }
     for (const auto code : released.unicode) {
-        (void)post_unicode_event(KBD_FLAGS_RELEASE, code);
+        (void)post_unicode_event(subsystem, KBD_FLAGS_RELEASE, code);
     }
     if (released.buttons[static_cast<std::size_t>(macrdp::InputButton::left)]) {
         (void)post_mouse_event(subsystem, PTR_FLAGS_BUTTON1, pointer_x, pointer_y);
@@ -1489,7 +1434,6 @@ void log_input_pipeline(MacShadowSubsystem* subsystem, bool force) {
 }
 
 void input_loop(MacShadowSubsystem* subsystem) {
-    release_stale_modifier_state("input worker start");
     while (true) {
         InputEvent event;
         {
@@ -1546,7 +1490,9 @@ void input_loop(MacShadowSubsystem* subsystem) {
         bool injected = false;
         switch (event.kind) {
             case InputEventKind::synchronize:
-                injected = synchronize_toggle_keys(event.synchronize_flags);
+                injected = synchronize_toggle_keys(
+                    subsystem,
+                    event.synchronize_flags);
                 break;
             case InputEventKind::keyboard:
                 injected = inject_keyboard_event(
@@ -2181,6 +2127,13 @@ int mac_shadow_subsystem_start(rdpShadowSubsystem* base) {
         subsystem->capture.reset();
         return -1;
     }
+    subsystem->input_event_source = CGEventSourceCreate(kCGEventSourceStatePrivate);
+    if (subsystem->input_event_source == nullptr) {
+        WLog_ERR(TAG, "Unable to create private CoreGraphics input event source");
+        subsystem->capture->stop();
+        subsystem->capture.reset();
+        return -1;
+    }
 
     subsystem->stop_requested.store(false);
     subsystem->input_stop_requested.store(false);
@@ -2269,6 +2222,8 @@ int mac_shadow_subsystem_start(rdpShadowSubsystem* base) {
         if (subsystem->input_thread.joinable()) {
             subsystem->input_thread.join();
         }
+        CFRelease(subsystem->input_event_source);
+        subsystem->input_event_source = nullptr;
         {
             std::lock_guard input_lock(subsystem->input_queue_mutex);
             subsystem->input_queue.clear();
@@ -2290,7 +2245,6 @@ int mac_shadow_subsystem_stop(rdpShadowSubsystem* base) {
     subsystem->input_stop_requested.store(true);
     subsystem->input_queue_condition.notify_all();
     subsystem->input_queue_space_condition.notify_all();
-    const bool input_was_running = subsystem->input_thread.joinable();
     if (subsystem->capture != nullptr) {
         subsystem->capture->stop();
     }
@@ -2307,11 +2261,9 @@ int mac_shadow_subsystem_stop(rdpShadowSubsystem* base) {
     if (subsystem->input_thread.joinable()) {
         subsystem->input_thread.join();
     }
-    if (input_was_running) {
-        // The input worker releases everything in its ownership ledger. This
-        // second pass also clears a modifier left by an earlier process whose
-        // ledger no longer exists.
-        release_stale_modifier_state("subsystem stop");
+    if (subsystem->input_event_source != nullptr) {
+        CFRelease(subsystem->input_event_source);
+        subsystem->input_event_source = nullptr;
     }
     {
         std::lock_guard frame_lock(subsystem->pending_frame_mutex);

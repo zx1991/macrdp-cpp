@@ -14,6 +14,9 @@ are acceptance gates rather than promised dates.
   attempts request cleanup, and generation tokens isolate their late callbacks.
 - Add deterministic coverage for completion, timeout, late-result rejection,
   and cleanup-handler races that do not require Apple framework callbacks.
+- Isolate remote keyboard and pointer state in a lifetime-scoped private
+  CoreGraphics event source. Startup no longer releases local HID modifiers,
+  and disconnect/shutdown cleanup is bounded by the remote ownership ledger.
 
 ## P0: correctness and lifecycle
 
@@ -21,9 +24,6 @@ are acceptance gates rather than promised dates.
   generation isolation, and stop/reconfigure races without TCC or a display.
 - Validate the bounded start/stop paths under permission denial, display sleep,
   session lock, and rapid reconfiguration on supported hardware.
-- Replace the unconditional startup modifier release with a policy that cannot
-  release keys held by the local user while still recovering remote state after
-  an abnormal disconnect.
 - Run the current `mstsc` matrix on supported macOS hardware: NLA/TLS failure,
   vertical and horizontal wheel direction, FastPath and classic input,
   clipboard, audio, resize, reconnect, and sleep/wake recovery.

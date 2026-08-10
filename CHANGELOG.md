@@ -29,3 +29,6 @@ This project has not published a stable release yet.
 - Added deterministic asynchronous completion/timeout tests and rewrote the
   root README around Alpha status, security boundaries, quick start, and
   release blockers.
+- Isolated remote input in a private CoreGraphics event source and limited
+  release recovery to per-client ownership, so startup and unmatched key-up
+  events cannot release modifiers held by the local user.

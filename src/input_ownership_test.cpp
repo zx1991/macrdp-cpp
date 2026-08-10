@@ -2,6 +2,7 @@
 #include "macrdp/input_queue.hpp"
 #include "macrdp/input_translation.hpp"
 
+#include <algorithm>
 #include <deque>
 #include <iostream>
 
@@ -93,10 +94,37 @@ bool test_wheel_delta_decoding() {
                   "horizontal wheel event flags changed the decoded delta");
 }
 
+bool test_release_all_is_ledger_bounded() {
+    macrdp::InputOwnership ownership;
+    bool ok = expect(ownership.acquire_key(6, 0x001D),
+                     "tracked left Control was not acquired");
+    ok = expect(ownership.acquire_key(6, 0x015B),
+                "tracked left Command was not acquired") && ok;
+
+    const auto released = ownership.release_all();
+    ok = expect(
+        released.keys.size() == 2
+            && std::find(released.keys.begin(), released.keys.end(), 0x001D)
+                != released.keys.end()
+            && std::find(released.keys.begin(), released.keys.end(), 0x015B)
+                != released.keys.end(),
+        "release_all returned modifier keys outside the ownership ledger") && ok;
+    ok = expect(released.unicode.empty()
+                    && std::none_of(
+                        released.buttons.begin(),
+                        released.buttons.end(),
+                        [](bool down) { return down; }),
+                "release_all returned unowned non-key input state") && ok;
+    ok = expect(ownership.release_all().keys.empty(),
+                "release_all retained already released modifier state") && ok;
+    return ok;
+}
+
 } // namespace
 
 int main() {
     bool ok = test_wheel_delta_decoding();
+    ok = test_release_all_is_ledger_bounded() && ok;
     ok = test_reset_priority() && ok;
     ok = test_motion_coalescing() && ok;
     ok = test_discard_motion_for_critical_input() && ok;

@@ -19,11 +19,11 @@ shadow server.
 | --- | --- |
 | Display | Main-display ScreenCaptureKit capture with newest-frame coalescing |
 | Video | GFX/AVC420 through direct VideoToolbox, FFmpeg fallback, optional AVC444, or classic SurfaceBits |
-| Input | Serialized CoreGraphics keyboard, Unicode, pointer, button, drag, and vertical/horizontal wheel injection |
+| Input | Serialized keyboard, Unicode, pointer, button, drag, and wheel injection through a private CoreGraphics event source |
 | Clipboard | Bidirectional `CF_UNICODETEXT` and `CF_TEXT` through `NSPasteboard` |
 | Audio | Screen audio capture and RDPSND output; AAC or PCM depends on negotiation |
 | Security | NLA by default, generated or existing SAM credentials, private configuration paths |
-| Reliability | Per-client input ownership, bounded queues, capture restart backoff, and finite capture start/stop waits |
+| Reliability | Per-client input ownership isolated from local HID state, bounded queues, capture restart backoff, and finite capture start/stop waits |
 | Validation | Local CTest suite, real FreeRDP loopback client, and deterministic shaped-network profiles |
 
 The runtime separates capture, audio, input injection, per-client encoding, and

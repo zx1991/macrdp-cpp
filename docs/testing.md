@@ -16,10 +16,10 @@ ctest --test-dir build --output-on-failure
 
 The local suite covers display dimensions, frame coalescing, VideoToolbox and
 FreeRDP H.264 paths, the asynchronous encoder worker, input ownership and queue
-behavior, signed 9-bit RDP wheel-delta translation, asynchronous completion and
-timeout cleanup semantics, configuration permissions, and server argument
-validation. It does not require Screen Recording permission for the synthetic
-encoder and state-machine tests.
+behavior, ledger-bounded modifier cleanup, signed 9-bit RDP wheel-delta
+translation, asynchronous completion and timeout cleanup semantics,
+configuration permissions, and server argument validation. It does not require
+Screen Recording permission for the synthetic encoder and state-machine tests.
 
 The asynchronous completion test covers completion, duplicate and late result
 rejection, timeout cleanup installed both before and after a timeout, and
@@ -135,10 +135,11 @@ low-bandwidth runs are not mistaken for protocol failures. Override it with
 `MACRDP_LOOPBACK_CLIPBOARD_WAIT_SECONDS` when testing a slower or faster custom
 profile.
 
-When a shadow subsystem starts or stops, the server logs a stale-modifier reset
-with its reason and failure count. A normal run should report zero failures;
-the client-disconnect path also logs the number of keyboard, Unicode, and mouse
-button states released for that client.
+Remote input uses a lifetime-scoped private CoreGraphics event source. Startup
+does not inspect or release keys held by the local user. The client-disconnect
+path logs the number of keyboard, Unicode, and mouse button states released for
+that client; shutdown releases the remaining ownership ledger before discarding
+the private source.
 
 For an opt-in live keyboard check, set `MACRDP_LOOPBACK_PROBE_F=1`. The client
 then sends one ordinary `F` key-down/key-up pair to the active macOS
@@ -159,8 +160,9 @@ release the tracked macOS Command key by its scan-code identity. This catches
 the modifier-sticking failure mode seen with clients that do not preserve the
 extended flag on key-up. The same recovery is checked for right Control, and
 the four constituent events of the mstsc Pause/E1 sequence are checked for
-balanced ownership. `keyboard_unmatched_releases` is a stricter subset for
-releases received without a corresponding key-down in the current session.
+balanced ownership. `keyboard_unmatched_releases` counts key-up events ignored
+because the current client has no corresponding key-down in its ownership
+ledger.
 
 ## Network profiles
 

@@ -52,12 +52,18 @@ format negotiation and data transfer under a channel lock.
   transport input and control-channel events before starting the next frame,
   and keeps completed H.264 output pending until the transport is writable, so
   video backpressure does not delay input or clipboard control traffic.
-- Input ownership is per RDP client. Disconnect cleanup releases only keys and
-  buttons owned by that client; platform injection is serialized in the input
-  worker. When the bounded queue is full, obsolete pointer motion is discarded
-  before critical keyboard, button, wheel, and reset events are allowed to
-  wait for capacity. RDP wheel rotation is decoded from its signed 9-bit field
-  before vertical or horizontal line events are sent to CoreGraphics.
+- Input ownership is per RDP client. Keyboard, Unicode, and pointer events share
+  one lifetime-scoped private CoreGraphics event source, keeping remote
+  modifier and button state independent from local hardware input. Disconnect
+  cleanup releases only state owned by that client; shutdown releases the
+  remaining ledger before destroying the private source. Unmatched key-up
+  events are counted and ignored, while a key-up that lost its E0/E1 marker can
+  still be matched to the current client's ledger. Platform injection is
+  serialized in the input worker. When the bounded queue is full, obsolete
+  pointer motion is discarded before critical keyboard, button, wheel, and
+  reset events are allowed to wait for capacity. RDP wheel rotation is decoded
+  from its signed 9-bit field before vertical or horizontal line events are
+  sent to CoreGraphics.
 - Shutdown joins capture, audio, publish, input, and encoder workers in a
   defined order before FreeRDP state is released.
 
