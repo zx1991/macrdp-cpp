@@ -55,6 +55,10 @@ are acceptance gates rather than promised dates.
   signature checks, stable LaunchAgent paths, atomic upgrade, failed-restart
   recovery, one-command rollback, state-preserving uninstall, and explicit
   state purge behavior.
+- Add a read-only DMG release carrier with post-signing SBOM generation,
+  Developer ID and hardened-runtime gates, notarytool submission, explicit
+  acceptance checks, stapling, Gatekeeper validation, and credential-free CI
+  coverage of the development image.
 
 ## P0: correctness and lifecycle
 
@@ -81,9 +85,9 @@ validation in CI.
 
 ## P2: release engineering
 
-- Build, sign, and notarize a Developer ID distribution, then exercise the
-  implemented install, upgrade, rollback, and uninstall behavior on a clean
-  supported Mac.
+- Run the implemented signing and notarization pipeline with a real Developer
+  ID identity, then exercise install, upgrade, rollback, and uninstall on a
+  clean supported Mac.
 - Automate publication of the binary, tagged project source, FFmpeg
   corresponding-source archive, checksums, SBOM, and release notes as one
   versioned release set.

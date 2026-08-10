@@ -102,14 +102,15 @@ cmake --build build --target macrdp-package-validate
 The target rebuilds `build/macrdp-dist`, then independently checks that every
 Mach-O payload contains the server architectures, requires no macOS version
 newer than the documented macOS 15 baseline, resolves only system or in-package
-load paths, and has a valid ad-hoc signature. It runs the packaged executable
-with `--help` to exercise the dynamic loader without creating credentials,
-requesting TCC permissions, opening a listener, or injecting input. CI runs the
-same target. Managed builds also verify the FFmpeg LGPL configuration, codec
-surface, four-library allowlist, source provenance, notices, SBOM, and the
-self-checking `build/macrdp-ffmpeg-sources-7.1.1.tar.gz` corresponding-source
-archive. A Homebrew-configured package remains a development artifact even if
-its structural validation passes.
+load paths, and has a valid signature (ad-hoc by default). It runs the packaged
+executable with `--help` to exercise the dynamic loader without creating
+credentials, requesting TCC permissions, opening a listener, or injecting
+input. CI runs the same target. Managed builds also verify the FFmpeg LGPL
+configuration, codec surface, four-library allowlist, source provenance,
+notices, SBOM, and the self-checking
+`build/macrdp-ffmpeg-sources-7.1.1.tar.gz` corresponding-source archive. A
+Homebrew-configured package remains a development artifact even if its
+structural validation passes.
 
 The packaged `macrdp-verify-package` independently requires exact SBOM hash
 coverage for every executable, management script, dylib, license, notice, and
@@ -121,6 +122,15 @@ tampered or non-executable package rejection, symbolic-release rejection,
 failed-restart recovery, current and rollback integrity rejection, safe purge
 boundaries, ordinary uninstall, reinstall, and explicit state purge without
 loading a real service or requesting TCC.
+
+`macrdp-distribution-validate` creates an ad-hoc-signed developer DMG, verifies
+its UDIF checksum and signature, mounts it read-only, validates structured
+distribution metadata against the mounted package, repeats the SBOM and Mach-O
+checks, and executes only the server's `--help` loader path. CI runs this target
+without Apple credentials. The notarization unit test uses fake command
+boundaries to require a Keychain profile, reject non-Developer ID input, reject
+non-`Accepted` Apple results before stapling, and verify the stapler/Gatekeeper
+sequence without contacting Apple.
 
 ## Exact-server preflight and hardware evidence
 

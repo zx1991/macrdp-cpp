@@ -262,6 +262,57 @@ set(MACRDP_CODESIGN_IDENTITY "" CACHE STRING
 set(MACRDP_CODESIGN_IDENTIFIER "io.github.zx1991.macrdp.server" CACHE STRING
     "Stable code-signing identifier for macrdp-server"
 )
+set(MACRDP_PACKAGE_SIGN_IDENTITY "-" CACHE STRING
+    "Code-signing identity for packaged Mach-O files (- uses ad-hoc signing)"
+)
+set(MACRDP_RELEASE_CODESIGN_EXECUTABLE "codesign" CACHE STRING
+    "codesign command or local unlocking wrapper used for release artifacts"
+)
+set(MACRDP_PACKAGE_SIGN_IDENTIFIER "io.github.zx1991.macrdp.server" CACHE STRING
+    "Code-signing identifier for the packaged macrdp-server"
+)
+option(MACRDP_PACKAGE_HARDENED_RUNTIME
+    "Enable hardened runtime on packaged Mach-O files"
+    OFF
+)
+option(MACRDP_PACKAGE_TIMESTAMP
+    "Request a trusted timestamp for packaged Mach-O signatures"
+    OFF
+)
+set(MACRDP_DISTRIBUTION_SIGN_IDENTITY "-" CACHE STRING
+    "Code-signing identity for the macOS DMG (- uses ad-hoc signing)"
+)
+set(MACRDP_DISTRIBUTION_SIGN_IDENTIFIER
+    "io.github.zx1991.macrdp.distribution" CACHE STRING
+    "Code-signing identifier for the macOS DMG"
+)
+option(MACRDP_DISTRIBUTION_TIMESTAMP
+    "Request a trusted timestamp for the macOS DMG signature"
+    OFF
+)
+option(MACRDP_REQUIRE_DEVELOPER_ID
+    "Require Developer ID-compatible signing settings for release artifacts"
+    OFF
+)
+set(MACRDP_NOTARY_KEYCHAIN_PROFILE "" CACHE STRING
+    "notarytool Keychain profile name (empty disables the notarization target)"
+)
+
+if(MACRDP_REQUIRE_DEVELOPER_ID)
+    if(MACRDP_PACKAGE_SIGN_IDENTITY STREQUAL "-"
+       OR MACRDP_DISTRIBUTION_SIGN_IDENTITY STREQUAL "-")
+        message(FATAL_ERROR
+            "Developer ID release mode requires package and DMG signing identities"
+        )
+    endif()
+    if(NOT MACRDP_PACKAGE_HARDENED_RUNTIME
+       OR NOT MACRDP_PACKAGE_TIMESTAMP
+       OR NOT MACRDP_DISTRIBUTION_TIMESTAMP)
+        message(FATAL_ERROR
+            "Developer ID release mode requires hardened runtime and trusted timestamps"
+        )
+    endif()
+endif()
 
 option(MACRDP_USE_VIDEOTOOLBOX_H264_ENCODING
     "Use direct VideoToolbox H.264 encoding on macOS with FFmpeg fallback"
@@ -917,7 +968,13 @@ endif()
 
 if(APPLE)
     add_custom_target(macrdp-package
-        COMMAND ${CMAKE_COMMAND} -E env bash
+        COMMAND ${CMAKE_COMMAND} -E env
+            "MACRDP_PACKAGE_CODESIGN_COMMAND=${MACRDP_RELEASE_CODESIGN_EXECUTABLE}"
+            "MACRDP_PACKAGE_SIGN_IDENTITY=${MACRDP_PACKAGE_SIGN_IDENTITY}"
+            "MACRDP_PACKAGE_SIGN_IDENTIFIER=${MACRDP_PACKAGE_SIGN_IDENTIFIER}"
+            "MACRDP_PACKAGE_HARDENED_RUNTIME=${MACRDP_PACKAGE_HARDENED_RUNTIME}"
+            "MACRDP_PACKAGE_TIMESTAMP=${MACRDP_PACKAGE_TIMESTAMP}"
+            bash
             "${CMAKE_CURRENT_SOURCE_DIR}/scripts/package_macos.sh"
             "$<TARGET_FILE:macrdp-server>"
             "${CMAKE_CURRENT_BINARY_DIR}/macrdp-dist"
@@ -954,6 +1011,82 @@ if(APPLE)
     )
     if(MACRDP_MANAGED_FFMPEG)
         add_dependencies(macrdp-package-validate macrdp-ffmpeg-source-package)
+    endif()
+
+    if(CMAKE_OSX_ARCHITECTURES STREQUAL "")
+        set(MACRDP_DISTRIBUTION_ARCHITECTURE "${CMAKE_SYSTEM_PROCESSOR}")
+    else()
+        set(MACRDP_DISTRIBUTION_ARCHITECTURE "${CMAKE_OSX_ARCHITECTURES}")
+    endif()
+    if(MACRDP_DISTRIBUTION_ARCHITECTURE STREQUAL "arm64;x86_64"
+       OR MACRDP_DISTRIBUTION_ARCHITECTURE STREQUAL "x86_64;arm64")
+        set(MACRDP_DISTRIBUTION_ARCHITECTURE "universal2")
+    elseif(MACRDP_DISTRIBUTION_ARCHITECTURE MATCHES ";")
+        message(FATAL_ERROR
+            "Unsupported distribution architecture set: ${CMAKE_OSX_ARCHITECTURES}"
+        )
+    endif()
+    if(MACRDP_REQUIRE_DEVELOPER_ID)
+        set(MACRDP_DISTRIBUTION_SIGN_MODE developer-id)
+    else()
+        set(MACRDP_DISTRIBUTION_SIGN_MODE development)
+    endif()
+    set(MACRDP_DISTRIBUTION_DMG
+        "${CMAKE_CURRENT_BINARY_DIR}/macrdp-cpp-${PROJECT_VERSION}-macos-${MACRDP_DISTRIBUTION_ARCHITECTURE}.dmg"
+    )
+
+    add_custom_target(macrdp-distribution
+        COMMAND ${CMAKE_COMMAND} -E env
+            "MACRDP_DISTRIBUTION_CODESIGN_COMMAND=${MACRDP_RELEASE_CODESIGN_EXECUTABLE}"
+            "MACRDP_DISTRIBUTION_SIGN_IDENTITY=${MACRDP_DISTRIBUTION_SIGN_IDENTITY}"
+            "MACRDP_DISTRIBUTION_SIGN_IDENTIFIER=${MACRDP_DISTRIBUTION_SIGN_IDENTIFIER}"
+            "MACRDP_DISTRIBUTION_TIMESTAMP=${MACRDP_DISTRIBUTION_TIMESTAMP}"
+            bash
+            "${CMAKE_CURRENT_SOURCE_DIR}/scripts/create_macos_distribution.sh"
+            "${CMAKE_CURRENT_BINARY_DIR}/macrdp-dist"
+            "${MACRDP_DISTRIBUTION_DMG}"
+            "${PROJECT_VERSION}"
+            "${MACRDP_DISTRIBUTION_ARCHITECTURE}"
+            "${CMAKE_OSX_DEPLOYMENT_TARGET}"
+        DEPENDS macrdp-package-validate
+        BYPRODUCTS "${MACRDP_DISTRIBUTION_DMG}"
+        USES_TERMINAL
+    )
+
+    add_custom_target(macrdp-distribution-validate
+        COMMAND bash
+            "${CMAKE_CURRENT_SOURCE_DIR}/scripts/validate_macos_distribution.sh"
+            "${MACRDP_DISTRIBUTION_DMG}"
+            "${PROJECT_VERSION}"
+            "${MACRDP_DISTRIBUTION_ARCHITECTURE}"
+            "${CMAKE_OSX_DEPLOYMENT_TARGET}"
+            "${MACRDP_DISTRIBUTION_SIGN_MODE}"
+        DEPENDS macrdp-distribution
+        USES_TERMINAL
+    )
+
+    if(NOT MACRDP_NOTARY_KEYCHAIN_PROFILE STREQUAL "")
+        if(NOT MACRDP_REQUIRE_DEVELOPER_ID)
+            message(FATAL_ERROR
+                "The notarization target requires MACRDP_REQUIRE_DEVELOPER_ID=ON"
+            )
+        endif()
+        add_custom_target(macrdp-notarize
+            COMMAND bash
+                "${CMAKE_CURRENT_SOURCE_DIR}/scripts/notarize_macos_distribution.sh"
+                "${MACRDP_DISTRIBUTION_DMG}"
+                "${MACRDP_NOTARY_KEYCHAIN_PROFILE}"
+            COMMAND bash
+                "${CMAKE_CURRENT_SOURCE_DIR}/scripts/validate_macos_distribution.sh"
+                "${MACRDP_DISTRIBUTION_DMG}"
+                "${PROJECT_VERSION}"
+                "${MACRDP_DISTRIBUTION_ARCHITECTURE}"
+                "${CMAKE_OSX_DEPLOYMENT_TARGET}"
+                developer-id
+                --require-notarized
+            DEPENDS macrdp-distribution-validate
+            USES_TERMINAL
+        )
     endif()
 endif()
 
@@ -1329,6 +1462,13 @@ add_test(
         ${CMAKE_CURRENT_SOURCE_DIR}/scripts/install_launch_agent.sh
         ${CMAKE_CURRENT_SOURCE_DIR}/scripts/verify_macos_package.rb
         ${CMAKE_CURRENT_SOURCE_DIR}/scripts/rotate_launch_agent_password.sh
+)
+
+add_test(
+    NAME notarize_macos_distribution
+    COMMAND bash
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests/notarize_macos_distribution_test.sh
+        ${CMAKE_CURRENT_SOURCE_DIR}/scripts/notarize_macos_distribution.sh
 )
 
 set_tests_properties(

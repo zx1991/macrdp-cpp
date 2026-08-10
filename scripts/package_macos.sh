@@ -15,6 +15,11 @@ project_version=$5
 ffmpeg_provenance=${6:-}
 script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
 compliance_generator="$script_dir/generate_macos_compliance.rb"
+package_codesign_command=${MACRDP_PACKAGE_CODESIGN_COMMAND:-codesign}
+package_sign_identity=${MACRDP_PACKAGE_SIGN_IDENTITY:--}
+package_sign_identifier=${MACRDP_PACKAGE_SIGN_IDENTIFIER:-io.github.zx1991.macrdp.server}
+package_hardened_runtime=${MACRDP_PACKAGE_HARDENED_RUNTIME:-OFF}
+package_timestamp=${MACRDP_PACKAGE_TIMESTAMP:-OFF}
 install_manager="$project_source/scripts/manage_macos_install.sh"
 launch_agent_installer="$project_source/scripts/install_launch_agent.sh"
 package_verifier="$project_source/scripts/verify_macos_package.rb"
@@ -48,8 +53,29 @@ if [[ -n $ffmpeg_provenance && ! -f $ffmpeg_provenance ]]; then
     printf 'FFmpeg provenance is missing: %s\n' "$ffmpeg_provenance" >&2
     exit 1
 fi
+if [[ -z $package_sign_identity || -z $package_sign_identifier \
+      || ! $package_sign_identifier =~ ^[A-Za-z0-9._-]+$ ]]; then
+    printf 'package signing identity or identifier is invalid\n' >&2
+    exit 1
+fi
+
+is_enabled() {
+    case $1 in
+        1|ON|on|TRUE|true|YES|yes) return 0 ;;
+        0|OFF|off|FALSE|false|NO|no|'') return 1 ;;
+        *)
+            printf 'invalid boolean value: %s\n' "$1" >&2
+            exit 2
+            ;;
+    esac
+}
+if [[ $package_sign_identity == - ]] && is_enabled "$package_timestamp"; then
+    printf 'ad-hoc package signing cannot request a trusted timestamp\n' >&2
+    exit 1
+fi
 if ! command -v otool >/dev/null 2>&1 || ! command -v install_name_tool >/dev/null 2>&1 \
-    || ! command -v codesign >/dev/null 2>&1 || ! command -v ruby >/dev/null 2>&1; then
+    || ! command -v "$package_codesign_command" >/dev/null 2>&1 \
+    || ! command -v ruby >/dev/null 2>&1; then
     printf 'otool, install_name_tool, codesign, and ruby are required on macOS\n' >&2
     exit 1
 fi
@@ -346,14 +372,29 @@ while IFS= read -r current; do
     validate_packaged_file "$current"
 done < <(find "$output_dir" -type f \( -name 'macrdp-server' -o -name '*.dylib' \) -print)
 
-# install_name_tool invalidates an existing signature. Re-sign the modified
-# payload ad hoc so macOS does not kill the packaged process at load time.
-sign_ad_hoc() {
+# install_name_tool invalidates an existing signature. Sign the completed
+# Mach-O payload before generating SBOM hashes.
+sign_packaged_file() {
     local file=$1
+    local identifier=${2:-}
     local signing_output
+    local signing_arguments=(--force --sign "$package_sign_identity")
 
-    if ! signing_output=$(codesign --force --sign - "$file" 2>&1); then
-        printf 'unable to apply ad-hoc signature to %s\n' "$file" >&2
+    if is_enabled "$package_hardened_runtime"; then
+        signing_arguments+=(--options runtime)
+    fi
+    if is_enabled "$package_timestamp"; then
+        signing_arguments+=(--timestamp)
+    else
+        signing_arguments+=(--timestamp=none)
+    fi
+    if [[ -n $identifier ]]; then
+        signing_arguments+=(--identifier "$identifier")
+    fi
+
+    if ! signing_output=$("$package_codesign_command" \
+        "${signing_arguments[@]}" "$file" 2>&1); then
+        printf 'unable to sign packaged file %s\n' "$file" >&2
         printf '%s\n' "$signing_output" >&2
         return 1
     fi
@@ -361,9 +402,9 @@ sign_ad_hoc() {
 
 for library in "$output_dir"/lib/*.dylib; do
     [[ -f "$library" ]] || continue
-    sign_ad_hoc "$library"
+    sign_packaged_file "$library"
 done
-sign_ad_hoc "$packaged_server"
+sign_packaged_file "$packaged_server" "$package_sign_identifier"
 
 ruby "$compliance_generator" \
     "$output_dir" \
@@ -375,3 +416,4 @@ ruby "$compliance_generator" \
 
 printf 'Packaged macrdp-server at %s\n' "$output_dir"
 printf 'Non-system dylibs: %s\n' "$(find "$output_dir/lib" -type f | wc -l | tr -d ' ')"
+printf 'Package signing identity: %s\n' "$package_sign_identity"

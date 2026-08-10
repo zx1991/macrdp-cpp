@@ -105,3 +105,9 @@ This project has not published a stable release yet.
 - Added deterministic installation lifecycle coverage using temporary package,
   HOME, LaunchAgent, certificate, and credential state without touching a real
   service or macOS TCC permissions.
+- Added a read-only macOS DMG distribution target with structured metadata,
+  mounted-package validation, stable signing identifiers, and ad-hoc CI
+  coverage that requires no Apple credentials.
+- Added gated Developer ID signing, hardened runtime and timestamp checks,
+  notarytool submission, explicit acceptance handling, stapling, Gatekeeper
+  assessment, and credential-free notarization control-flow tests.

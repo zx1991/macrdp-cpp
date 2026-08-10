@@ -40,11 +40,11 @@ and backpressure details.
 - RDPSND speaker output is supported, but microphone/AUDIN input is disabled.
 - The pinned release dependency set and current Homebrew development packages
   target macOS 15. Older targets need a separately built compatible set.
-- The package target creates a relocatable, ad-hoc-signed developer payload,
-  not a notarized distribution archive. The pinned LGPL FFmpeg build,
-  compliance metadata, corresponding-source bundle, and versioned per-user
-  lifecycle are implemented; Developer ID signing, notarization, and
-  clean-machine release validation remain release work.
+- The package and distribution targets create a relocatable, ad-hoc-signed
+  developer payload and DMG. The pinned LGPL FFmpeg build, compliance metadata,
+  corresponding-source bundle, versioned per-user lifecycle, and gated
+  Developer ID/notarization pipeline are implemented; a real Apple notarization
+  run and clean-machine release validation remain release work.
 - The automated loopback client verifies protocol delivery, but final input,
   Retina, reconnect, and sleep/wake behavior still needs a real Windows
   `mstsc` validation matrix on supported hardware.
@@ -201,14 +201,29 @@ cmake --build build --target macrdp-package-validate
 
 The output is `build/macrdp-dist`. The packaging script copies non-system
 dynamic libraries, rewrites load paths, rejects references that escape the
-package, and applies an ad-hoc signature. The validation target independently
-checks load paths, architectures, minimum macOS versions, signatures, unused
-FFmpeg components, and a packaged `--help` loader smoke check. With the pinned
-release configuration it also creates
+package, and applies an ad-hoc signature by default. The validation target
+independently checks load paths, architectures, minimum macOS versions,
+signatures, unused FFmpeg components, and a packaged `--help` loader smoke
+check. With the pinned release configuration it also creates
 `build/macrdp-ffmpeg-sources-7.1.1.tar.gz`, a self-checking corresponding-source
-bundle for the distributed FFmpeg libraries. Validation does not start a
-listener or require TCC permissions. The payload is not a notarized installer
-and should not be published as an official artifact yet.
+bundle for the distributed FFmpeg libraries.
+
+Create and mount-validate the corresponding developer disk image with:
+
+```bash
+cmake --build build --target macrdp-distribution-validate
+```
+
+The output is `build/macrdp-cpp-0.1.0-macos-arm64.dmg`. In the default
+configuration both the copied Mach-O payload and DMG use ad-hoc signatures;
+this exercises the complete image structure without claiming publisher
+authenticity. DMG validation mounts the image read-only, repeats the SBOM and
+signature checks, checks architecture metadata, and runs the packaged `--help`
+loader smoke test. Validation does not start a listener or require TCC
+permissions. The developer DMG must not be published as an official release.
+See
+[Release engineering](docs/release.md#developer-id-and-notarization) for the
+credentialed Developer ID and notarization mode.
 
 The package contains the `bin/macrdp-manage` lifecycle command, the offline
 `bin/macrdp-verify-package` integrity verifier,

@@ -57,6 +57,7 @@ configuration above:
 
 ```bash
 cmake --build build --target macrdp-package-validate
+cmake --build build --target macrdp-distribution-validate
 ```
 
 This target must regenerate and validate the CycloneDX SBOM, dependency graph,
@@ -64,6 +65,12 @@ third-party notices, FFmpeg build configuration and provenance, license texts,
 and `build/macrdp-ffmpeg-sources-7.1.1.tar.gz`. Do not manually edit or commit
 generated package, dependency, provenance, or source-archive files under
 `build/`.
+
+Release-distribution changes must keep ad-hoc development mode separate from
+the explicit Developer ID gate. Tests and ordinary CI must not read real
+certificates or notary credentials. Never add certificate exports, private
+keys, app-specific passwords, App Store Connect API keys, or Keychain files to
+the repository.
 
 Changes to installation management must preserve the separation between
 immutable `releases/` payloads and persistent certificate/credential state.
