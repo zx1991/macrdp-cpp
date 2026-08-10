@@ -65,3 +65,5 @@ This project has not published a stable release yet.
 - Added an Aqua-capable hardware lifecycle harness that verifies repeated
   bounded startup, SIGTERM shutdown, listener cleanup, binary identity, and
   modifier cleanup without retaining its ephemeral credentials or config.
+- Extended the non-identifying macOS system probe with active, asleep, and
+  online display state for observable sleep/wake hardware evidence.

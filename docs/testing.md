@@ -71,10 +71,11 @@ tools/collect_hardware_diagnostics.sh \
 
 The LaunchAgent has no keep-alive policy and is unloaded after the bounded
 preflight. The collector does not inject input. Its Swift probe only reads
-session, display geometry, and modifier state. Use `--server-log PATH` to add
-logs and `--skip-preflight` when only post-failure metadata is needed. Supplied
-logs are copied verbatim and can contain credentials or other sensitive data.
-Raw bundles belong in a private temporary location, not the repository.
+session state, display geometry and active/asleep/online state, and modifier
+state. Use `--server-log PATH` to add logs and `--skip-preflight` when only
+post-failure metadata is needed. Supplied logs are copied verbatim and can
+contain credentials or other sensitive data. Raw bundles belong in a private
+temporary location, not the repository.
 
 The repeated lifecycle harness starts and gracefully stops the exact server 20
 times by default. Each cycle uses a fresh owner-only configuration directory,

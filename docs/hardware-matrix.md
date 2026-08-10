@@ -69,8 +69,8 @@ tools/collect_hardware_diagnostics.sh \
 The bundle is created in an owner-only temporary directory. `summary.txt`
 records the source revision, binary hash, signing verification, preflight mode,
 preflight duration, and probe status. `system-probe.txt` records the graphical
-session, non-identifying display geometry, and modifier-key state. Verify the
-bundle before relying on it:
+session, non-identifying display geometry and active/asleep/online state, and
+modifier-key state. Verify the bundle before relying on it:
 
 ```bash
 cd /path/printed/by/the/collector

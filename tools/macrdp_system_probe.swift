@@ -52,6 +52,11 @@ for (name, keyCode) in modifierKeys {
     print("key_\(name)_down=\(boolText(pressed))")
 }
 
+let mainDisplay = CGMainDisplayID()
+print("main_display_active=\(boolText(CGDisplayIsActive(mainDisplay) != 0))")
+print("main_display_asleep=\(boolText(CGDisplayIsAsleep(mainDisplay) != 0))")
+print("main_display_online=\(boolText(CGDisplayIsOnline(mainDisplay) != 0))")
+
 var displayCount: UInt32 = 0
 let countStatus = CGGetActiveDisplayList(0, nil, &displayCount)
 print("display_query_status=\(countStatus.rawValue)")
@@ -73,6 +78,9 @@ if countStatus == .success && displayCount > 0 {
             let pixelsHigh = CGDisplayPixelsHigh(display)
             let scale = bounds.width > 0 ? Double(pixelsWide) / bounds.width : 0
             print("display_\(index)_main=\(boolText(CGDisplayIsMain(display) != 0))")
+            print("display_\(index)_active=\(boolText(CGDisplayIsActive(display) != 0))")
+            print("display_\(index)_asleep=\(boolText(CGDisplayIsAsleep(display) != 0))")
+            print("display_\(index)_online=\(boolText(CGDisplayIsOnline(display) != 0))")
             print("display_\(index)_logical_width=\(Int(bounds.width))")
             print("display_\(index)_logical_height=\(Int(bounds.height))")
             print("display_\(index)_pixel_width=\(pixelsWide)")
