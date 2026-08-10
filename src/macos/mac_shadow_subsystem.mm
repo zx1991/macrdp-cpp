@@ -2261,14 +2261,23 @@ void audio_loop(MacShadowSubsystem* subsystem) {
     }
 
     std::deque<std::int16_t> pending;
+    std::optional<std::uint64_t> pending_display_generation;
     std::uint64_t timestamp_ms = 0;
     std::uint64_t test_tone_frame = 0;
     while (!subsystem->stop_requested.load(std::memory_order_acquire)) {
         std::optional<macrdp::AudioFrame> audio;
         if (test_tone_enabled) {
+            const auto display_generation = active_display_generation(subsystem);
+            if (!display_generation.has_value()) {
+                pending.clear();
+                pending_display_generation.reset();
+                std::this_thread::sleep_for(std::chrono::milliseconds{50});
+                continue;
+            }
             macrdp::AudioFrame frame;
             frame.sample_rate = sample_rate;
             frame.channels = channels;
+            frame.display_generation = *display_generation;
             frame.pcm.resize(chunk_samples);
             for (std::size_t index = 0; index < chunk_frames; ++index) {
                 const double phase = static_cast<double>(test_tone_frame + index)
@@ -2284,17 +2293,27 @@ void audio_loop(MacShadowSubsystem* subsystem) {
         } else {
             if (!active_display_generation(subsystem).has_value()) {
                 pending.clear();
+                pending_display_generation.reset();
                 std::this_thread::sleep_for(std::chrono::milliseconds{50});
                 continue;
             }
             audio = subsystem->capture->next_audio(std::chrono::milliseconds{250});
         }
         if (!audio.has_value()) {
+            pending.clear();
+            pending_display_generation.reset();
+            std::this_thread::sleep_for(std::chrono::milliseconds{10});
             continue;
         }
-        if (!test_tone_enabled
-            && !active_display_generation(subsystem).has_value()) {
+        const auto display_generation = active_display_generation(subsystem);
+        if (!macrdp::audio_frame_matches_display_generation(
+                *audio,
+                display_generation)) {
             pending.clear();
+            pending_display_generation.reset();
+            subsystem->audio_dropped_frames.fetch_add(
+                audio->frames(),
+                std::memory_order_relaxed);
             continue;
         }
         if (!audio->valid() || audio->sample_rate != sample_rate
@@ -2303,6 +2322,11 @@ void audio_loop(MacShadowSubsystem* subsystem) {
                 audio->frames(),
                 std::memory_order_relaxed);
             continue;
+        }
+
+        if (pending_display_generation != audio->display_generation) {
+            pending.clear();
+            pending_display_generation = audio->display_generation;
         }
 
         subsystem->audio_captured_frames.fetch_add(
@@ -2322,15 +2346,29 @@ void audio_loop(MacShadowSubsystem* subsystem) {
         while (pending.size() >= chunk_samples
                && !subsystem->stop_requested.load(std::memory_order_acquire)) {
             std::vector<std::int16_t> chunk;
-            chunk.reserve(chunk_samples);
-            for (std::size_t index = 0; index < chunk_samples; ++index) {
-                chunk.push_back(pending.front());
-                pending.pop_front();
+            {
+                std::lock_guard commit_lock(subsystem->display_commit_mutex);
+                const auto committed_generation = active_display_generation(subsystem);
+                if (!committed_generation.has_value()
+                    || pending_display_generation != committed_generation) {
+                    subsystem->audio_dropped_frames.fetch_add(
+                        pending.size() / channels,
+                        std::memory_order_relaxed);
+                    pending.clear();
+                    pending_display_generation.reset();
+                    break;
+                }
+
+                chunk.reserve(chunk_samples);
+                for (std::size_t index = 0; index < chunk_samples; ++index) {
+                    chunk.push_back(pending.front());
+                    pending.pop_front();
+                }
+                (void)broadcast_audio_samples(
+                    subsystem,
+                    chunk,
+                    static_cast<UINT16>(timestamp_ms & UINT16_MAX));
             }
-            (void)broadcast_audio_samples(
-                subsystem,
-                chunk,
-                static_cast<UINT16>(timestamp_ms & UINT16_MAX));
             timestamp_ms += (chunk_frames * 1000U) / sample_rate;
             subsystem->audio_published_chunks.fetch_add(
                 1,

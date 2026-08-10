@@ -21,9 +21,9 @@ shadow server.
 | Video | GFX/AVC420 through direct VideoToolbox, FFmpeg fallback, optional AVC444, or classic SurfaceBits |
 | Input | Serialized keyboard, Unicode, pointer, button, drag, and wheel injection through a private CoreGraphics event source |
 | Clipboard | Bidirectional `CF_UNICODETEXT` and `CF_TEXT` through `NSPasteboard`, with per-connection request correlation |
-| Audio | Screen audio capture and RDPSND output; AAC or PCM depends on negotiation |
+| Audio | Generation-isolated screen audio and negotiation-gated RDPSND output; AAC or PCM depends on client formats |
 | Security | NLA and loopback-only listening by default, one concurrent client, explicit legacy-security opt-in, view-only and clipboard opt-out controls |
-| Reliability | Per-client input and clipboard state, bounded queues, capture restart backoff, and generation-isolated capture and display lifecycles |
+| Reliability | Per-client input, clipboard, and audio state, bounded queues, capture restart backoff, and generation-isolated display lifecycles |
 | Validation | Local state-machine and injected capture-lifecycle tests, real FreeRDP loopback client, and deterministic shaped-network profiles |
 
 The runtime separates capture, audio, input injection, per-client encoding, and

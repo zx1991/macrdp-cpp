@@ -99,12 +99,30 @@ bool test_clipboard_gate() {
                   "enabled clipboard skipped channel input validation");
 }
 
+bool test_rdpsnd_negotiation_gate() {
+    rdpShadowClient client{};
+    RdpsndServerContext rdpsnd{};
+    client.activated = TRUE;
+    client.rdpsnd = &rdpsnd;
+
+    bool ok = expect(!shadow_client_rdpsnd_is_active(&client),
+                     "unnegotiated RDPSND client was treated as active");
+    client.macrdpRdpsndActivated = TRUE;
+    ok = expect(shadow_client_rdpsnd_is_active(&client),
+                "negotiated RDPSND client was not treated as active") && ok;
+    client.macrdpRdpsndActivated = FALSE;
+    ok = expect(!shadow_client_rdpsnd_is_active(&client),
+                "disconnected RDPSND client retained active state") && ok;
+    return ok;
+}
+
 } // namespace
 
 int main() {
     return test_view_only_input_gate()
             && test_interactive_input_path_remains_active()
             && test_clipboard_gate()
+            && test_rdpsnd_negotiation_gate()
         ? 0
         : 1;
 }

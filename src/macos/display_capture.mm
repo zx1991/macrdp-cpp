@@ -567,6 +567,14 @@ std::optional<macrdp::AudioFrame> copy_audio_sample_buffer(
 
 namespace macrdp {
 
+bool audio_frame_matches_display_generation(
+    const AudioFrame& frame,
+    std::optional<std::uint64_t> active_generation) noexcept {
+    return active_generation.has_value()
+        && frame.display_generation != 0
+        && frame.display_generation == *active_generation;
+}
+
 std::pair<std::uint32_t, std::uint32_t> display_capture_output_size(
     std::uint32_t native_width,
     std::uint32_t native_height,
@@ -720,6 +728,7 @@ std::pair<std::size_t, std::size_t> output_size(
         if (!audio.has_value()) {
             return;
         }
+        audio->display_generation = display_generation_;
         // The audio consumer runs independently from video and keeps the
         // newest block only, so audio backpressure cannot stall SCK.
         (void)macrdp::detail::capture_backend_publish_audio(

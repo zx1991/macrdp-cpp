@@ -1,6 +1,6 @@
 --- a/include/freerdp/server/shadow.h
 +++ b/include/freerdp/server/shadow.h
-@@ -131,6 +131,10 @@
+@@ -131,6 +131,11 @@
  		BOOL macrdpH264CompletionDeferred;
  		UINT64 macrdpH264LastDiagnostics;
  		/* MACRDP_CLIENT_FRAME_SNAPSHOT */
@@ -8,11 +8,107 @@
 +		LONG macrdpAudioMessageQueued;
 +		LONG macrdpAudioMessagesDropped;
 +		LONGLONG macrdpAudioSuppressedUntil;
++		LONG macrdpRdpsndActivated;
  		rdpShadowServer* server;
  		rdpShadowEncoder* encoder;
  		rdpShadowSubsystem* subsystem;
+@@ -442,6 +447,9 @@
+ 	WINPR_ATTR_NODISCARD
+ 	FREERDP_API UINT32 shadow_encoder_inflight_frames(rdpShadowEncoder* encoder);
+ 
++	WINPR_ATTR_NODISCARD
++	FREERDP_API BOOL shadow_client_rdpsnd_is_active(rdpShadowClient* client);
++
+ 	WINPR_ATTR_NODISCARD
+ 	FREERDP_API BOOL shadow_screen_resize(rdpShadowScreen* screen);
+ 
+--- a/server/shadow/shadow_rdpsnd.c
++++ b/server/shadow/shadow_rdpsnd.c
+@@ -21,6 +21,7 @@
+ #include <winpr/crt.h>
+ #include <winpr/assert.h>
+ #include <winpr/cast.h>
++#include <winpr/interlocked.h>
+ 
+ #include <freerdp/log.h>
+ #include <freerdp/codec/dsp.h>
+@@ -33,6 +34,13 @@
+ 
+ #define TAG SERVER_TAG("shadow")
+ 
++BOOL shadow_client_rdpsnd_is_active(rdpShadowClient* client)
++{
++	WINPR_ASSERT(client);
++	return InterlockedCompareExchange(&client->macrdpRdpsndActivated, FALSE, FALSE) != FALSE;
++}
++/* MACRDP_RDPSND_LIFECYCLE */
++
+ static BOOL rdpsnd_select_preferred_format(
+     RdpsndServerContext* context,
+     size_t client_index,
+@@ -59,6 +67,10 @@
+ static void rdpsnd_activated(RdpsndServerContext* context)
+ {
+ 	WINPR_ASSERT(context);
++	rdpShadowClient* client = (rdpShadowClient*)context->data;
++	WINPR_ASSERT(client);
++	InterlockedExchange(&client->macrdpRdpsndActivated, FALSE);
++
+	for (size_t pass = 0; pass < 2; pass++)
+	{
+		for (size_t j = 0; j < context->num_server_formats; j++)
+@@ -72,7 +84,10 @@
+ 			{
+ 				if (audio_format_compatible(server_format, &context->client_formats[i])
+ 				    && rdpsnd_select_preferred_format(context, i, server_format))
++				{
++					InterlockedExchange(&client->macrdpRdpsndActivated, TRUE);
+ 					return;
++				}
+ 			}
+ 		}
+ 	}
+@@ -83,6 +98,8 @@
+ int shadow_client_rdpsnd_init(rdpShadowClient* client)
+ {
+ 	WINPR_ASSERT(client);
++	InterlockedExchange(&client->macrdpRdpsndActivated, FALSE);
++
+ 	RdpsndServerContext* rdpsnd = client->rdpsnd = rdpsnd_server_context_new(client->vcm);
+ 
+ 	if (!rdpsnd)
+@@ -116,6 +133,7 @@
+ void shadow_client_rdpsnd_uninit(rdpShadowClient* client)
+ {
+ 	WINPR_ASSERT(client);
++	InterlockedExchange(&client->macrdpRdpsndActivated, FALSE);
+ 	if (client->rdpsnd)
+ 	{
+ 		client->rdpsnd->Stop(client->rdpsnd);
 --- a/server/shadow/shadow_client.c
 +++ b/server/shadow/shadow_client.c
+@@ -3077,10 +3077,10 @@
+ 			const SHADOW_MSG_OUT_AUDIO_OUT_SAMPLES* msg =
+ 			    (const SHADOW_MSG_OUT_AUDIO_OUT_SAMPLES*)message->wParam;
+ 
+ 			WINPR_ASSERT(msg);
+ 
+-			if (client->activated && client->rdpsnd && client->rdpsnd->Activated)
++			if (client->activated && shadow_client_rdpsnd_is_active(client) && client->rdpsnd)
+ 			{
+ 				client->rdpsnd->src_format = msg->audio_format;
+ 
+ 				const UINT error =
+@@ -3098,8 +3098,8 @@
+ 			const SHADOW_MSG_OUT_AUDIO_OUT_VOLUME* msg =
+ 			    (const SHADOW_MSG_OUT_AUDIO_OUT_VOLUME*)message->wParam;
+ 
+-			if (client->activated && client->rdpsnd && client->rdpsnd->Activated)
++			if (client->activated && shadow_client_rdpsnd_is_active(client) && client->rdpsnd)
+ 			{
+ 				const UINT error = IFCALLRESULT(CHANNEL_RC_OK, client->rdpsnd->SetVolume,
+ 				                                client->rdpsnd, msg->left, msg->right);
+ 				if (CHANNEL_RC_OK != error)
 @@ -3299,12 +3299,14 @@
  			if (blockedDuration > outputBlockedMaxMs)
  				outputBlockedMaxMs = blockedDuration;
@@ -81,7 +177,7 @@
 +		/* Audio is real-time. Reject it before it enters a blocked transport or
 +		 * creates an unbounded MessageQueue backlog. Keep it suppressed briefly
 +		 * after recovery so video can drain without an audio burst. */
-+		if (!client->activated || !client->rdpsnd || !client->rdpsnd->Activated
++		if (!client->activated || !shadow_client_rdpsnd_is_active(client)
 +		    || transportBlocked || suppressedUntil > (LONGLONG)now
 +		    || InterlockedCompareExchange(
 +			       &client->macrdpAudioMessageQueued, TRUE, FALSE) != FALSE)

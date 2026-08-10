@@ -30,6 +30,12 @@ FreeRDP client callback -> per-client input queue -> macOS input worker
 
 Audio and clipboard have separate service paths. Audio capture/pacing runs in
 its own loop and publishes bounded PCM chunks to the FreeRDP shadow clients.
+Captured blocks carry the display generation that produced them; a topology
+transition rejects stale blocks and clears partially accumulated PCM before the
+replacement generation or a restarted capture stream can publish. Empty reads
+from a stopped stream use a bounded retry delay instead of spinning. Each
+client rejects audio work until RDPSND has successfully selected a compatible
+format, and clears that atomic negotiation state before channel teardown.
 The clipboard monitor observes `NSPasteboard` after the client capability
 exchange, while channel callbacks perform format negotiation and data transfer
 under a per-connection operation lock. Ordered remote data responses consume a
@@ -67,7 +73,8 @@ removed, capture waits for the same ID to return instead of switching screens.
 - ScreenCaptureKit keeps independent newest-frame and newest-audio slots. Each
   slot has its own condition variable, so video and audio callbacks wake only
   their corresponding consumer. Stop, reconfigure, and capture-error paths
-  wake both consumers.
+  wake both consumers. Audio blocks and pending PCM cannot cross the committed
+  display generation.
 - CoreGraphics topology access also sits behind an injectable C++ backend.
   Observer lifecycle tokens reject callbacks retained by an old registration,
   and invalid or duplicate readings leave the last valid snapshot intact.
@@ -87,6 +94,11 @@ removed, capture waits for the same ID to return instead of switching screens.
   wakes and joins the monitor, then lets FreeRDP stop and join its receive
   thread before the context is released. A reconnect starts with an empty
   request queue and independent publication state.
+- RDPSND publication is per client and begins only after format selection
+  succeeds. The negotiation flag is reset before the RDPSND worker stops, so a
+  reconnect starts inactive and broadcast dispatch cannot dereference a
+  channel context that is being released. At most one audio sample message is
+  queued per client, and stale audio remains discardable under backpressure.
 - Input ownership is per RDP client. Keyboard, Unicode, and pointer events share
   one lifetime-scoped private CoreGraphics event source, keeping remote
   modifier and button state independent from local hardware input. Disconnect

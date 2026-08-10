@@ -71,6 +71,11 @@ are acceptance gates rather than promised dates.
   callback side effects before releasing a disconnected channel. Deterministic
   tests cover queue bounds, rollback, unsolicited responses, and reconnect
   isolation without touching `NSPasteboard`.
+- Isolate audio across display generations and RDPSND connection lifetimes.
+  Topology changes and capture restarts clear pending PCM, stopped streams use
+  bounded polling, clients receive no audio work before successful format
+  selection, and teardown clears negotiation state before releasing the
+  channel; deterministic tests require neither capture nor a listener.
 
 ## P0: correctness and lifecycle
 

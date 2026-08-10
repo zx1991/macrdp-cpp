@@ -41,6 +41,8 @@ struct AudioFrame {
     std::uint32_t sample_rate = 0;
     std::uint16_t channels = 0;
     std::uint64_t timestamp_us = 0;
+    // Identifies the display topology snapshot that produced this block.
+    std::uint64_t display_generation = 0;
     std::vector<std::int16_t> pcm;
 
     [[nodiscard]] bool valid() const noexcept {
@@ -52,6 +54,12 @@ struct AudioFrame {
         return channels == 0 ? 0 : pcm.size() / channels;
     }
 };
+
+// Audio captured before a display transition must not be published against the
+// replacement topology. A missing active generation also rejects the block.
+[[nodiscard]] bool audio_frame_matches_display_generation(
+    const AudioFrame& frame,
+    std::optional<std::uint64_t> active_generation) noexcept;
 
 // Return the native display size reduced to fit both optional limits while
 // preserving aspect ratio. A zero limit means that dimension is unbounded.

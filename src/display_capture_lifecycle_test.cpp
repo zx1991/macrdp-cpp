@@ -139,12 +139,28 @@ macrdp::Frame test_frame(std::uint8_t marker) {
     return frame;
 }
 
-macrdp::AudioFrame test_audio(std::int16_t marker) {
+macrdp::AudioFrame test_audio(
+    std::int16_t marker,
+    std::uint64_t display_generation = 1) {
     macrdp::AudioFrame frame;
     frame.sample_rate = 48'000;
     frame.channels = 2;
+    frame.display_generation = display_generation;
     frame.pcm = {marker, marker};
     return frame;
+}
+
+bool test_audio_display_generation_gate() {
+    const auto current = test_audio(1, 12);
+    const auto stale = test_audio(2, 11);
+    return expect(macrdp::audio_frame_matches_display_generation(current, 12),
+                  "current-generation audio was rejected")
+        && expect(!macrdp::audio_frame_matches_display_generation(stale, 12),
+                  "stale-generation audio was accepted")
+        && expect(!macrdp::audio_frame_matches_display_generation(
+                      current,
+                      std::nullopt),
+                  "audio was accepted without an active display generation");
 }
 
 bool test_backend_stop_wakes_both_consumers() {
@@ -233,14 +249,15 @@ bool test_reconfigure_rejects_old_generation_callbacks() {
     ok = expect(macrdp::detail::capture_backend_publish_audio(
                     second.state,
                     second.generation,
-                    test_audio(2)),
+                    test_audio(2, 12)),
                 "active-generation audio was rejected") && ok;
 
     const auto frame = capture.next_frame(0ms);
     const auto audio = capture.next_audio(0ms);
     ok = expect(frame.has_value() && frame->bgra.front() == 2,
                 "active-generation frame was not delivered") && ok;
-    ok = expect(audio.has_value() && audio->pcm.front() == 2,
+    ok = expect(audio.has_value() && audio->pcm.front() == 2
+                    && audio->display_generation == 12,
                 "active-generation audio was not delivered") && ok;
     ok = expect(capture.last_error().empty(),
                 "old-generation callback replaced active error state") && ok;
@@ -329,7 +346,8 @@ bool test_stop_and_reconfigure_are_serialized() {
 } // namespace
 
 int main() {
-    bool ok = test_backend_stop_wakes_both_consumers();
+    bool ok = test_audio_display_generation_gate();
+    ok = test_backend_stop_wakes_both_consumers() && ok;
     ok = test_reconfigure_rejects_old_generation_callbacks() && ok;
     ok = test_stop_during_backend_start_is_rejected() && ok;
     ok = test_stop_and_reconfigure_are_serialized() && ok;

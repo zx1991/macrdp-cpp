@@ -1,13 +1,14 @@
 diff --git a/include/freerdp/server/shadow.h b/include/freerdp/server/shadow.h
 --- a/include/freerdp/server/shadow.h
 +++ b/include/freerdp/server/shadow.h
-@@ -131,8 +131,14 @@
+@@ -131,9 +131,15 @@
  		UINT64 macrdpH264LastDiagnostics;
  		/* MACRDP_CLIENT_FRAME_SNAPSHOT */
  		/* MACRDP_AUDIO_QUEUE_BOUND */
  		LONG macrdpAudioMessageQueued;
  		LONG macrdpAudioMessagesDropped;
  		LONGLONG macrdpAudioSuppressedUntil;
+ 		LONG macrdpRdpsndActivated;
 +		UINT64 macrdpOutputQueueMaxDepth;
 +		UINT64 macrdpOutputQueueMaxCapacity;
 +		UINT64 macrdpTransportQueueMaxBytes;

@@ -26,6 +26,10 @@ This project has not published a stable release yet.
   signed 9-bit wheel value before converting it to CoreGraphics line units.
 - Separated ScreenCaptureKit frame and audio wakeups so one producer cannot
   wake the other path's consumer and leave the intended consumer waiting.
+- Tagged captured audio with the committed display generation, cleared pending
+  PCM across topology transitions and capture restarts, bounded stopped-stream
+  polling, and gated per-client RDPSND work on a successfully selected format
+  that is reset before channel teardown.
 - Reordered the roadmap around lifecycle reliability, remote-control policy,
   release compliance, and deployment-target validation.
 - Added finite ScreenCaptureKit discovery/start and stop waits, cleanup for

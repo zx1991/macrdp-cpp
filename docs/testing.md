@@ -20,7 +20,8 @@ VideoToolbox AVC420, FreeRDP AVC420 and AVC444 paths, the asynchronous encoder
 worker, input ownership and queue behavior, ledger-bounded modifier cleanup,
 signed 9-bit RDP wheel-delta translation, bounded clipboard response
 correlation and reconnect isolation, asynchronous completion and timeout
-cleanup semantics, injected capture lifecycle races, configuration
+cleanup semantics, injected capture lifecycle races, audio display-generation
+and RDPSND negotiation gates, configuration
 permissions, password rotation, the complete versioned
 install/upgrade/rollback/uninstall state machine, and server argument
 validation. It does not require Screen Recording permission for the synthetic
@@ -30,7 +31,9 @@ The access-policy test instantiates the real macOS shadow subsystem without
 starting ScreenCaptureKit. It verifies that view-only synchronize, keyboard,
 Unicode, absolute, relative, and extended-pointer callbacks do not mutate the
 shadow input state; it also confirms that interactive pointer callbacks remain
-active and disabled clipboard initialization does not create a channel context.
+active, disabled clipboard initialization does not create a channel context,
+and a connected RDPSND context remains inactive until format negotiation has
+succeeded and returns inactive after teardown state is cleared.
 Server argument tests reject concurrent-client limits outside 1 through 64 and
 require explicit acknowledgement before selecting a non-NLA compatibility
 mode.
@@ -93,8 +96,9 @@ The asynchronous completion test covers completion, duplicate and late result
 rejection, timeout cleanup installed both before and after a timeout, and
 explicit failure cleanup. The injected capture-backend test exercises separate
 frame/audio stop wakeups, old-generation frame/audio/error rejection, a stream
-stopping during start, finite timeout propagation, and concurrent stop versus
-reconfigure serialization. It does not call ScreenCaptureKit; permission
+stopping during start, audio display-generation rejection, finite timeout
+propagation, and concurrent stop versus reconfigure serialization. It does not
+call ScreenCaptureKit; permission
 denial, display sleep, session lock, and framework-specific behavior remain in
 the supported-hardware matrix.
 
