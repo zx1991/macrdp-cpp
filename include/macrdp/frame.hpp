@@ -25,6 +25,9 @@ struct Frame {
     std::uint32_t height = 0;
     std::size_t stride = 0;
     std::uint64_t timestamp_us = 0;
+    // Display-topology generation used to configure the producing stream.
+    // Zero is reserved for producers that do not participate in topology sync.
+    std::uint64_t display_generation = 0;
     // Time spent by ScreenCaptureKit's callback copying this sample into BGRA.
     std::uint64_t capture_copy_time_us = 0;
     // Pixels are tightly represented as BGRA rows with `stride` bytes per row.
@@ -49,7 +52,8 @@ struct Frame {
 inline void coalesce_dropped_frame_dirty_regions(
     const Frame& previous,
     Frame& newest) {
-    if (previous.width != newest.width || previous.height != newest.height
+    if (previous.display_generation != newest.display_generation
+        || previous.width != newest.width || previous.height != newest.height
         || previous.dirty_rects.empty() || newest.dirty_rects.empty()) {
         newest.dirty_rects.clear();
         return;

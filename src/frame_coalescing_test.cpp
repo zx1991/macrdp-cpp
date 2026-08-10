@@ -51,5 +51,14 @@ int main() {
         return 1;
     }
 
+    macrdp::Frame replaced_generation = newest;
+    newest.display_generation = 4;
+    replaced_generation.display_generation = 5;
+    macrdp::coalesce_dropped_frame_dirty_regions(newest, replaced_generation);
+    if (!replaced_generation.dirty_rects.empty()) {
+        std::cerr << "Display generation changes must trigger a full update\n";
+        return 1;
+    }
+
     return 0;
 }

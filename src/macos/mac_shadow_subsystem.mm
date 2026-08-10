@@ -10,6 +10,7 @@
 #include <winpr/synch.h>
 
 #include "macrdp/display_capture.hpp"
+#include "macrdp/display_topology.hpp"
 #include "macrdp/input_ownership.hpp"
 #include "macrdp/input_queue.hpp"
 #include "macrdp/input_translation.hpp"
@@ -54,6 +55,13 @@ struct CaptureConfig {
     std::uint32_t max_height = 0;
     std::uint32_t frame_rate = 30;
     bool audio_enabled = true;
+};
+
+struct DisplaySessionGeometry {
+    macrdp::DisplayGeometry display;
+    std::uint64_t generation = 0;
+    std::uint32_t surface_width = 0;
+    std::uint32_t surface_height = 0;
 };
 
 std::mutex g_capture_config_mutex;
@@ -105,17 +113,26 @@ struct InputEvent {
     UINT32 synchronize_flags = 0;
     UINT16 x = 0;
     UINT16 y = 0;
+    std::uint64_t display_generation = 0;
     std::chrono::steady_clock::time_point enqueued_at{};
 };
 
 struct mac_shadow_subsystem {
     rdpShadowSubsystem common{};
     std::unique_ptr<macrdp::DisplayCapture> capture;
+    std::unique_ptr<macrdp::DisplayTopology> display_topology;
     std::thread capture_thread;
     std::thread publish_thread;
     std::thread audio_thread;
     std::atomic_bool stop_requested{false};
     std::mutex lifecycle_mutex;
+    std::mutex display_commit_mutex;
+    std::mutex display_geometry_mutex;
+    std::optional<DisplaySessionGeometry> display_geometry;
+    bool display_transitioning = true;
+    bool selected_display_available = false;
+    std::chrono::steady_clock::time_point last_topology_poll{};
+    std::chrono::steady_clock::time_point last_missing_display_log{};
     std::mutex input_mutex;
     std::mutex input_queue_mutex;
     std::condition_variable input_queue_condition;
@@ -189,6 +206,7 @@ struct mac_shadow_subsystem {
     std::atomic<std::uint64_t> input_keyboard_queue_delay_us_max{0};
     std::atomic<std::uint64_t> input_motion_coalesced{0};
     std::atomic<std::uint64_t> input_motion_dropped{0};
+    std::atomic<std::uint64_t> input_stale_pointer_events{0};
     std::atomic<std::uint64_t> input_queue_wait_events{0};
     std::atomic<std::uint64_t> input_queue_wait_time_us_total{0};
     std::atomic<std::uint64_t> input_queue_wait_time_us_max{0};
@@ -318,19 +336,44 @@ void publish_pointer_position(
     ArrayList_Unlock(server->clients);
 }
 
-bool display_dimensions(
-    std::uint32_t display_id,
-    std::uint32_t& width,
-    std::uint32_t& height) {
-    const auto display_width = CGDisplayPixelsWide(display_id);
-    const auto display_height = CGDisplayPixelsHigh(display_id);
-    if (display_width == 0 || display_height == 0
-        || display_width > UINT16_MAX || display_height > UINT16_MAX) {
+std::optional<DisplaySessionGeometry> display_session_geometry(
+    const macrdp::DisplayTopologySnapshot& topology,
+    const CaptureConfig& capture_config) {
+    const auto* selected = macrdp::display_topology_select(
+        topology,
+        capture_config.display_id);
+    if (selected == nullptr) {
+        return std::nullopt;
+    }
+    const auto [surface_width, surface_height] = macrdp::display_capture_output_size(
+        selected->pixel_width,
+        selected->pixel_height,
+        capture_config.max_width,
+        capture_config.max_height);
+    if (surface_width == 0 || surface_height == 0
+        || surface_width > UINT16_MAX || surface_height > UINT16_MAX) {
+        return std::nullopt;
+    }
+    return DisplaySessionGeometry{
+        *selected,
+        topology.generation,
+        surface_width,
+        surface_height,
+    };
+}
+
+bool monitor_for_geometry(
+    const DisplaySessionGeometry& geometry,
+    MONITOR_DEF& monitor) {
+    if (geometry.surface_width == 0 || geometry.surface_height == 0) {
         return false;
     }
-
-    width = static_cast<std::uint32_t>(display_width);
-    height = static_cast<std::uint32_t>(display_height);
+    monitor.left = 0;
+    monitor.top = 0;
+    // FreeRDP monitor rectangles are inclusive; surface dimensions add 1.
+    monitor.right = static_cast<INT32>(geometry.surface_width - 1);
+    monitor.bottom = static_cast<INT32>(geometry.surface_height - 1);
+    monitor.flags = 1;
     return true;
 }
 
@@ -340,31 +383,23 @@ UINT32 mac_shadow_enum_monitors(MONITOR_DEF* monitors, UINT32 max_monitors) {
         std::lock_guard lock(g_capture_config_mutex);
         capture_config = g_capture_config;
     }
-    std::uint32_t native_width = 0;
-    std::uint32_t native_height = 0;
-    if (capture_config.display_id == 0
-        || !display_dimensions(
-            capture_config.display_id,
-            native_width,
-            native_height)) {
+    macrdp::DisplayTopology topology;
+    if (!topology.start()) {
         return 0;
     }
-    const auto [width, height] = macrdp::display_capture_output_size(
-        native_width,
-        native_height,
-        capture_config.max_width,
-        capture_config.max_height);
-    if (width == 0 || height == 0) {
+    const auto snapshot = topology.snapshot();
+    if (!snapshot.has_value()) {
+        return 0;
+    }
+    const auto geometry = display_session_geometry(*snapshot, capture_config);
+    if (!geometry.has_value()) {
         return 0;
     }
 
     if (monitors != nullptr && max_monitors > 0) {
-        monitors[0].left = 0;
-        monitors[0].top = 0;
-        // FreeRDP monitor rectangles are inclusive; surface dimensions add 1.
-        monitors[0].right = static_cast<INT32>(width - 1);
-        monitors[0].bottom = static_cast<INT32>(height - 1);
-        monitors[0].flags = 1;
+        if (!monitor_for_geometry(*geometry, monitors[0])) {
+            return 0;
+        }
     }
     return 1;
 }
@@ -383,25 +418,16 @@ std::pair<std::uint32_t, std::uint32_t> shadow_surface_dimensions(
     return dimensions;
 }
 
-std::optional<macrdp::DisplayCaptureOptions> capture_options_for_surface(
-    const MacShadowSubsystem* subsystem) {
-    if (subsystem == nullptr) {
-        return std::nullopt;
-    }
-
-    const auto [surface_width, surface_height] = shadow_surface_dimensions(subsystem);
-    if (surface_width == 0 || surface_height == 0) {
-        return std::nullopt;
-    }
-
+macrdp::DisplayCaptureOptions capture_options_for_geometry(
+    const MacShadowSubsystem* subsystem,
+    const DisplaySessionGeometry& geometry) {
     macrdp::DisplayCaptureOptions options;
-    options.display_id = subsystem->capture_config.display_id;
-    options.max_width = subsystem->capture_config.max_width == 0
-        ? surface_width
-        : std::min(subsystem->capture_config.max_width, surface_width);
-    options.max_height = subsystem->capture_config.max_height == 0
-        ? surface_height
-        : std::min(subsystem->capture_config.max_height, surface_height);
+    options.display_id = geometry.display.id;
+    options.display_generation = geometry.generation;
+    options.native_width = geometry.display.pixel_width;
+    options.native_height = geometry.display.pixel_height;
+    options.max_width = geometry.surface_width;
+    options.max_height = geometry.surface_height;
     options.frame_rate = subsystem->capture_config.frame_rate;
     options.show_cursor = false;
     options.capture_audio = subsystem->capture_config.audio_enabled;
@@ -409,27 +435,45 @@ std::optional<macrdp::DisplayCaptureOptions> capture_options_for_surface(
 }
 
 std::optional<CGPoint> display_point(
-    const MacShadowSubsystem* subsystem,
+    MacShadowSubsystem* subsystem,
     UINT16 x,
-    UINT16 y) {
-    if (subsystem == nullptr || subsystem->capture_config.display_id == 0
-        || !CGDisplayIsActive(subsystem->capture_config.display_id)) {
+    UINT16 y,
+    bool allow_stale_geometry = false) {
+    if (subsystem == nullptr) {
         return std::nullopt;
     }
-    const CGRect bounds = CGDisplayBounds(subsystem->capture_config.display_id);
-    const auto [surface_width, surface_height] = shadow_surface_dimensions(subsystem);
+    DisplaySessionGeometry geometry;
+    {
+        std::lock_guard lock(subsystem->display_geometry_mutex);
+        if (!subsystem->display_geometry.has_value()
+            || (!allow_stale_geometry
+                && (subsystem->display_transitioning
+                    || !subsystem->selected_display_available))) {
+            return std::nullopt;
+        }
+        geometry = *subsystem->display_geometry;
+    }
     const auto [point_x, point_y] = macrdp::display_capture_input_point(
-        {
-            bounds.origin.x,
-            bounds.origin.y,
-            bounds.size.width,
-            bounds.size.height,
-        },
-        surface_width,
-        surface_height,
+        geometry.display.bounds,
+        geometry.surface_width,
+        geometry.surface_height,
         x,
         y);
     return CGPointMake(point_x, point_y);
+}
+
+std::optional<std::uint64_t> active_display_generation(
+    MacShadowSubsystem* subsystem) {
+    if (subsystem == nullptr) {
+        return std::nullopt;
+    }
+    std::lock_guard lock(subsystem->display_geometry_mutex);
+    if (subsystem->display_transitioning
+        || !subsystem->selected_display_available
+        || !subsystem->display_geometry.has_value()) {
+        return std::nullopt;
+    }
+    return subsystem->display_geometry->generation;
 }
 
 std::optional<CGKeyCode> mac_modifier_key_code(UINT16 flags, UINT8 code) {
@@ -839,7 +883,11 @@ bool post_mouse_event(
         return false;
     }
 
-    const auto point = display_point(subsystem, x, y);
+    constexpr UINT16 button_mask = PTR_FLAGS_BUTTON1
+        | PTR_FLAGS_BUTTON2 | PTR_FLAGS_BUTTON3;
+    const bool button_release = (flags & button_mask) != 0
+        && (flags & PTR_FLAGS_DOWN) == 0;
+    const auto point = display_point(subsystem, x, y, button_release);
     if (!point.has_value()) {
         return false;
     }
@@ -1009,7 +1057,9 @@ bool post_extended_mouse_event(
         return false;
     }
 
-    const auto point = display_point(subsystem, x, y);
+    const bool button_release = (flags & (PTR_XFLAGS_BUTTON1 | PTR_XFLAGS_BUTTON2)) != 0
+        && (flags & PTR_XFLAGS_DOWN) == 0;
+    const auto point = display_point(subsystem, x, y, button_release);
     if (!point.has_value()) {
         return false;
     }
@@ -1240,7 +1290,6 @@ bool queue_mouse_event(
     if (subsystem == nullptr) {
         return false;
     }
-
     {
         std::lock_guard lock(subsystem->input_mutex);
         subsystem->pointer_x = x;
@@ -1248,12 +1297,23 @@ bool queue_mouse_event(
     }
     publish_pointer_position(subsystem, source_client, x, y);
 
+    constexpr UINT16 button_mask = PTR_FLAGS_BUTTON1
+        | PTR_FLAGS_BUTTON2 | PTR_FLAGS_BUTTON3;
+    const bool button_release = (flags & button_mask) != 0
+        && (flags & PTR_FLAGS_DOWN) == 0;
+    const auto display_generation = active_display_generation(subsystem);
+    if (!display_generation.has_value() && !button_release) {
+        subsystem->input_stale_pointer_events.fetch_add(1, std::memory_order_relaxed);
+        return true;
+    }
+
     InputEvent event;
     event.kind = InputEventKind::mouse;
     event.client_id = client_id;
     event.flags = flags;
     event.x = x;
     event.y = y;
+    event.display_generation = display_generation.value_or(0);
     subsystem->input_mouse_events.fetch_add(1, std::memory_order_relaxed);
     if ((flags & (PTR_FLAGS_WHEEL | PTR_FLAGS_HWHEEL)) != 0) {
         subsystem->input_wheel_events.fetch_add(1, std::memory_order_relaxed);
@@ -1280,7 +1340,6 @@ bool queue_extended_mouse_event(
     if (subsystem == nullptr) {
         return false;
     }
-
     {
         std::lock_guard lock(subsystem->input_mutex);
         subsystem->pointer_x = x;
@@ -1288,12 +1347,21 @@ bool queue_extended_mouse_event(
     }
     publish_pointer_position(subsystem, source_client, x, y);
 
+    const bool button_release = (flags & (PTR_XFLAGS_BUTTON1 | PTR_XFLAGS_BUTTON2)) != 0
+        && (flags & PTR_XFLAGS_DOWN) == 0;
+    const auto display_generation = active_display_generation(subsystem);
+    if (!display_generation.has_value() && !button_release) {
+        subsystem->input_stale_pointer_events.fetch_add(1, std::memory_order_relaxed);
+        return true;
+    }
+
     InputEvent event;
     event.kind = InputEventKind::extended_mouse;
     event.client_id = client_id;
     event.flags = flags;
     event.x = x;
     event.y = y;
+    event.display_generation = display_generation.value_or(0);
     subsystem->input_extended_mouse_events.fetch_add(1, std::memory_order_relaxed);
     return enqueue_input_event(subsystem, event);
 }
@@ -1475,6 +1543,7 @@ void log_input_pipeline(MacShadowSubsystem* subsystem, bool force) {
         " extended_mouse=%" PRIu64 " injection_failures=%" PRIu64
         " queue_depth=%" PRIuz " queue_max=%" PRIu64
         " motion_coalesced=%" PRIu64 " motion_dropped=%" PRIu64
+        " stale_pointer=%" PRIu64
         " queue_wait_events=%" PRIu64 " queue_wait_avg_us=%" PRIu64
         " queue_wait_max_us=%" PRIu64
         " processed=%" PRIu64
@@ -1500,6 +1569,7 @@ void log_input_pipeline(MacShadowSubsystem* subsystem, bool force) {
         subsystem->input_queue_max_depth.load(std::memory_order_relaxed),
         subsystem->input_motion_coalesced.load(std::memory_order_relaxed),
         subsystem->input_motion_dropped.load(std::memory_order_relaxed),
+        subsystem->input_stale_pointer_events.load(std::memory_order_relaxed),
         queue_wait_events,
         queue_wait_average_us,
         subsystem->input_queue_wait_time_us_max.load(std::memory_order_relaxed),
@@ -1564,6 +1634,25 @@ void input_loop(MacShadowSubsystem* subsystem) {
             }
         }
 
+        const bool pointer_event = event.kind == InputEventKind::mouse
+            || event.kind == InputEventKind::extended_mouse;
+        const bool pointer_release = event.kind == InputEventKind::mouse
+            ? (event.flags & (PTR_FLAGS_BUTTON1 | PTR_FLAGS_BUTTON2 | PTR_FLAGS_BUTTON3)) != 0
+                && (event.flags & PTR_FLAGS_DOWN) == 0
+            : event.kind == InputEventKind::extended_mouse
+                && (event.flags & (PTR_XFLAGS_BUTTON1 | PTR_XFLAGS_BUTTON2)) != 0
+                && (event.flags & PTR_XFLAGS_DOWN) == 0;
+        const auto current_display_generation = pointer_event
+            ? active_display_generation(subsystem)
+            : std::nullopt;
+        if (pointer_event && !pointer_release
+            && (!current_display_generation.has_value()
+                || event.display_generation != *current_display_generation)) {
+            subsystem->input_stale_pointer_events.fetch_add(1, std::memory_order_relaxed);
+            log_input_pipeline(subsystem, false);
+            continue;
+        }
+
         bool injected = false;
         switch (event.kind) {
             case InputEventKind::synchronize:
@@ -1609,6 +1698,18 @@ bool copy_frame_to_surface(MacShadowSubsystem* subsystem, const macrdp::Frame& f
     if (subsystem == nullptr || subsystem->common.server == nullptr
         || subsystem->common.server->surface == nullptr || !frame.valid()) {
         return false;
+    }
+    std::lock_guard commit_lock(subsystem->display_commit_mutex);
+    {
+        std::lock_guard lock(subsystem->display_geometry_mutex);
+        if (subsystem->display_transitioning
+            || !subsystem->display_geometry.has_value()
+            || frame.display_generation != subsystem->display_geometry->generation) {
+            // A topology transition can leave one old frame in the downstream
+            // newest-frame slot. It is valid capture data, but no longer valid
+            // for the committed RDP surface and input geometry.
+            return true;
+        }
     }
 
     rdpShadowSurface* surface = subsystem->common.server->surface;
@@ -1815,17 +1916,87 @@ void request_capture_stop(MacShadowSubsystem* subsystem, const char* error) {
     }
 }
 
-bool refresh_display_surface(MacShadowSubsystem* subsystem) {
+enum class DisplayRefreshResult {
+    ready,
+    waiting_for_display,
+    fatal,
+};
+
+DisplayRefreshResult refresh_display_surface(MacShadowSubsystem* subsystem) {
     if (subsystem == nullptr || subsystem->common.server == nullptr
-        || subsystem->common.server->screen == nullptr || subsystem->capture == nullptr) {
-        return false;
+        || subsystem->common.server->screen == nullptr || subsystem->capture == nullptr
+        || subsystem->display_topology == nullptr) {
+        return DisplayRefreshResult::fatal;
+    }
+
+    const auto now = std::chrono::steady_clock::now();
+    const bool force_poll = subsystem->last_topology_poll.time_since_epoch().count() == 0
+        || now - subsystem->last_topology_poll >= std::chrono::seconds{2};
+    if (force_poll) {
+        subsystem->last_topology_poll = now;
+    }
+    if (!subsystem->display_topology->refresh(force_poll)) {
+        WLog_WARN(TAG, "Unable to refresh display topology: %s",
+                  subsystem->display_topology->last_error().c_str());
+        // Retain the last committed geometry while CoreGraphics is transiently
+        // unable to provide a complete replacement snapshot.
+        return active_display_generation(subsystem).has_value()
+            ? DisplayRefreshResult::ready
+            : DisplayRefreshResult::waiting_for_display;
+    }
+
+    const auto topology = subsystem->display_topology->snapshot();
+    if (!topology.has_value()) {
+        return DisplayRefreshResult::waiting_for_display;
+    }
+    const auto next_geometry = display_session_geometry(
+        *topology,
+        subsystem->capture_config);
+    if (!next_geometry.has_value()) {
+        std::lock_guard commit_lock(subsystem->display_commit_mutex);
+        bool was_available = false;
+        {
+            std::lock_guard lock(subsystem->display_geometry_mutex);
+            was_available = subsystem->selected_display_available;
+            subsystem->display_transitioning = true;
+            subsystem->selected_display_available = false;
+        }
+        if (was_available) {
+            subsystem->capture->stop();
+            std::lock_guard frame_lock(subsystem->pending_frame_mutex);
+            subsystem->pending_frame.reset();
+        }
+        if (subsystem->last_missing_display_log.time_since_epoch().count() == 0
+            || now - subsystem->last_missing_display_log >= std::chrono::seconds{5}) {
+            WLog_WARN(TAG,
+                      "Selected display %u is unavailable; waiting for the same display ID",
+                      subsystem->capture_config.display_id);
+            subsystem->last_missing_display_log = now;
+        }
+        return DisplayRefreshResult::waiting_for_display;
+    }
+
+    std::lock_guard commit_lock(subsystem->display_commit_mutex);
+    {
+        std::lock_guard lock(subsystem->display_geometry_mutex);
+        if (!subsystem->display_transitioning
+            && subsystem->selected_display_available
+            && subsystem->display_geometry.has_value()
+            && subsystem->display_geometry->generation == next_geometry->generation) {
+            return DisplayRefreshResult::ready;
+        }
+        subsystem->display_transitioning = true;
+    }
+
+    {
+        std::lock_guard frame_lock(subsystem->pending_frame_mutex);
+        subsystem->pending_frame.reset();
     }
 
     MONITOR_DEF next_monitor{};
-    if (mac_shadow_enum_monitors(&next_monitor, 1) != 1) {
-        return false;
+    if (!monitor_for_geometry(*next_geometry, next_monitor)) {
+        return DisplayRefreshResult::fatal;
     }
-
     if (subsystem->common.macrdpMonitorLockInitialized) {
         EnterCriticalSection(&subsystem->common.macrdpMonitorLock);
     }
@@ -1839,43 +2010,59 @@ bool refresh_display_surface(MacShadowSubsystem* subsystem) {
         if (subsystem->common.macrdpMonitorLockInitialized) {
             LeaveCriticalSection(&subsystem->common.macrdpMonitorLock);
         }
-        return true;
+    } else {
+        subsystem->common.monitors[0] = next_monitor;
+        subsystem->common.numMonitors = 1;
+        const bool resized = shadow_screen_resize(subsystem->common.server->screen) != 0;
+        if (subsystem->common.macrdpMonitorLockInitialized) {
+            LeaveCriticalSection(&subsystem->common.macrdpMonitorLock);
+        }
+        if (!resized) {
+            return DisplayRefreshResult::fatal;
+        }
     }
 
-    subsystem->common.monitors[0] = next_monitor;
-    subsystem->common.numMonitors = 1;
-    const bool resized = shadow_screen_resize(subsystem->common.server->screen) != 0;
-    if (subsystem->common.macrdpMonitorLockInitialized) {
-        LeaveCriticalSection(&subsystem->common.macrdpMonitorLock);
-    }
-    if (!resized) {
-        return false;
-    }
-
-    const auto options = capture_options_for_surface(subsystem);
-    if (!options.has_value()) {
-        return false;
-    }
+    const auto options = capture_options_for_geometry(subsystem, *next_geometry);
     subsystem->force_full_frame.store(true, std::memory_order_release);
-    if (!subsystem->capture->reconfigure(*options)) {
+    if (!subsystem->capture->reconfigure(options)) {
         WLog_WARN(TAG, "Display capture reconfiguration failed: %s",
                   subsystem->capture->last_error().c_str());
+        std::lock_guard lock(subsystem->display_geometry_mutex);
+        subsystem->selected_display_available = false;
+        return DisplayRefreshResult::waiting_for_display;
     }
 
+    {
+        std::lock_guard lock(subsystem->display_geometry_mutex);
+        subsystem->display_geometry = *next_geometry;
+        subsystem->selected_display_available = true;
+        subsystem->display_transitioning = false;
+    }
+    subsystem->last_missing_display_log = {};
     const auto [surface_width, surface_height] = shadow_surface_dimensions(subsystem);
-    WLog_INFO(TAG, "Display mode changed; RDP surface is now %ux%u",
-              surface_width, surface_height);
-    return true;
+    WLog_INFO(TAG,
+              "Display topology generation %" PRIu64
+              " committed for display %u; RDP surface is now %ux%u",
+              next_geometry->generation,
+              next_geometry->display.id,
+              surface_width,
+              surface_height);
+    return DisplayRefreshResult::ready;
 }
 
 void capture_loop(MacShadowSubsystem* subsystem) {
     auto retry_delay = std::chrono::milliseconds{250};
     while (!subsystem->stop_requested.load()) {
-        if (!refresh_display_surface(subsystem)) {
+        const auto display_status = refresh_display_surface(subsystem);
+        if (display_status == DisplayRefreshResult::fatal) {
             request_capture_stop(
                 subsystem,
                 "Unable to resize the RDP surface after a display mode change");
             break;
+        }
+        if (display_status == DisplayRefreshResult::waiting_for_display) {
+            std::this_thread::sleep_for(std::chrono::milliseconds{250});
+            continue;
         }
 
         auto frame = subsystem->capture->next_frame(std::chrono::milliseconds{250});
@@ -2095,9 +2282,19 @@ void audio_loop(MacShadowSubsystem* subsystem) {
             audio = std::move(frame);
             std::this_thread::sleep_for(std::chrono::milliseconds{20});
         } else {
+            if (!active_display_generation(subsystem).has_value()) {
+                pending.clear();
+                std::this_thread::sleep_for(std::chrono::milliseconds{50});
+                continue;
+            }
             audio = subsystem->capture->next_audio(std::chrono::milliseconds{250});
         }
         if (!audio.has_value()) {
+            continue;
+        }
+        if (!test_tone_enabled
+            && !active_display_generation(subsystem).has_value()) {
+            pending.clear();
             continue;
         }
         if (!audio->valid() || audio->sample_rate != sample_rate
@@ -2164,17 +2361,48 @@ int mac_shadow_subsystem_init(rdpShadowSubsystem* base) {
         return -1;
     }
 
+    if (subsystem->display_topology == nullptr) {
+        subsystem->display_topology = std::make_unique<macrdp::DisplayTopology>();
+    }
+    if (!subsystem->display_topology->start()) {
+        WLog_ERR(TAG, "Unable to initialize display topology: %s",
+                 subsystem->display_topology->last_error().c_str());
+        return -1;
+    }
+    const auto topology = subsystem->display_topology->snapshot();
+    const auto geometry = topology.has_value()
+        ? display_session_geometry(*topology, subsystem->capture_config)
+        : std::nullopt;
+    if (!geometry.has_value()) {
+        WLog_ERR(TAG, "Selected display %u is not active during initialization",
+                 subsystem->capture_config.display_id);
+        subsystem->display_topology->stop();
+        return -1;
+    }
+    {
+        std::lock_guard lock(subsystem->display_geometry_mutex);
+        subsystem->display_geometry = *geometry;
+        subsystem->display_transitioning = false;
+        subsystem->selected_display_available = true;
+    }
+
+    MONITOR_DEF monitor{};
+    if (!monitor_for_geometry(*geometry, monitor)) {
+        subsystem->display_topology->stop();
+        return -1;
+    }
     if (subsystem->common.macrdpMonitorLockInitialized) {
         EnterCriticalSection(&subsystem->common.macrdpMonitorLock);
     }
-    const UINT32 monitor_count = mac_shadow_enum_monitors(subsystem->common.monitors, 16);
-    if (monitor_count == 0 || subsystem->common.selectedMonitor >= monitor_count) {
+    if (subsystem->common.selectedMonitor != 0) {
         if (subsystem->common.macrdpMonitorLockInitialized) {
             LeaveCriticalSection(&subsystem->common.macrdpMonitorLock);
         }
+        subsystem->display_topology->stop();
         return -1;
     }
-    subsystem->common.numMonitors = monitor_count;
+    subsystem->common.monitors[0] = monitor;
+    subsystem->common.numMonitors = 1;
     if (subsystem->common.macrdpMonitorLockInitialized) {
         LeaveCriticalSection(&subsystem->common.macrdpMonitorLock);
     }
@@ -2193,11 +2421,18 @@ int mac_shadow_subsystem_start(rdpShadowSubsystem* base) {
         return 1;
     }
 
-    const auto options = capture_options_for_surface(subsystem);
-    if (!options.has_value()) {
-        return -1;
+    DisplaySessionGeometry geometry;
+    {
+        std::lock_guard geometry_lock(subsystem->display_geometry_mutex);
+        if (subsystem->display_transitioning
+            || !subsystem->selected_display_available
+            || !subsystem->display_geometry.has_value()) {
+            return -1;
+        }
+        geometry = *subsystem->display_geometry;
     }
-    subsystem->capture = std::make_unique<macrdp::DisplayCapture>(*options);
+    const auto options = capture_options_for_geometry(subsystem, geometry);
+    subsystem->capture = std::make_unique<macrdp::DisplayCapture>(options);
     if (!subsystem->capture->start()) {
         WLog_ERR(TAG, "Unable to start ScreenCaptureKit: %s",
                  subsystem->capture->last_error().c_str());
@@ -2216,7 +2451,7 @@ int mac_shadow_subsystem_start(rdpShadowSubsystem* base) {
 
     subsystem->stop_requested.store(false);
     subsystem->input_stop_requested.store(false);
-    subsystem->common.captureFrameRate = options->frame_rate;
+    subsystem->common.captureFrameRate = options.frame_rate;
     {
         std::lock_guard frame_lock(subsystem->pending_frame_mutex);
         subsystem->pending_frame.reset();
@@ -2259,6 +2494,7 @@ int mac_shadow_subsystem_start(rdpShadowSubsystem* base) {
     subsystem->input_keyboard_queue_delay_us_max.store(0, std::memory_order_relaxed);
     subsystem->input_motion_coalesced.store(0, std::memory_order_relaxed);
     subsystem->input_motion_dropped.store(0, std::memory_order_relaxed);
+    subsystem->input_stale_pointer_events.store(0, std::memory_order_relaxed);
     subsystem->input_queue_wait_events.store(0, std::memory_order_relaxed);
     subsystem->input_queue_wait_time_us_total.store(0, std::memory_order_relaxed);
     subsystem->input_queue_wait_time_us_max.store(0, std::memory_order_relaxed);
@@ -2281,7 +2517,7 @@ int mac_shadow_subsystem_start(rdpShadowSubsystem* base) {
         }
         subsystem->publish_thread = std::thread(publish_loop, subsystem);
         subsystem->capture_thread = std::thread(capture_loop, subsystem);
-        if (options->capture_audio) {
+        if (options.capture_audio) {
             subsystem->audio_thread = std::thread(audio_loop, subsystem);
         }
     } catch (...) {
@@ -2361,6 +2597,14 @@ int mac_shadow_subsystem_stop(rdpShadowSubsystem* base) {
         subsystem->client_ids.clear();
     }
     subsystem->capture.reset();
+    if (subsystem->display_topology != nullptr) {
+        subsystem->display_topology->stop();
+    }
+    {
+        std::lock_guard geometry_lock(subsystem->display_geometry_mutex);
+        subsystem->display_transitioning = true;
+        subsystem->selected_display_available = false;
+    }
     return 1;
 }
 
@@ -2578,61 +2822,28 @@ bool macrdp_shadow_enumerate_displays(
     displays.clear();
     error.clear();
 
-    std::uint32_t display_count = 0;
-    CGError result = CGGetActiveDisplayList(0, nullptr, &display_count);
-    if (result != kCGErrorSuccess) {
-        error = "Unable to query active macOS displays (CoreGraphics error "
-            + std::to_string(result) + ")";
+    macrdp::DisplayTopology topology;
+    if (!topology.start()) {
+        error = topology.last_error();
         return false;
     }
-    if (display_count == 0) {
+    const auto snapshot = topology.snapshot();
+    if (!snapshot.has_value() || snapshot->displays.empty()) {
         error = "CoreGraphics returned no active displays";
         return false;
     }
 
-    std::vector<CGDirectDisplayID> display_ids(display_count);
-    result = CGGetActiveDisplayList(
-        display_count,
-        display_ids.data(),
-        &display_count);
-    if (result != kCGErrorSuccess) {
-        error = "Unable to enumerate active macOS displays (CoreGraphics error "
-            + std::to_string(result) + ")";
-        return false;
-    }
-    display_ids.resize(display_count);
-
-    const auto main_display_id = CGMainDisplayID();
-    for (const auto display_id : display_ids) {
-        const auto pixel_width = CGDisplayPixelsWide(display_id);
-        const auto pixel_height = CGDisplayPixelsHigh(display_id);
-        const CGRect bounds = CGDisplayBounds(display_id);
-        if (display_id == kCGNullDirectDisplay || pixel_width == 0
-            || pixel_height == 0
-            || pixel_width > std::numeric_limits<std::uint32_t>::max()
-            || pixel_height > std::numeric_limits<std::uint32_t>::max()
-            || !std::isfinite(bounds.origin.x)
-            || !std::isfinite(bounds.origin.y)
-            || !std::isfinite(bounds.size.width)
-            || !std::isfinite(bounds.size.height)
-            || bounds.size.width <= 0.0
-            || bounds.size.height <= 0.0) {
-            continue;
-        }
+    for (const auto& display : snapshot->displays) {
         displays.push_back({
-            display_id,
-            static_cast<std::uint32_t>(pixel_width),
-            static_cast<std::uint32_t>(pixel_height),
-            bounds.size.width,
-            bounds.size.height,
-            bounds.origin.x,
-            bounds.origin.y,
-            display_id == main_display_id,
+            display.id,
+            display.pixel_width,
+            display.pixel_height,
+            display.bounds.width,
+            display.bounds.height,
+            display.bounds.origin_x,
+            display.bounds.origin_y,
+            display.main,
         });
-    }
-    if (displays.empty()) {
-        error = "CoreGraphics returned no usable active displays";
-        return false;
     }
     return true;
 }
@@ -2648,12 +2859,16 @@ bool macrdp_shadow_resolve_display_id(
 
     std::vector<std::uint32_t> display_ids;
     display_ids.reserve(displays.size());
+    std::uint32_t main_display_id = 0;
     for (const auto& display : displays) {
         display_ids.push_back(display.id);
+        if (display.main) {
+            main_display_id = display.id;
+        }
     }
     const auto selected = macrdp::display_capture_select_id(
         requested_display_id,
-        CGMainDisplayID(),
+        main_display_id,
         display_ids);
     if (!selected.has_value()) {
         error = "Requested display ID " + std::to_string(requested_display_id)
@@ -2667,16 +2882,36 @@ bool macrdp_shadow_resolve_display_id(
 }
 
 bool macrdp_shadow_preflight_capture(std::string& error) {
+    CaptureConfig capture_config;
+    {
+        std::lock_guard lock(g_capture_config_mutex);
+        capture_config = g_capture_config;
+    }
+
+    macrdp::DisplayTopology topology;
+    if (!topology.start()) {
+        error = topology.last_error();
+        return false;
+    }
+    const auto snapshot = topology.snapshot();
+    const auto* display = snapshot.has_value()
+        ? macrdp::display_topology_select(*snapshot, capture_config.display_id)
+        : nullptr;
+    if (display == nullptr) {
+        error = "Selected display is not active during capture preflight";
+        return false;
+    }
+
     macrdp::DisplayCaptureOptions options;
+    options.display_id = display->id;
+    options.display_generation = snapshot->generation;
+    options.native_width = display->pixel_width;
+    options.native_height = display->pixel_height;
     options.max_width = 64;
     options.max_height = 64;
     options.frame_rate = 1;
     options.show_cursor = false;
-    {
-        std::lock_guard lock(g_capture_config_mutex);
-        options.display_id = g_capture_config.display_id;
-        options.capture_audio = g_capture_config.audio_enabled;
-    }
+    options.capture_audio = capture_config.audio_enabled;
 
     macrdp::DisplayCapture capture(options);
     if (!capture.start()) {

@@ -15,10 +15,10 @@ ctest --test-dir build --output-on-failure
 ```
 
 The local suite covers display selection, bounded output dimensions, Retina
-and negative-origin input mapping, frame coalescing, direct VideoToolbox
-AVC420, FreeRDP AVC420 and AVC444 paths, the asynchronous encoder worker, input
-ownership and queue behavior, ledger-bounded modifier cleanup, signed 9-bit
-RDP wheel-delta translation, asynchronous completion and timeout cleanup
+and negative-origin input mapping, generation-aware frame coalescing, direct
+VideoToolbox AVC420, FreeRDP AVC420 and AVC444 paths, the asynchronous encoder
+worker, input ownership and queue behavior, ledger-bounded modifier cleanup,
+signed 9-bit RDP wheel-delta translation, asynchronous completion and timeout cleanup
 semantics, injected capture lifecycle races, configuration permissions,
 password rotation, the complete versioned install/upgrade/rollback/uninstall
 state machine, and server argument validation. It does not require Screen
@@ -35,10 +35,11 @@ mode.
 
 `macrdp-server --list-displays` is a non-capture diagnostic that reports active
 CoreGraphics IDs, pixel and point sizes, and global origins without credentials
-or TCC prompts. The deterministic geometry test verifies exact-ID rejection,
-main-display fallback, negative display origins, and Retina pixel-to-point
-mapping. Visual correctness and hot-plug recovery still belong in the hardware
-matrix.
+or TCC prompts. The deterministic geometry and injected-topology tests verify
+exact-ID rejection, main-display changes, resolution/scaling, rotation,
+negative origins, Retina pixel-to-point mapping, detach/reconnect, invalid
+readings, and stale observer callbacks. Visual correctness and physical
+hot-plug recovery still belong in the hardware matrix.
 
 ## Sanitizers and deterministic stress
 
@@ -88,6 +89,12 @@ stopping during start, finite timeout propagation, and concurrent stop versus
 reconfigure serialization. It does not call ScreenCaptureKit; permission
 denial, display sleep, session lock, and framework-specific behavior remain in
 the supported-hardware matrix.
+
+The injected display-topology test uses the same observer-generation gate as
+the CoreGraphics backend. It confirms that callbacks from stopped observers are
+rejected, exact selections do not follow a new main display, removed IDs do not
+fall back, reconnecting the same ID creates a new geometry generation, and an
+invalid reading preserves the previous committed snapshot.
 
 Wheel translation tests cover positive and negative deltas, both pointer event
 types, and the signed field boundaries. The loopback smoke test confirms that

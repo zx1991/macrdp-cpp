@@ -8,6 +8,7 @@
 #include <utility>
 #include <vector>
 
+#include "macrdp/display_topology.hpp"
 #include "macrdp/frame.hpp"
 
 namespace macrdp {
@@ -20,19 +21,17 @@ struct DisplayCaptureOptions {
     // Zero selects the current main display. A non-zero value is an exact
     // CGDirectDisplayID and must not silently fall back to another display.
     std::uint32_t display_id = 0;
+    // A topology snapshot supplies these dimensions and generation together.
+    // Zero dimensions ask the platform backend to resolve a fresh snapshot.
+    std::uint64_t display_generation = 0;
+    std::uint32_t native_width = 0;
+    std::uint32_t native_height = 0;
     // Zero means the native pixel dimensions of the selected display.
     std::uint32_t max_width = 0;
     std::uint32_t max_height = 0;
     std::uint32_t frame_rate = 30;
     bool show_cursor = false;
     bool capture_audio = true;
-};
-
-struct DisplayBounds {
-    double origin_x = 0.0;
-    double origin_y = 0.0;
-    double width = 0.0;
-    double height = 0.0;
 };
 
 // ScreenCaptureKit audio normalized to interleaved signed 16-bit PCM. The

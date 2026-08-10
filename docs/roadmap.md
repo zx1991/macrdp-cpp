@@ -62,6 +62,10 @@ are acceptance gates rather than promised dates.
 - Add active-display discovery and exact startup selection, and use the same
   display ID for ScreenCaptureKit, RDP surface dimensions, preflight, and input
   mapping with deterministic negative-origin and Retina geometry coverage.
+- Put CoreGraphics topology behind an injectable backend and atomically commit
+  generation-tagged surface, capture, and input geometry. Deterministic tests
+  cover main-display, resolution/scaling, rotation, negative-origin, Retina,
+  detach/reconnect, and stale-callback transitions; exact IDs never fall back.
 
 ## P0: correctness and lifecycle
 
@@ -100,8 +104,8 @@ a signed artifact whose minimum OS, dependencies, and licensing are explicit.
 
 ## P3: compatibility and features
 
-- Complete robust Retina/display-mode handling and validate selected external
-  displays, rotation, hot-plug failure, and main-display changes on hardware.
+- Validate the implemented Retina/display-mode lifecycle on selected external
+  displays, including rotation, hot-plug recovery, and main-display changes.
 - Add richer clipboard formats only after text transfer remains reliable under
   reconnect and shaped-link tests.
 - Evaluate microphone/AUDIN separately from speaker/RDPSND output.

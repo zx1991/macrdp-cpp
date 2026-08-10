@@ -114,3 +114,8 @@ This project has not published a stable release yet.
 - Added active-display discovery and exact `--display-id` capture selection,
   with shared ScreenCaptureKit, RDP surface, preflight, and input geometry plus
   deterministic negative-origin and Retina coordinate coverage.
+- Added an injectable CoreGraphics display-topology backend and immutable
+  geometry generations shared by the RDP surface, ScreenCaptureKit, frames, and
+  pointer input. Mode, scaling, rotation, origin, and main-display changes now
+  commit atomically; detached exact IDs wait for same-ID recovery without
+  falling back, with deterministic stale-callback and reconnect coverage.

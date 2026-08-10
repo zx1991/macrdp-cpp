@@ -661,10 +661,9 @@ std::pair<double, double> display_capture_input_point(
 namespace {
 
 std::pair<std::size_t, std::size_t> output_size(
-    CGDirectDisplayID display_id,
     const macrdp::DisplayCaptureOptions& options) {
-    std::size_t width = CGDisplayPixelsWide(display_id);
-    std::size_t height = CGDisplayPixelsHigh(display_id);
+    std::size_t width = options.native_width;
+    std::size_t height = options.native_height;
     if (width == 0 || height == 0
         || width > std::numeric_limits<std::uint32_t>::max()
         || height > std::numeric_limits<std::uint32_t>::max()) {
@@ -685,20 +684,24 @@ std::pair<std::size_t, std::size_t> output_size(
 @private
     std::shared_ptr<CaptureState> state_;
     std::uint64_t generation_;
+    std::uint64_t display_generation_;
 }
 
 - (instancetype)initWithState:(std::shared_ptr<CaptureState>)state
-    generation:(std::uint64_t)generation;
+    generation:(std::uint64_t)generation
+    displayGeneration:(std::uint64_t)display_generation;
 @end
 
 @implementation MacCaptureOutput
 
 - (instancetype)initWithState:(std::shared_ptr<CaptureState>)state
-    generation:(std::uint64_t)generation {
+    generation:(std::uint64_t)generation
+    displayGeneration:(std::uint64_t)display_generation {
     self = [super init];
     if (self != nil) {
         state_ = std::move(state);
         generation_ = generation;
+        display_generation_ = display_generation;
     }
     return self;
 }
@@ -733,6 +736,7 @@ std::pair<std::size_t, std::size_t> output_size(
     std::vector<macrdp::FrameRect> dropped_dirty_rects;
     std::uint32_t dropped_width = 0;
     std::uint32_t dropped_height = 0;
+    std::uint64_t dropped_display_generation = 0;
     bool reused_pending_frame = false;
     {
         std::lock_guard lock(state->mutex);
@@ -745,6 +749,7 @@ std::pair<std::size_t, std::size_t> output_size(
             state->latest_frame.reset();
             dropped_width = frame.width;
             dropped_height = frame.height;
+            dropped_display_generation = frame.display_generation;
             dropped_dirty_rects = std::move(frame.dirty_rects);
             reused_pending_frame = true;
         } else if (state->reusable_frame.has_value()) {
@@ -765,11 +770,13 @@ std::pair<std::size_t, std::size_t> output_size(
         }
         return;
     }
+    frame.display_generation = display_generation_;
 
     if (reused_pending_frame) {
         macrdp::Frame dropped_metadata;
         dropped_metadata.width = dropped_width;
         dropped_metadata.height = dropped_height;
+        dropped_metadata.display_generation = dropped_display_generation;
         dropped_metadata.dirty_rects = std::move(dropped_dirty_rects);
         macrdp::coalesce_dropped_frame_dirty_regions(dropped_metadata, frame);
     }
@@ -951,7 +958,36 @@ detail::DisplayCaptureBackendStartResult ScreenCaptureKitBackend::start(
     detail::CaptureGeneration generation,
     std::chrono::milliseconds timeout) {
     const auto state_for_callback = state;
-    const auto capture_options = options;
+    auto capture_options = options;
+    if (capture_options.display_id == 0
+        || capture_options.native_width == 0
+        || capture_options.native_height == 0) {
+        macrdp::DisplayTopology topology;
+        if (!topology.start()) {
+            return {false, topology.last_error()};
+        }
+        const auto topology_snapshot = topology.snapshot();
+        const auto* selected_geometry = topology_snapshot.has_value()
+            ? macrdp::display_topology_select(
+                *topology_snapshot,
+                capture_options.display_id)
+            : nullptr;
+        if (selected_geometry == nullptr) {
+            return {
+                false,
+                capture_options.display_id == 0
+                    ? "CoreGraphics returned no selectable display"
+                    : "Requested display ID "
+                        + std::to_string(capture_options.display_id)
+                        + " is not active"};
+        }
+        capture_options.display_id = selected_geometry->id;
+        capture_options.native_width = selected_geometry->pixel_width;
+        capture_options.native_height = selected_geometry->pixel_height;
+        if (capture_options.display_generation == 0) {
+            capture_options.display_generation = topology_snapshot->generation;
+        }
+    }
     auto waiter = std::make_shared<AsyncCompletion>();
     __block SCStream* new_stream = nil;
     __block MacCaptureOutput* new_output = nil;
@@ -981,7 +1017,7 @@ detail::DisplayCaptureBackendStartResult ScreenCaptureKitBackend::start(
             }
             const auto selected_display_id = macrdp::display_capture_select_id(
                 capture_options.display_id,
-                CGMainDisplayID(),
+                0,
                 available_display_ids);
             if (!selected_display_id.has_value()) {
                 const std::string description = capture_options.display_id == 0
@@ -1006,8 +1042,7 @@ detail::DisplayCaptureBackendStartResult ScreenCaptureKitBackend::start(
                 return;
             }
 
-            const auto display_id = [selected_display displayID];
-            const auto [width, height] = output_size(display_id, capture_options);
+            const auto [width, height] = output_size(capture_options);
             if (width == 0 || height == 0) {
                 (void)waiter->finish(
                     "Unable to determine the selected display dimensions");
@@ -1041,7 +1076,8 @@ detail::DisplayCaptureBackendStartResult ScreenCaptureKitBackend::start(
 
             new_output = [[MacCaptureOutput alloc]
                 initWithState:state_for_callback
-                generation:generation];
+                generation:generation
+                displayGeneration:capture_options.display_generation];
             new_stream = [[SCStream alloc] initWithFilter:filter
                 configuration:configuration
                 delegate:new_output];

@@ -188,6 +188,9 @@ bool test_reconfigure_rejects_old_generation_callbacks() {
 
     macrdp::DisplayCaptureOptions next_options;
     next_options.display_id = 42;
+    next_options.display_generation = 12;
+    next_options.native_width = 2560;
+    next_options.native_height = 1440;
     next_options.max_width = 1280;
     next_options.max_height = 720;
     next_options.capture_audio = false;
@@ -199,6 +202,9 @@ bool test_reconfigure_rejects_old_generation_callbacks() {
     ok = expect(second.generation != first.generation,
                 "reconfigure reused the previous capture generation") && ok;
     ok = expect(second.options.display_id == 42
+                    && second.options.display_generation == 12
+                    && second.options.native_width == 2560
+                    && second.options.native_height == 1440
                     && second.options.max_width == 1280
                     && second.options.max_height == 720
                     && !second.options.capture_audio,

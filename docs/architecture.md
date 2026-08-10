@@ -35,12 +35,21 @@ format negotiation and data transfer under a channel lock. When clipboard
 redirection is disabled, the adapter short-circuits before it creates a channel
 context or monitor thread.
 
-At startup the server resolves the requested display ID against the active
-CoreGraphics display list. That exact ID is then shared by FreeRDP surface
-enumeration, ScreenCaptureKit filtering, permission preflight, and pointer
-mapping. Exact requests never fall back to another screen. RDP pixel
-coordinates are normalized into the selected display's global macOS point
-bounds, including negative origins and Retina pixel-to-point scaling.
+At startup the server resolves the requested display ID against a CoreGraphics
+topology snapshot. A generation-tagged geometry for that exact ID supplies the
+FreeRDP surface dimensions, ScreenCaptureKit filter and native pixel size, and
+pointer mapping. RDP pixel coordinates are normalized into the selected
+display's global macOS point bounds, including negative origins and Retina
+pixel-to-point scaling. Exact requests never fall back to another screen.
+
+CoreGraphics reconfiguration callbacks mark the topology dirty, while a bounded
+periodic read covers missed notifications. Resolution, scaling, rotation,
+origin, and main-display changes produce a new immutable generation. The
+runtime suspends pointer injection, clears old downstream frames, resizes the
+surface, replaces the capture stream, and only then commits the new input
+geometry. Frames and queued pointer events carry the generation that created
+them, so stale work cannot cross that commit. If the selected display is
+removed, capture waits for the same ID to return instead of switching screens.
 
 ## Concurrency boundaries
 
@@ -57,6 +66,11 @@ bounds, including negative origins and Retina pixel-to-point scaling.
   slot has its own condition variable, so video and audio callbacks wake only
   their corresponding consumer. Stop, reconfigure, and capture-error paths
   wake both consumers.
+- CoreGraphics topology access also sits behind an injectable C++ backend.
+  Observer lifecycle tokens reject callbacks retained by an old registration,
+  and invalid or duplicate readings leave the last valid snapshot intact.
+  Deterministic tests drive main-display, mode, scaling, rotation, detach, and
+  reconnect changes without depending on physical displays.
 - A client receives the newest useful video state. Old video work may be
   coalesced when the client is slower than the capture rate.
 - H.264 work is per client, so a slow encoder or blocked client does not make
@@ -75,8 +89,11 @@ bounds, including negative origins and Retina pixel-to-point scaling.
   pointer motion is discarded before critical keyboard, button, wheel, and
   reset events are allowed to wait for capacity. RDP wheel rotation is decoded
   from its signed 9-bit field before vertical or horizontal line events are
-  sent to CoreGraphics. In view-only mode every project-owned input callback is
-  gated before client registration or queueing, and the subsystem does not
+  sent to CoreGraphics. Pointer events from a superseded display generation are
+  discarded, while stale button releases remain permitted so a topology change
+  cannot leave remotely owned button state pressed. In view-only mode every
+  project-owned input callback is gated before client registration or queueing,
+  and the subsystem does not
   create its CoreGraphics event source or input worker. This remains the final
   policy boundary even if a FreeRDP control channel changes a client's
   `mayInteract` flag.

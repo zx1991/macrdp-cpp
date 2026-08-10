@@ -17,13 +17,13 @@ shadow server.
 
 | Area | Current implementation |
 | --- | --- |
-| Display | Startup selection of one active display with newest-frame coalescing |
+| Display | Exact selection of one active display with generation-tagged mode-change recovery and newest-frame coalescing |
 | Video | GFX/AVC420 through direct VideoToolbox, FFmpeg fallback, optional AVC444, or classic SurfaceBits |
 | Input | Serialized keyboard, Unicode, pointer, button, drag, and wheel injection through a private CoreGraphics event source |
 | Clipboard | Bidirectional `CF_UNICODETEXT` and `CF_TEXT` through `NSPasteboard` |
 | Audio | Screen audio capture and RDPSND output; AAC or PCM depends on negotiation |
 | Security | NLA and loopback-only listening by default, one concurrent client, explicit legacy-security opt-in, view-only and clipboard opt-out controls |
-| Reliability | Per-client input ownership isolated from local HID state, bounded queues, capture restart backoff, and generation-isolated capture lifecycle |
+| Reliability | Per-client input ownership isolated from local HID state, bounded queues, capture restart backoff, and generation-isolated capture and display lifecycles |
 | Validation | Local state-machine and injected capture-lifecycle tests, real FreeRDP loopback client, and deterministic shaped-network profiles |
 
 The runtime separates capture, audio, input injection, per-client encoding, and
@@ -33,7 +33,7 @@ and backpressure details.
 ## Current limits
 
 - Capture targets one active display at a time; combined-desktop spanning and
-  live display switching are not implemented.
+  changing the selected display without restarting the server is not implemented.
 - Multi-client sessions share one captured display and have not completed the
   supported Windows hardware matrix; keep the concurrent-client limit low.
 - Clipboard redirection is text-only. File, image, and directory transfer are
@@ -46,9 +46,10 @@ and backpressure details.
   corresponding-source bundle, versioned per-user lifecycle, and gated
   Developer ID/notarization pipeline are implemented; a real Apple notarization
   run and clean-machine release validation remain release work.
-- The automated loopback client verifies protocol delivery, but final input,
-  Retina, reconnect, and sleep/wake behavior still needs a real Windows
-  `mstsc` validation matrix on supported hardware.
+- The automated suite verifies display topology transitions and protocol
+  delivery, but visual rotation, physical hot-plug, final input, Retina,
+  reconnect, and sleep/wake behavior still need a real Windows `mstsc`
+  validation matrix on supported hardware.
 
 The prioritized acceptance gates are tracked in [Roadmap](docs/roadmap.md).
 
@@ -144,7 +145,11 @@ Each row includes the display ID, main-display flag, pixel size, macOS point
 size, and global origin. Omit `--display-id` to select the main display at
 startup, or pass one listed ID to the server and preflight commands. An exact
 ID that is no longer active is rejected instead of falling back to a different
-screen; rerun the list command after changing the display arrangement.
+screen; rerun the list command after changing the display arrangement. During
+an active session, resolution, scaling, rotation, origin, and main-display
+changes create a new atomic geometry generation for the same selected ID. If
+that display is detached, capture and pointer injection pause while the server
+waits for the same ID to return; it does not switch to another display.
 
 Check the exact signed executable without credential input, configuration
 changes, or a listening socket:

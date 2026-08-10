@@ -53,6 +53,7 @@ find_library(APP_KIT_FRAMEWORK AppKit REQUIRED)
 # application can remain ordinary C++ and does not need Objective-C headers.
 add_library(macrdp_macos STATIC
     src/macos/display_capture.mm
+    src/macos/display_topology.mm
     src/macos/h264_encoder.mm
     src/macos/videotoolbox_h264.mm
 )
@@ -122,6 +123,10 @@ add_executable(macrdp-display-dimensions-test
     src/display_dimensions_test.cpp
 )
 
+add_executable(macrdp-display-topology-test
+    src/display_topology_test.cpp
+)
+
 target_compile_options(macrdp-display-dimensions-test PRIVATE
     -Wall
     -Wextra
@@ -129,6 +134,14 @@ target_compile_options(macrdp-display-dimensions-test PRIVATE
 )
 
 target_link_libraries(macrdp-display-dimensions-test PRIVATE macrdp_macos)
+
+target_compile_options(macrdp-display-topology-test PRIVATE
+    -Wall
+    -Wextra
+    -Wpedantic
+)
+
+target_link_libraries(macrdp-display-topology-test PRIVATE macrdp_macos)
 
 add_executable(macrdp-frame-coalescing-test
     src/frame_coalescing_test.cpp
@@ -1245,6 +1258,11 @@ add_test(
 )
 
 add_test(
+    NAME display_topology
+    COMMAND macrdp-display-topology-test
+)
+
+add_test(
     NAME frame_coalescing
     COMMAND macrdp-frame-coalescing-test
 )
@@ -1485,6 +1503,7 @@ set_tests_properties(
     access_policy
     async_completion
     display_capture_lifecycle
+    display_topology
     h264_worker
     input_ownership
     PROPERTIES

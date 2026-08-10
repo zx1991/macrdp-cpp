@@ -114,7 +114,7 @@ and the exact error for every deliberate failure.
 | LIFE-05 | Locked session | Lock for at least 60 seconds during an active connection, then unlock. | The process stays bounded, resumes frames or exits with a clear error, and accepts a clean restart. | `NOT RUN` | |
 | LIFE-06 | Display sleep/wake | Sleep the display during capture, then wake it. | No deadlock; capture recovers or exits within documented bounds and restarts cleanly. | `NOT RUN` | |
 | LIFE-07 | System sleep/wake | Sleep and wake the Mac with a connected client. | No deadlock or orphan server; reconnect and input ownership recover cleanly. | `NOT RUN` | |
-| LIFE-08 | Display reconfiguration | Change resolution/scaling and attach or detach a supported display. | Frames remain valid or the server fails cleanly; requested resize still works afterward. | `NOT RUN` | |
+| LIFE-08 | Display reconfiguration | Change resolution/scaling and rotation; change the main display; detach and reconnect the selected display. | Each same-ID change commits valid frames and pointer geometry; detach pauses capture/input without fallback, and reconnect of that ID recovers without a deadlock. | `NOT RUN` | |
 | LIFE-09 | Repeated lifecycle | Start, stop, and restart the same signed binary at least 20 times. | Every stop is bounded; no process, listener, or held input state remains. | `NOT RUN` | |
 
 Automate `LIFE-09` against the unchanged server binary. Use `--aqua` when the
@@ -144,7 +144,7 @@ checks.
 | WIN-01 | NLA success | Connect with the configured user and password. | Authentication succeeds and one desktop session opens. | `NOT RUN` | |
 | WIN-02 | NLA failure | Attempt a wrong password, then reconnect correctly. | Wrong credentials fail without affecting the later valid session. | `NOT RUN` | |
 | WIN-03 | Certificate path | Inspect the first-connect certificate warning or trusted certificate result. | The identity is expected for the configured test certificate; no silent downgrade occurs. | `NOT RUN` | |
-| WIN-04 | Initial display | Use `--list-displays`, then inspect the default and each explicitly selected display at native and windowed sizes. | The requested display is visible, oriented correctly, and not blank or corrupted; pointer input remains on that display. | `NOT RUN` | |
+| WIN-04 | Initial display | Use `--list-displays`, then inspect the default and each explicitly selected display at native and windowed sizes; repeat LIFE-08 while connected. | The requested display is visible and oriented correctly; pointer input remains aligned through same-ID changes, and detach never exposes another display. | `NOT RUN` | |
 | WIN-05 | Resize and Retina | Resize, maximize, minimize, and restore the client on each supported scaling mode. | Content remains framed and readable; updates resume after every change. | `NOT RUN` | |
 | WIN-06 | Text keyboard | Type ASCII, shifted text, digits, punctuation, and Unicode into the safe document. | Characters arrive once and in order with the expected case. | `NOT RUN` | |
 | WIN-07 | Modifier cleanup | Exercise left/right Shift, Control, Alt, and Windows keys separately, then disconnect. | Each key releases; the post-run probe reports no held modifier. | `NOT RUN` | |
