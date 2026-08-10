@@ -17,11 +17,12 @@ are acceptance gates rather than promised dates.
 - Isolate remote keyboard and pointer state in a lifetime-scoped private
   CoreGraphics event source. Startup no longer releases local HID modifiers,
   and disconnect/shutdown cleanup is bounded by the remote ownership ledger.
+- Add an injectable capture backend and deterministic coverage for separate
+  frame/audio wakeups, generation isolation, start/stop transitions, and
+  concurrent stop/reconfigure serialization without TCC or a display.
 
 ## P0: correctness and lifecycle
 
-- Add an injectable ScreenCaptureKit boundary to test capture-state wakeups,
-  generation isolation, and stop/reconfigure races without TCC or a display.
 - Validate the bounded start/stop paths under permission denial, display sleep,
   session lock, and rapid reconfiguration on supported hardware.
 - Run the current `mstsc` matrix on supported macOS hardware: NLA/TLS failure,

@@ -40,7 +40,10 @@ format negotiation and data transfer under a channel lock.
   ScreenCaptureKit state. Content discovery and stream start share a 15-second
   deadline; stream stop waits at most 5 seconds before detaching its outputs.
   Each start has a generation token, so frames and delegate callbacks from a
-  timed-out or replaced stream cannot mutate the active stream's state.
+  timed-out or replaced stream cannot mutate the active stream's state. Apple
+  operations sit behind a C++ backend contract; production uses
+  ScreenCaptureKit while lifecycle tests inject a fake backend that can retain
+  old generations and pause stop operations without TCC or a display.
 - ScreenCaptureKit keeps independent newest-frame and newest-audio slots. Each
   slot has its own condition variable, so video and audio callbacks wake only
   their corresponding consumer. Stop, reconfigure, and capture-error paths

@@ -7,6 +7,7 @@
 
 #include "macrdp/async_completion.hpp"
 #include "macrdp/display_capture.hpp"
+#include "macrdp/display_capture_backend.hpp"
 
 #include <algorithm>
 #include <array>
@@ -20,6 +21,8 @@
 #include <vector>
 
 namespace {
+
+using CaptureState = macrdp::detail::DisplayCaptureState;
 
 std::uint64_t timestamp_us() {
     const auto now = std::chrono::steady_clock::now().time_since_epoch();
@@ -42,19 +45,6 @@ std::string error_description(NSError* error) {
 constexpr auto capture_start_timeout = std::chrono::milliseconds{15000};
 constexpr auto capture_stop_timeout = std::chrono::milliseconds{5000};
 
-struct CaptureState {
-    mutable std::mutex mutex;
-    std::condition_variable frame_condition;
-    std::condition_variable audio_condition;
-    std::optional<macrdp::Frame> latest_frame;
-    std::optional<macrdp::AudioFrame> latest_audio;
-    std::optional<macrdp::Frame> reusable_frame;
-    std::string error;
-    std::uint64_t generation = 0;
-    bool accepting_frames = false;
-    bool stopped = true;
-};
-
 void recycle_frame_locked(CaptureState& state, macrdp::Frame frame) noexcept {
     try {
         frame.dirty_rects.clear();
@@ -67,6 +57,69 @@ void recycle_frame_locked(CaptureState& state, macrdp::Frame frame) noexcept {
         // released normally when storage cannot be retained.
     }
 }
+
+} // namespace
+
+namespace macrdp::detail {
+
+bool capture_backend_publish_frame(
+    const std::shared_ptr<DisplayCaptureState>& state,
+    CaptureGeneration generation,
+    Frame frame) {
+    {
+        std::lock_guard lock(state->mutex);
+        if (state->generation != generation || !state->accepting_frames) {
+            return false;
+        }
+        if (state->latest_frame.has_value()) {
+            coalesce_dropped_frame_dirty_regions(*state->latest_frame, frame);
+        }
+        state->latest_frame = std::move(frame);
+    }
+    state->frame_condition.notify_one();
+    return true;
+}
+
+bool capture_backend_publish_audio(
+    const std::shared_ptr<DisplayCaptureState>& state,
+    CaptureGeneration generation,
+    AudioFrame frame) {
+    {
+        std::lock_guard lock(state->mutex);
+        if (state->generation != generation || !state->accepting_frames) {
+            return false;
+        }
+        state->latest_audio = std::move(frame);
+    }
+    state->audio_condition.notify_one();
+    return true;
+}
+
+bool capture_backend_generation_stopped(
+    const std::shared_ptr<DisplayCaptureState>& state,
+    CaptureGeneration generation,
+    std::string error) {
+    {
+        std::lock_guard lock(state->mutex);
+        if (state->generation != generation) {
+            return false;
+        }
+        if (!error.empty()) {
+            state->error = std::move(error);
+        } else if (state->accepting_frames) {
+            state->error = "ScreenCaptureKit stream stopped unexpectedly";
+        }
+        state->accepting_frames = false;
+        state->stopped = true;
+    }
+    state->frame_condition.notify_all();
+    state->audio_condition.notify_all();
+    return true;
+}
+
+} // namespace macrdp::detail
+
+namespace {
 
 bool sample_status_is_usable(CMSampleBufferRef sample_buffer) {
     CFArrayRef attachments = CMSampleBufferGetSampleAttachmentsArray(
@@ -607,19 +660,12 @@ std::pair<std::size_t, std::size_t> output_size(
         if (!audio.has_value()) {
             return;
         }
-        bool published = false;
-        {
-            std::lock_guard lock(state->mutex);
-            if (state->generation == generation_ && state->accepting_frames) {
-                // The audio consumer runs independently from video and keeps the
-                // newest block only, so audio backpressure cannot stall SCK.
-                state->latest_audio = std::move(*audio);
-                published = true;
-            }
-        }
-        if (published) {
-            state->audio_condition.notify_one();
-        }
+        // The audio consumer runs independently from video and keeps the
+        // newest block only, so audio backpressure cannot stall SCK.
+        (void)macrdp::detail::capture_backend_publish_audio(
+            state,
+            generation_,
+            std::move(*audio));
         return;
     }
     if (type != SCStreamOutputTypeScreen) {
@@ -684,31 +730,43 @@ std::pair<std::size_t, std::size_t> output_size(
 
 - (void)stream:(SCStream*)stream didStopWithError:(NSError*)error {
     (void)stream;
-    const auto state = state_;
-    {
-        std::lock_guard lock(state->mutex);
-        if (state->generation != generation_) {
-            return;
-        }
-        if (error != nil) {
-            state->error = error_description(error);
-        } else if (state->accepting_frames) {
-            state->error = "ScreenCaptureKit stream stopped unexpectedly";
-        }
-        state->accepting_frames = false;
-        state->stopped = true;
-    }
-    state->frame_condition.notify_all();
-    state->audio_condition.notify_all();
+    (void)macrdp::detail::capture_backend_generation_stopped(
+        state_,
+        generation_,
+        error == nil ? std::string{} : error_description(error));
 }
 
 @end
 
 namespace macrdp {
 
+class ScreenCaptureKitBackend final : public detail::DisplayCaptureBackend {
+public:
+    ~ScreenCaptureKitBackend() override {
+        stop(capture_stop_timeout);
+    }
+
+    [[nodiscard]] detail::DisplayCaptureBackendStartResult start(
+        const DisplayCaptureOptions& options,
+        const std::shared_ptr<detail::DisplayCaptureState>& state,
+        detail::CaptureGeneration generation,
+        std::chrono::milliseconds timeout) override;
+
+    void stop(std::chrono::milliseconds timeout) noexcept override;
+
+private:
+    SCStream* stream_ = nil;
+    MacCaptureOutput* output_ = nil;
+    bool audio_output_registered_ = false;
+};
+
 struct DisplayCapture::Impl {
-    explicit Impl(DisplayCaptureOptions capture_options)
-        : options(capture_options), state(std::make_shared<CaptureState>()) {}
+    Impl(
+        DisplayCaptureOptions capture_options,
+        std::unique_ptr<detail::DisplayCaptureBackend> capture_backend)
+        : options(capture_options),
+          state(std::make_shared<CaptureState>()),
+          backend(std::move(capture_backend)) {}
 
     ~Impl() {
         stop();
@@ -725,10 +783,9 @@ struct DisplayCapture::Impl {
 
     DisplayCaptureOptions options;
     std::shared_ptr<CaptureState> state;
+    std::unique_ptr<detail::DisplayCaptureBackend> backend;
     std::mutex lifecycle_mutex;
-    SCStream* stream = nil;
-    MacCaptureOutput* output = nil;
-    bool audio_output_registered = false;
+    bool started = false;
 };
 
 namespace {
@@ -805,7 +862,11 @@ void stop_stream_without_waiting(
     remove_stream_outputs(stream, output, audio_registered);
 }
 
-void stop_stream(SCStream* stream, MacCaptureOutput* output, bool audio_registered) {
+void stop_stream(
+    SCStream* stream,
+    MacCaptureOutput* output,
+    bool audio_registered,
+    std::chrono::milliseconds timeout) {
     if (stream == nil) {
         return;
     }
@@ -815,10 +876,10 @@ void stop_stream(SCStream* stream, MacCaptureOutput* output, bool audio_register
         (void)waiter->finish(
             error == nil ? std::string{} : error_description(error));
     }];
-    const auto result = waiter->wait_for(capture_stop_timeout);
+    const auto result = waiter->wait_for(timeout);
     if (!result.completed) {
         NSLog(@"macrdp: ScreenCaptureKit stop timed out after %lld ms",
-              static_cast<long long>(capture_stop_timeout.count()));
+              static_cast<long long>(timeout.count()));
     } else if (!result.error.empty()) {
         NSLog(@"macrdp: ScreenCaptureKit stop failed: %s", result.error.c_str());
     }
@@ -827,21 +888,11 @@ void stop_stream(SCStream* stream, MacCaptureOutput* output, bool audio_register
 
 } // namespace
 
-bool DisplayCapture::Impl::start_locked() {
-    std::uint64_t generation = 0;
-    {
-        std::lock_guard lock(state->mutex);
-        generation = ++state->generation;
-        if (state->latest_frame.has_value()) {
-            recycle_frame_locked(*state, std::move(*state->latest_frame));
-        }
-        state->latest_frame.reset();
-        state->latest_audio.reset();
-        state->error.clear();
-        state->accepting_frames = false;
-        state->stopped = false;
-    }
-
+detail::DisplayCaptureBackendStartResult ScreenCaptureKitBackend::start(
+    const DisplayCaptureOptions& options,
+    const std::shared_ptr<detail::DisplayCaptureState>& state,
+    detail::CaptureGeneration generation,
+    std::chrono::milliseconds timeout) {
     const auto state_for_callback = state;
     const auto capture_options = options;
     auto waiter = std::make_shared<AsyncCompletion>();
@@ -986,12 +1037,6 @@ bool DisplayCapture::Impl::start_locked() {
                     return;
                 }
 
-                if (!activate_capture_generation(state_for_callback, generation)) {
-                    (void)waiter->finish_and_invoke_timeout_handler(
-                        "ScreenCaptureKit stream was superseded while starting");
-                    return;
-                }
-
                 if (!waiter->finish()) {
                     deactivate_capture_generation(state_for_callback, generation);
                 }
@@ -1007,36 +1052,82 @@ bool DisplayCapture::Impl::start_locked() {
         }
     }];
 
-    const auto result = waiter->wait_for(capture_start_timeout);
+    const auto result = waiter->wait_for(timeout);
     if (!result.completed) {
-        set_capture_error(
-            state,
-            generation,
+        return {
+            false,
             "ScreenCaptureKit start timed out after "
-                + std::to_string(capture_start_timeout.count()) + " ms");
-        return false;
+                + std::to_string(timeout.count()) + " ms"};
     }
     if (!result.error.empty()) {
-        set_capture_error(state, generation, result.error);
-        return false;
+        return {false, result.error};
     }
     if (new_stream == nil || new_output == nil) {
+        stop_stream_without_waiting(new_stream, new_output, audio_registered);
+        return {false, "ScreenCaptureKit completed without a valid stream"};
+    }
+
+    stream_ = new_stream;
+    output_ = new_output;
+    audio_output_registered_ = audio_registered;
+    return {true, {}};
+}
+
+void ScreenCaptureKitBackend::stop(std::chrono::milliseconds timeout) noexcept {
+    if (stream_ == nil) {
+        return;
+    }
+    stop_stream(stream_, output_, audio_output_registered_, timeout);
+    stream_ = nil;
+    output_ = nil;
+    audio_output_registered_ = false;
+}
+
+bool DisplayCapture::Impl::start_locked() {
+    detail::CaptureGeneration generation = 0;
+    {
+        std::lock_guard lock(state->mutex);
+        generation = ++state->generation;
+        if (state->latest_frame.has_value()) {
+            recycle_frame_locked(*state, std::move(*state->latest_frame));
+        }
+        state->latest_frame.reset();
+        state->latest_audio.reset();
+        state->error.clear();
+        state->accepting_frames = false;
+        state->stopped = false;
+    }
+
+    const auto result = backend->start(
+        options,
+        state,
+        generation,
+        capture_start_timeout);
+    if (!result.started) {
         set_capture_error(
             state,
             generation,
-            "ScreenCaptureKit completed without a valid stream");
+            result.error.empty()
+                ? "Unable to start ScreenCaptureKit stream"
+                : result.error);
+        return false;
+    }
+    if (!activate_capture_generation(state, generation)) {
+        backend->stop(capture_stop_timeout);
+        set_capture_error(
+            state,
+            generation,
+            "ScreenCaptureKit stream was superseded while starting");
         return false;
     }
 
-    stream = new_stream;
-    output = new_output;
-    audio_output_registered = audio_registered;
+    started = true;
     return true;
 }
 
 bool DisplayCapture::Impl::start() {
     std::lock_guard lifecycle_lock(lifecycle_mutex);
-    if (stream != nil) {
+    if (started) {
         return true;
     }
     return start_locked();
@@ -1044,7 +1135,7 @@ bool DisplayCapture::Impl::start() {
 
 bool DisplayCapture::Impl::reconfigure(DisplayCaptureOptions next_options) {
     std::lock_guard lifecycle_lock(lifecycle_mutex);
-    if (stream != nil) {
+    if (started) {
         {
             std::lock_guard lock(state->mutex);
             state->accepting_frames = false;
@@ -1052,10 +1143,8 @@ bool DisplayCapture::Impl::reconfigure(DisplayCaptureOptions next_options) {
         }
         state->frame_condition.notify_all();
         state->audio_condition.notify_all();
-        stop_stream(stream, output, audio_output_registered);
-        stream = nil;
-        output = nil;
-        audio_output_registered = false;
+        backend->stop(capture_stop_timeout);
+        started = false;
     }
     options = next_options;
     return start_locked();
@@ -1119,11 +1208,9 @@ void DisplayCapture::Impl::stop() noexcept {
     state->frame_condition.notify_all();
     state->audio_condition.notify_all();
 
-    if (stream != nil) {
-        stop_stream(stream, output, audio_output_registered);
-        stream = nil;
-        output = nil;
-        audio_output_registered = false;
+    if (started) {
+        backend->stop(capture_stop_timeout);
+        started = false;
     }
 }
 
@@ -1133,7 +1220,18 @@ std::string DisplayCapture::Impl::last_error() const {
 }
 
 DisplayCapture::DisplayCapture(DisplayCaptureOptions options)
-    : impl_(std::make_unique<Impl>(options)) {}
+    : impl_(std::make_unique<Impl>(
+          options,
+          std::make_unique<ScreenCaptureKitBackend>())) {}
+
+DisplayCapture::DisplayCapture(
+    DisplayCaptureOptions options,
+    std::unique_ptr<detail::DisplayCaptureBackend> backend)
+    : impl_(std::make_unique<Impl>(
+          options,
+          backend == nullptr
+              ? std::make_unique<ScreenCaptureKitBackend>()
+              : std::move(backend))) {}
 
 DisplayCapture::~DisplayCapture() = default;
 

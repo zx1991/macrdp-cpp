@@ -12,6 +12,10 @@
 
 namespace macrdp {
 
+namespace detail {
+class DisplayCaptureBackend;
+}
+
 struct DisplayCaptureOptions {
     // Zero means the native pixel dimensions of the selected display.
     std::uint32_t max_width = 0;
@@ -53,6 +57,10 @@ struct AudioFrame {
 class DisplayCapture final {
 public:
     explicit DisplayCapture(DisplayCaptureOptions options = {});
+    // Project-internal injection seam for deterministic platform lifecycle tests.
+    DisplayCapture(
+        DisplayCaptureOptions options,
+        std::unique_ptr<detail::DisplayCaptureBackend> backend);
     ~DisplayCapture();
 
     DisplayCapture(const DisplayCapture&) = delete;

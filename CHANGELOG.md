@@ -32,3 +32,6 @@ This project has not published a stable release yet.
 - Isolated remote input in a private CoreGraphics event source and limited
   release recovery to per-client ownership, so startup and unmatched key-up
   events cannot release modifiers held by the local user.
+- Added an injectable capture backend and deterministic tests for consumer
+  wakeups, generation isolation, start/stop transitions, and concurrent
+  stop/reconfigure lifecycle races without Screen Recording permission.

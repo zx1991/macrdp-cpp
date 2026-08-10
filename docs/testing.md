@@ -17,14 +17,19 @@ ctest --test-dir build --output-on-failure
 The local suite covers display dimensions, frame coalescing, VideoToolbox and
 FreeRDP H.264 paths, the asynchronous encoder worker, input ownership and queue
 behavior, ledger-bounded modifier cleanup, signed 9-bit RDP wheel-delta
-translation, asynchronous completion and timeout cleanup semantics,
-configuration permissions, and server argument validation. It does not require
-Screen Recording permission for the synthetic encoder and state-machine tests.
+translation, asynchronous completion and timeout cleanup semantics, injected
+capture lifecycle races, configuration permissions, and server argument
+validation. It does not require Screen Recording permission for the synthetic
+encoder and state-machine tests.
 
 The asynchronous completion test covers completion, duplicate and late result
 rejection, timeout cleanup installed both before and after a timeout, and
-explicit failure cleanup. Apple API fault injection is still needed to exercise
-the full capture generation and delegate path deterministically.
+explicit failure cleanup. The injected capture-backend test exercises separate
+frame/audio stop wakeups, old-generation frame/audio/error rejection, a stream
+stopping during start, finite timeout propagation, and concurrent stop versus
+reconfigure serialization. It does not call ScreenCaptureKit; permission
+denial, display sleep, session lock, and framework-specific behavior remain in
+the supported-hardware matrix.
 
 Wheel translation tests cover positive and negative deltas, both pointer event
 types, and the signed field boundaries. The loopback smoke test confirms that

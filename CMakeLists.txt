@@ -784,6 +784,10 @@ add_executable(macrdp-async-completion-test
     src/async_completion_test.cpp
 )
 
+add_executable(macrdp-display-capture-lifecycle-test
+    src/display_capture_lifecycle_test.cpp
+)
+
 add_executable(macrdp-config-permissions-test
     src/config_permissions_test.cpp
 )
@@ -814,6 +818,16 @@ target_compile_options(macrdp-async-completion-test PRIVATE
 
 target_include_directories(macrdp-async-completion-test PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+
+target_compile_options(macrdp-display-capture-lifecycle-test PRIVATE
+    -Wall
+    -Wextra
+    -Wpedantic
+)
+
+target_link_libraries(macrdp-display-capture-lifecycle-test PRIVATE
+    macrdp_macos
 )
 
 target_compile_options(macrdp-h264-worker-test PRIVATE
@@ -871,6 +885,11 @@ add_test(
 add_test(
     NAME async_completion
     COMMAND macrdp-async-completion-test
+)
+
+add_test(
+    NAME display_capture_lifecycle
+    COMMAND macrdp-display-capture-lifecycle-test
 )
 
 add_test(

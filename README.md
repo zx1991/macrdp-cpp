@@ -23,8 +23,8 @@ shadow server.
 | Clipboard | Bidirectional `CF_UNICODETEXT` and `CF_TEXT` through `NSPasteboard` |
 | Audio | Screen audio capture and RDPSND output; AAC or PCM depends on negotiation |
 | Security | NLA by default, generated or existing SAM credentials, private configuration paths |
-| Reliability | Per-client input ownership isolated from local HID state, bounded queues, capture restart backoff, and finite capture start/stop waits |
-| Validation | Local CTest suite, real FreeRDP loopback client, and deterministic shaped-network profiles |
+| Reliability | Per-client input ownership isolated from local HID state, bounded queues, capture restart backoff, and generation-isolated capture lifecycle |
+| Validation | Local state-machine and injected capture-lifecycle tests, real FreeRDP loopback client, and deterministic shaped-network profiles |
 
 The runtime separates capture, audio, input injection, per-client encoding, and
 FreeRDP transport work. See [Architecture](docs/architecture.md) for ownership
