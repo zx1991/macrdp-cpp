@@ -1098,6 +1098,15 @@ check_input_pipeline() {
 	if [ "${server_keyboard_recoveries:-0}" -lt 2 ]; then
 		fail "$case_name did not exercise both keyboard release identity recovery cases"
 	fi
+	if [ "$server_log_level" = "DEBUG" ]; then
+		pause_suppressed=$(grep -c 'Suppressing RDP Pause sequence constituent' "$server_log" || true)
+		if [ "${pause_suppressed:-0}" -lt 4 ]; then
+			fail "$case_name suppressed only ${pause_suppressed:-0} of the expected Pause sequence events"
+		fi
+		if grep -Eq 'Keyboard event .*code=0x45' "$server_log"; then
+			fail "$case_name injected Keypad Clear during the Pause/synchronize probe"
+		fi
+	fi
 	if [ -z "$server_keyboard_delay" ] || [ -z "$server_processed" ]; then
 		fail "$case_name input diagnostics did not report queue delay metrics"
 	fi

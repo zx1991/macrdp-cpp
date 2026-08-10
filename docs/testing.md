@@ -90,7 +90,10 @@ for queue capacity, and the average/maximum delay from RDP callback enqueue to
 the macOS input worker. A nonzero critical-event wait is input backpressure; it
 is distinct from a macOS injection failure. With `--log-level DEBUG`, keyboard
 diagnostics include the client id, raw flags, scan code, E0/E1 markers, resolved
-macOS key code, and whether the event was recovered or treated as autorepeat.
+macOS key code, private-source flags, ownership-derived modifier flags, posted
+flags, and whether the event was recovered or treated as autorepeat.
+The smoke test also requires all four Pause constituents to be suppressed and
+rejects any Keypad Clear injection from its Pause and synchronization probes.
 The `H.264
 pipeline` diagnostic reports encoder time, coalesced frames, and
 `output_deferred`, the number of completed encodes held until the transport
@@ -115,6 +118,14 @@ The server still needs Screen Recording and Accessibility permission because
 the loopback test exercises the actual macOS capture and interactive input
 paths. The deterministic access-policy test is the non-invasive coverage for
 view-only and clipboard-disabled behavior.
+
+When the harness is launched over SSH, TCC must match the server executable
+rather than a local terminal application. Configure the stable local signing
+options documented in the root README before granting access. An ad-hoc-signed
+server receives a different code requirement after relinking and can therefore
+lose an exact-executable grant. After granting access, run the smoke profiles
+against the same `build/macrdp-server` path and do not replace it with an
+ad-hoc-signed binary between profiles.
 
 The harness waits for the server's listening log instead of opening a TCP
 readiness connection, because the default one-client policy treats even a probe
@@ -172,17 +183,35 @@ checks the server's `0x21 -> macOS keycode 3` down/up mapping.
 The first input batch also sends two repeated key-down events for F17. The
 server reports them as `keyboard_repeats` and marks the injected macOS events
 with the autorepeat flag. This covers both slow-path `KBD_FLAGS_DOWN` input and
-FastPath input, where the repeat bit is not carried on the wire.
+FastPath input, where the repeat bit is not carried on the wire. CoreGraphics
+adds SecondaryFn when it constructs a logical function-key event and its private
+event source can retain stale device-dependent modifier flags across later
+events. Before posting the already-logical RDP key, the server preserves only
+non-modifier source attributes and rebuilds Control, Shift, Option, and Command
+from the remote ownership ledger. A locally held hardware modifier is outside
+the private remote event source and remains untouched.
+
+The direct profile's slow-client case allows two seconds after connection for
+graphics and dynamic virtual channels to initialize, then adds the configured
+delay after each client event-loop pass. Its pacing and audio checks therefore
+measure output backpressure after a valid session is established instead of
+starving protocol setup itself.
 
 It also sends a left Windows key-up without its E0 prefix after a matching
 key-down. The server must count this as `keyboard_release_recoveries` and
 release the tracked macOS Command key by its scan-code identity. This catches
 the modifier-sticking failure mode seen with clients that do not preserve the
 extended flag on key-up. The same recovery is checked for right Control, and
-the four constituent events of the mstsc Pause/E1 sequence are checked for
-balanced ownership. `keyboard_unmatched_releases` counts key-up events ignored
-because the current client has no corresponding key-down in its ownership
-ledger.
+the four constituent events of the mstsc Pause/E1 sequence are consumed by the
+server without reaching CoreGraphics. macOS has no native Pause target, while
+forwarding those constituents separately would inject Control and Keypad Clear
+and can leave external keyboards in an incorrect modifier state. Ordinary Num
+Lock events remain unaffected. RDP synchronization updates Caps Lock from its
+public CoreGraphics state, but does not infer Num Lock from the NumericPad event
+flag because that flag is not lock state and synthesizing Keypad Clear can
+toggle Fn on external Windows keyboards. `keyboard_unmatched_releases` counts
+key-up events ignored because the current client has no corresponding key-down
+in its ownership ledger.
 
 ## Network profiles
 
@@ -199,6 +228,11 @@ phase by default. Pass `--reconnect` to run it for either profile, or
 `--no-reconnect` to skip it for a shorter run. The per-connection budget is
 controlled by `MACRDP_LOOPBACK_RECONNECT_DURATION_MS`; the default is 15 seconds
 for `wifi` and 30 seconds for `bad`.
+
+Within each connection, the client validates the initial server clipboard
+payload once. It still acknowledges later format lists, but does not request a
+second payload after the client-to-server test changes the host pasteboard;
+that reflected change is expected and is not a second server-originated test.
 
 | Profile | Delay | Jitter | Bandwidth | Stall | Purpose |
 | --- | ---: | ---: | ---: | ---: | --- |

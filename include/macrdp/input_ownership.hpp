@@ -31,6 +31,52 @@ struct InputReleaseState {
 // injector can then emit a release only when the last owner lets go.
 class InputOwnership final {
 public:
+    // RDP represents Pause as E1 1D down, 45 down, E1 1D up, 45 up.
+    // macOS has no native Pause key, and forwarding the constituents would
+    // inject Control and Keypad Clear independently. Consume that sequence
+    // while leaving ordinary Num Lock (scan code 45) untouched.
+    [[nodiscard]] bool consume_pause_sequence_event(
+        InputClientId client,
+        std::uint16_t key_identity,
+        bool key_down) {
+        constexpr std::uint16_t pause_control = 0x021DU;
+        constexpr std::uint16_t num_lock = 0x0045U;
+
+        auto client_it = clients_.find(client);
+        if (key_identity == pause_control) {
+            if (key_down) {
+                clients_[client].pause_sequence = PauseSequenceState::control_down;
+            } else if (client_it != clients_.end()) {
+                client_it->second.pause_sequence =
+                    client_it->second.pause_sequence == PauseSequenceState::num_lock_down
+                    ? PauseSequenceState::control_up
+                    : PauseSequenceState::idle;
+            }
+            return true;
+        }
+
+        if (client_it == clients_.end()
+            || client_it->second.pause_sequence == PauseSequenceState::idle) {
+            return false;
+        }
+
+        auto& pause_sequence = client_it->second.pause_sequence;
+        if (key_identity == num_lock) {
+            if (key_down && pause_sequence == PauseSequenceState::control_down) {
+                pause_sequence = PauseSequenceState::num_lock_down;
+                return true;
+            }
+            if (!key_down && pause_sequence == PauseSequenceState::control_up) {
+                pause_sequence = PauseSequenceState::idle;
+                return true;
+            }
+        }
+
+        // Do not let a partial sequence consume a later, unrelated Num Lock.
+        pause_sequence = PauseSequenceState::idle;
+        return false;
+    }
+
     [[nodiscard]] bool acquire_key(InputClientId client, std::uint16_t key) {
         auto& state = clients_[client];
         if (!state.keys.insert(key).second) {
@@ -74,6 +120,16 @@ public:
             && client_it->second.keys.find(key) != client_it->second.keys.end()
             && key_it != key_counts_.end()
             && key_it->second == 1;
+    }
+
+    [[nodiscard]] bool is_key_code_active(std::uint8_t code) const {
+        for (const auto& [key, count] : key_counts_) {
+            (void)count;
+            if (static_cast<std::uint8_t>(key & 0x00FFU) == code) {
+                return true;
+            }
+        }
+        return false;
     }
 
     [[nodiscard]] std::vector<std::uint16_t> find_keys_by_code(
@@ -208,10 +264,18 @@ public:
     }
 
 private:
+    enum class PauseSequenceState : std::uint8_t {
+        idle,
+        control_down,
+        num_lock_down,
+        control_up,
+    };
+
     struct ClientState {
         std::unordered_set<std::uint16_t> keys;
         std::unordered_set<std::uint16_t> unicode;
         std::array<bool, 5> buttons{};
+        PauseSequenceState pause_sequence = PauseSequenceState::idle;
     };
 
     template <typename Key>

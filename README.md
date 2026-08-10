@@ -83,10 +83,22 @@ To use dependencies built for an older macOS version, configure with a matching
 `-DCMAKE_OSX_DEPLOYMENT_TARGET` and ensure every linked library supports that
 same target.
 
+### Optional local code signing
+
+An exact-executable macOS TCC grant can stop matching when an ad-hoc-signed
+binary is rebuilt. Developers can set `MACRDP_CODESIGN_IDENTITY` to a persistent
+Code Signing identity and optionally override `MACRDP_CODESIGN_IDENTIFIER`;
+the `macrdp-server` target is then signed after each link. The identity and its
+private key must remain in the developer's keychain and must never be stored in
+the repository. This option is disabled by default and does not replace
+Developer ID signing and notarization for public releases.
+
 ## Run the server
 
 Grant Screen Recording permission to the terminal or exact server executable
-before starting it. Interactive sessions also require Accessibility permission.
+before starting it. For an SSH-launched process, grant the persistently signed
+server executable rather than an unrelated local terminal application.
+Interactive sessions also require Accessibility permission.
 The server checks every permission required by the selected access policy before
 opening the RDP listener.
 

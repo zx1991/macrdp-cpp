@@ -562,6 +562,11 @@ static UINT loopback_server_format_list(
 		loop->clipboard_failures++;
 		return CHANNEL_RC_OK;
 	}
+	if (loop->clipboard_server_data_received)
+	{
+		WLog_INFO(TAG, "server clipboard already verified; skipping reflected update");
+		return CHANNEL_RC_OK;
+	}
 
 	loop->clipboard_server_format = selected_format;
 	request.common.msgType = CB_FORMAT_DATA_REQUEST;
@@ -1199,7 +1204,6 @@ static DWORD loopback_run(loopback_context* loop)
 	DWORD count = 0;
 	DWORD result = 0;
 	const DWORD event_delay_ms = env_event_delay_ms();
-	const uint64_t slow_start_us = loop->connected_us + UINT64_C(2000000);
 
 	if (!freerdp_connect(instance))
 	{
@@ -1251,7 +1255,7 @@ static DWORD loopback_run(loopback_context* loop)
 		/* Let protocol setup and the first desktop frame complete before
 		 * deliberately slowing the client event loop. */
 		if (event_delay_ms > 0 && loop->gfx_frame_count > 0
-		    && monotonic_us() >= slow_start_us)
+		    && monotonic_us() >= loop->connected_us + UINT64_C(2000000))
 			Sleep(event_delay_ms);
 		loopback_sample_gfx(loop, monotonic_us());
 	}

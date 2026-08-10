@@ -128,6 +128,13 @@ option(MACRDP_FREERDP_WITH_FFMPEG
     ON
 )
 
+set(MACRDP_CODESIGN_IDENTITY "" CACHE STRING
+    "macOS code-signing identity for macrdp-server (empty disables signing)"
+)
+set(MACRDP_CODESIGN_IDENTIFIER "io.github.zx1991.macrdp.server" CACHE STRING
+    "Stable code-signing identifier for macrdp-server"
+)
+
 option(MACRDP_USE_VIDEOTOOLBOX_H264_ENCODING
     "Use direct VideoToolbox H.264 encoding on macOS with FFmpeg fallback"
     ON
@@ -737,6 +744,26 @@ target_include_directories(macrdp-server PRIVATE
 )
 
 target_link_libraries(macrdp-server PRIVATE macrdp_freerdp_shadow macrdp_config)
+
+if(APPLE AND NOT MACRDP_CODESIGN_IDENTITY STREQUAL "")
+    if(MACRDP_CODESIGN_IDENTIFIER STREQUAL "")
+        message(FATAL_ERROR
+            "MACRDP_CODESIGN_IDENTIFIER must not be empty when signing is enabled"
+        )
+    endif()
+
+    find_program(MACRDP_CODESIGN_EXECUTABLE codesign REQUIRED)
+    add_custom_command(TARGET macrdp-server POST_BUILD
+        COMMAND "${MACRDP_CODESIGN_EXECUTABLE}"
+            --force
+            --sign "${MACRDP_CODESIGN_IDENTITY}"
+            --identifier "${MACRDP_CODESIGN_IDENTIFIER}"
+            --timestamp=none
+            "$<TARGET_FILE:macrdp-server>"
+        COMMENT "Signing macrdp-server as ${MACRDP_CODESIGN_IDENTIFIER}"
+        VERBATIM
+    )
+endif()
 
 if(APPLE)
     add_custom_target(macrdp-package

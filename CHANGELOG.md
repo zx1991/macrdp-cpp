@@ -38,3 +38,19 @@ This project has not published a stable release yet.
 - Added independent `--view-only` and `--no-clipboard` access policies, a
   configurable 1-64 concurrent-client limit that defaults to one, and
   deterministic policy-gate coverage without macOS TCC permissions.
+- Added optional post-build signing with a stable executable identifier so
+  SSH-based development builds can retain exact-executable macOS TCC grants
+  across relinks when a persistent local signing identity is configured.
+- Suppressed the synthetic RDP Pause/E1 scan-code sequence on macOS, where no
+  native Pause key exists, so its Control and Keypad Clear constituents cannot
+  leave an external keyboard in an incorrect modifier state.
+- Stopped inferring Num Lock state from CoreGraphics' NumericPad event flag
+  during RDP synchronization, avoiding synthetic Keypad Clear events that can
+  toggle Fn on external Windows keyboards.
+- Rebuilt posted Control, Shift, Option, and Command flags from the remote input
+  ownership ledger, removing CoreGraphics' synthetic SecondaryFn and stale
+  device-dependent flags so one key event cannot contaminate later modifiers.
+- Corrected the slow-client loopback warm-up to use the established connection
+  timestamp, preserving protocol setup before deliberate event-loop stalls.
+- Prevented the loopback clipboard verifier from treating the expected
+  client-to-server pasteboard reflection as a second server payload mismatch.

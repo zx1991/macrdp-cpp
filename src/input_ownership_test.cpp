@@ -120,21 +120,75 @@ bool test_release_all_is_ledger_bounded() {
     return ok;
 }
 
+bool test_pause_sequence_filter() {
+    constexpr std::uint16_t pause_control = 0x021D;
+    constexpr std::uint16_t num_lock = 0x0045;
+    macrdp::InputOwnership ownership;
+
+    bool ok = expect(
+        ownership.consume_pause_sequence_event(8, pause_control, true),
+        "Pause E1 Control down was not consumed");
+    ok = expect(ownership.consume_pause_sequence_event(8, num_lock, true),
+                "Pause Num Lock down was not consumed") && ok;
+    ok = expect(ownership.consume_pause_sequence_event(8, pause_control, false),
+                "Pause E1 Control up was not consumed") && ok;
+    ok = expect(ownership.consume_pause_sequence_event(8, num_lock, false),
+                "Pause Num Lock up was not consumed") && ok;
+    ok = expect(!ownership.consume_pause_sequence_event(8, num_lock, true)
+                    && !ownership.consume_pause_sequence_event(8, num_lock, false),
+                "ordinary Num Lock was consumed after a complete Pause sequence") && ok;
+    return ok;
+}
+
+bool test_pause_sequence_recovery() {
+    constexpr std::uint16_t pause_control = 0x021D;
+    constexpr std::uint16_t num_lock = 0x0045;
+    macrdp::InputOwnership ownership;
+
+    bool ok = expect(
+        ownership.consume_pause_sequence_event(9, pause_control, false),
+        "stray Pause E1 Control release was not consumed");
+    ok = expect(!ownership.consume_pause_sequence_event(9, num_lock, true),
+                "stray Pause release poisoned ordinary Num Lock") && ok;
+
+    (void)ownership.consume_pause_sequence_event(10, pause_control, true);
+    (void)ownership.release_client(10);
+    ok = expect(!ownership.consume_pause_sequence_event(10, num_lock, true),
+                "client release retained a partial Pause sequence") && ok;
+
+    (void)ownership.consume_pause_sequence_event(11, pause_control, true);
+    (void)ownership.release_all();
+    ok = expect(!ownership.consume_pause_sequence_event(11, num_lock, true),
+                "global release retained a partial Pause sequence") && ok;
+
+    (void)ownership.consume_pause_sequence_event(12, pause_control, true);
+    ok = expect(!ownership.consume_pause_sequence_event(12, 0x001E, true),
+                "partial Pause sequence consumed an unrelated key") && ok;
+    ok = expect(!ownership.consume_pause_sequence_event(12, num_lock, true),
+                "partial Pause sequence consumed a later ordinary Num Lock") && ok;
+    return ok;
+}
+
 } // namespace
 
 int main() {
     bool ok = test_wheel_delta_decoding();
     ok = test_release_all_is_ledger_bounded() && ok;
+    ok = test_pause_sequence_filter() && ok;
+    ok = test_pause_sequence_recovery() && ok;
     ok = test_reset_priority() && ok;
     ok = test_motion_coalescing() && ok;
     ok = test_discard_motion_for_critical_input() && ok;
     macrdp::InputOwnership ownership;
 
     ok = expect(ownership.acquire_key(1, 30), "first key owner was not announced") && ok;
+    ok = expect(ownership.is_key_code_active(30), "owned key code was not marked active") && ok;
     ok = expect(!ownership.acquire_key(1, 30), "duplicate key press changed ownership") && ok;
     ok = expect(!ownership.acquire_key(2, 30), "second key owner caused a duplicate press") && ok;
     ok = expect(!ownership.release_key(1, 30), "first key release released a shared key") && ok;
+    ok = expect(ownership.is_key_code_active(30), "shared key code became inactive too early") && ok;
     ok = expect(ownership.release_key(2, 30), "last key owner was not released") && ok;
+    ok = expect(!ownership.is_key_code_active(30), "released key code remained active") && ok;
     ok = expect(!ownership.release_key(2, 30), "unknown key release was accepted") && ok;
 
     ok = expect(ownership.acquire_key(3, 0x015B),
@@ -154,6 +208,8 @@ int main() {
                 "left modifier owner was not announced") && ok;
     ok = expect(ownership.acquire_key(4, 0x011D),
                 "right modifier owner was not announced") && ok;
+    ok = expect(ownership.is_key_code_active(0x1D),
+                "extended modifier identity was not found by scan code") && ok;
     // A shared owner is recorded, but does not request a second platform
     // key-down, so acquire_key intentionally returns false here.
     ok = expect(!ownership.acquire_key(5, 0x001D),

@@ -491,6 +491,25 @@ std::optional<CGKeyCode> mac_key_code(UINT16 flags, UINT8 code) {
     return key_code;
 }
 
+CGEventFlags remote_modifier_flags(const macrdp::InputOwnership& ownership) {
+    CGEventFlags flags = 0;
+    if (ownership.is_key_code_active(0x1DU)) {
+        flags |= kCGEventFlagMaskControl;
+    }
+    if (ownership.is_key_code_active(0x2AU)
+        || ownership.is_key_code_active(0x36U)) {
+        flags |= kCGEventFlagMaskShift;
+    }
+    if (ownership.is_key_code_active(0x38U)) {
+        flags |= kCGEventFlagMaskAlternate;
+    }
+    if (ownership.is_key_code_active(0x5BU)
+        || ownership.is_key_code_active(0x5CU)) {
+        flags |= kCGEventFlagMaskCommand;
+    }
+    return flags;
+}
+
 bool post_keyboard_event(
     MacShadowSubsystem* subsystem,
     UINT16 flags,
@@ -520,17 +539,39 @@ bool post_keyboard_event(
         return false;
     }
 
+    // A private CoreGraphics source can retain stale device-dependent flags,
+    // including SecondaryFn after a function-key release. Rebuild the remote
+    // modifier flags from the ownership ledger so one key-up cannot reassert
+    // a modifier released by an earlier event. Local physical modifiers remain
+    // in the combined hardware state and are not part of this private source.
+    const CGEventFlags source_event_flags = CGEventGetFlags(event);
+    const CGEventFlags preserved_source_flags = source_event_flags
+        & (kCGEventFlagMaskAlphaShift
+           | kCGEventFlagMaskHelp
+           | kCGEventFlagMaskNumericPad
+           | kCGEventFlagMaskNonCoalesced);
+    const CGEventFlags owned_modifier_flags =
+        remote_modifier_flags(subsystem->input_ownership);
+    const CGEventFlags posted_event_flags =
+        preserved_source_flags | owned_modifier_flags;
+    CGEventSetFlags(event, posted_event_flags);
+
     CGEventSetIntegerValueField(
         event,
         kCGKeyboardEventAutorepeat,
         autorepeat ? 1 : 0);
     WLog_DBG(TAG, "Keyboard event flags=0x%04" PRIx16 " code=0x%02" PRIx8
-             " keycode=%u action=%s repeat=%u",
+             " keycode=%u action=%s repeat=%u source_flags=0x%016" PRIx64
+             " owned_modifier_flags=0x%016" PRIx64
+             " posted_flags=0x%016" PRIx64,
              flags,
              code,
              static_cast<unsigned>(*key_code),
              key_down ? "down" : "up",
-             autorepeat ? 1U : 0U);
+             autorepeat ? 1U : 0U,
+             static_cast<std::uint64_t>(source_event_flags),
+             static_cast<std::uint64_t>(owned_modifier_flags),
+             static_cast<std::uint64_t>(posted_event_flags));
     CGEventPost(kCGHIDEventTap, event);
     CFRelease(event);
     return true;
@@ -580,17 +621,11 @@ bool synchronize_toggle_keys(MacShadowSubsystem* subsystem, UINT32 flags) {
         (current_flags & kCGEventFlagMaskAlphaShift) != 0,
         0,
         RDP_SCANCODE_CODE(RDP_SCANCODE_CAPSLOCK));
-    synchronize_key(
-        (flags & KBD_SYNC_NUM_LOCK) != 0,
-        (current_flags & kCGEventFlagMaskNumericPad) != 0,
-        0,
-        RDP_SCANCODE_CODE(RDP_SCANCODE_NUMLOCK));
-
-    // CoreGraphics exposes no public Scroll Lock toggle-state bit. Its
-    // CGEventSourceKeyState API reports only whether the key is physically
-    // held, so treating it as a lock state would toggle Scroll Lock again on
-    // every focus synchronization. Normal Scroll Lock key events still pass
-    // through the keyboard path below.
+    // CoreGraphics exposes no public Num Lock or Scroll Lock toggle-state
+    // bits. kCGEventFlagMaskNumericPad only identifies keypad-originated
+    // events; it is not Num Lock state. Synthesizing Keypad Clear from that
+    // flag can toggle Fn on external Windows keyboards. Normal Num Lock and
+    // Scroll Lock key events still pass through the keyboard path below.
     return success;
 }
 
@@ -618,6 +653,18 @@ bool inject_keyboard_event(
              (flags & KBD_FLAGS_DOWN) != 0 ? 1U : 0U,
              (flags & KBD_FLAGS_EXTENDED) != 0 ? 1U : 0U,
              (flags & KBD_FLAGS_EXTENDED1) != 0 ? 1U : 0U);
+    if (subsystem->input_ownership.consume_pause_sequence_event(
+            client_id,
+            key_identity,
+            key_down)) {
+        WLog_DBG(TAG,
+                 "Suppressing RDP Pause sequence constituent: client=%" PRIu64
+                 " identity=0x%04" PRIx16 " action=%s",
+                 client_id,
+                 key_identity,
+                 keyboard_action(flags));
+        return true;
+    }
     if (!key_down) {
         // Match a release to the identity recorded for the key-down. Some
         // clients lose the E0/E1 marker while forwarding a key-up; dropping
