@@ -78,3 +78,9 @@ This project has not published a stable release yet.
 - Added an opt-in AppleClang AddressSanitizer and UndefinedBehaviorSanitizer
   build, plus arm64 CI coverage that runs the deterministic suite and repeats
   lifecycle-focused state-machine tests 50 times without live system input.
+- Stopped FreeRDP's broad FFmpeg discovery from directly linking unused device,
+  filter, format, and post-processing components into the macOS package, and
+  made package validation reject those components if they return.
+- Added generated third-party notices, formula license texts, the exact FFmpeg
+  build configuration, and a CycloneDX 1.6 SBOM with validated hashes and
+  dependency references to the developer package.

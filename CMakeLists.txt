@@ -324,6 +324,26 @@ if(NOT FETCHCONTENT_SOURCE_DIR_FREERDP
 endif()
 FetchContent_MakeAvailable(freerdp)
 
+# FreeRDP 3.30.0's FindFFmpeg module collects every FFmpeg component installed
+# on the host, even though this build only uses codec, utility, scaling, and
+# resampling APIs. Remove the unused components from the static target's link
+# interface so a full Homebrew FFmpeg installation does not pull its device,
+# filter, format, and post-processing dependency trees into the package.
+if(MACRDP_FREERDP_WITH_FFMPEG AND TARGET freerdp)
+    foreach(MACRDP_FREERDP_LINK_PROPERTY IN ITEMS
+        LINK_LIBRARIES
+        INTERFACE_LINK_LIBRARIES)
+        get_target_property(MACRDP_FREERDP_LINK_ITEMS
+            freerdp ${MACRDP_FREERDP_LINK_PROPERTY})
+        if(MACRDP_FREERDP_LINK_ITEMS)
+            list(FILTER MACRDP_FREERDP_LINK_ITEMS EXCLUDE REGEX
+                "lib(avdevice|avfilter|avformat|postproc)(\\.[0-9]+)*\\.dylib")
+            set_property(TARGET freerdp PROPERTY
+                ${MACRDP_FREERDP_LINK_PROPERTY} "${MACRDP_FREERDP_LINK_ITEMS}")
+        endif()
+    endforeach()
+endif()
+
 # FreeRDP source adaptations are kept as checked-in patches against the pinned
 # 3.30.0 tree. CMake only modifies the generated FetchContent copy.
 set(MACRDP_FREERDP_SHADOW_HEADER
@@ -792,6 +812,9 @@ if(APPLE)
             "${CMAKE_CURRENT_SOURCE_DIR}/scripts/package_macos.sh"
             "$<TARGET_FILE:macrdp-server>"
             "${CMAKE_CURRENT_BINARY_DIR}/macrdp-dist"
+            "${CMAKE_CURRENT_SOURCE_DIR}"
+            "${freerdp_SOURCE_DIR}"
+            "${PROJECT_VERSION}"
         DEPENDS macrdp-server
         USES_TERMINAL
     )

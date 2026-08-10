@@ -1,21 +1,39 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [[ $# -ne 2 ]]; then
-    printf 'usage: %s <macrdp-server> <output-directory>\n' "$0" >&2
+if [[ $# -ne 5 ]]; then
+    printf 'usage: %s <macrdp-server> <output-directory> <project-source> <freerdp-source> <project-version>\n' \
+        "$0" >&2
     exit 2
 fi
 
 server=$1
 output=$2
+project_source=$3
+freerdp_source=$4
+project_version=$5
+script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
+compliance_generator="$script_dir/generate_macos_compliance.rb"
 
 if [[ ! -x "$server" ]]; then
     printf 'server executable is missing or not executable: %s\n' "$server" >&2
     exit 1
 fi
+if [[ ! -f "$project_source/LICENSE" || ! -f "$project_source/NOTICE" ]]; then
+    printf 'project LICENSE or NOTICE is missing: %s\n' "$project_source" >&2
+    exit 1
+fi
+if [[ ! -f "$freerdp_source/LICENSE" ]]; then
+    printf 'FreeRDP LICENSE is missing: %s\n' "$freerdp_source" >&2
+    exit 1
+fi
+if [[ ! -f "$compliance_generator" ]]; then
+    printf 'compliance generator is missing: %s\n' "$compliance_generator" >&2
+    exit 1
+fi
 if ! command -v otool >/dev/null 2>&1 || ! command -v install_name_tool >/dev/null 2>&1 \
-    || ! command -v codesign >/dev/null 2>&1; then
-    printf 'otool, install_name_tool, and codesign are required on macOS\n' >&2
+    || ! command -v codesign >/dev/null 2>&1 || ! command -v ruby >/dev/null 2>&1; then
+    printf 'otool, install_name_tool, codesign, and ruby are required on macOS\n' >&2
     exit 1
 fi
 
@@ -23,6 +41,8 @@ mkdir -p "$output/bin" "$output/lib"
 output_dir=$(cd "$output" && pwd -P)
 packaged_server="$output_dir/bin/macrdp-server"
 executable_dir=$(dirname "$packaged_server")
+dependency_origins=$(mktemp "${TMPDIR:-/tmp}/macrdp-dependencies.XXXXXX")
+trap 'rm -f "$dependency_origins"' EXIT
 
 # Rebuild the generated payload from the current binary and dependency set.
 # Keep unrelated files in the caller's output directory untouched.
@@ -162,6 +182,24 @@ while [[ ${#queue[@]} -gt 0 ]]; do
         if is_system_dependency "$resolved"; then
             continue
         fi
+        canonical_resolved=$(canonical_existing_path "$resolved" || true)
+        if [[ -z "$canonical_resolved" ]]; then
+            printf 'unable to canonicalize dependency %s of %s\n' \
+                "$dependency" "$current" >&2
+            exit 1
+        fi
+        resolved=$canonical_resolved
+        source_origin=$resolved
+        if [[ $source_origin == "$output_dir"/lib/* ]]; then
+            packaged_origin="lib/${source_origin##*/}"
+            source_origin=$(awk -F '\t' -v packaged_path="$packaged_origin" \
+                '$1 == packaged_path { print $2; exit }' "$dependency_origins")
+            if [[ -z $source_origin ]]; then
+                printf 'unable to recover original dependency source for %s\n' \
+                    "$packaged_origin" >&2
+                exit 1
+            fi
+        fi
 
         name=$(basename "$resolved")
         destination="$output_dir/lib/$name"
@@ -177,6 +215,8 @@ while [[ ${#queue[@]} -gt 0 ]]; do
             replacement="@loader_path/$name"
         fi
         install_name_tool -change "$dependency" "$replacement" "$current" 2>/dev/null || true
+        printf 'lib/%s\t%s\t%s\n' "$name" "$source_origin" \
+            "${current#"$output_dir"/}" >> "$dependency_origins"
 
         if ! contains_path "$destination" "${queue[@]-}" "${processed[@]-}"; then
             queue+=("$destination")
@@ -291,6 +331,13 @@ for library in "$output_dir"/lib/*.dylib; do
     sign_ad_hoc "$library"
 done
 sign_ad_hoc "$packaged_server"
+
+ruby "$compliance_generator" \
+    "$output_dir" \
+    "$dependency_origins" \
+    "$project_source" \
+    "$freerdp_source" \
+    "$project_version"
 
 printf 'Packaged macrdp-server at %s\n' "$output_dir"
 printf 'Non-system dylibs: %s\n' "$(find "$output_dir/lib" -type f | wc -l | tr -d ' ')"

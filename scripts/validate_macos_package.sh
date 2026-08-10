@@ -15,7 +15,10 @@ if [[ ! -d $package_input ]]; then
     printf 'package directory is missing: %s\n' "$package_input" >&2
     exit 1
 fi
-for command_name in otool lipo codesign awk; do
+script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
+compliance_validator="$script_dir/validate_macos_compliance.rb"
+
+for command_name in otool lipo codesign awk ruby; do
     if ! command -v "$command_name" >/dev/null 2>&1; then
         printf '%s is required on macOS\n' "$command_name" >&2
         exit 1
@@ -205,6 +208,13 @@ for library in "$package_dir"/lib/*.dylib; do
             "$library" >&2
         exit 1
     fi
+    case $(basename "$library") in
+        libavdevice*.dylib|libavfilter*.dylib|libavformat*.dylib|libpostproc*.dylib)
+            printf 'unused FFmpeg component is present in the package: %s\n' \
+                "$library" >&2
+            exit 1
+            ;;
+    esac
     payload_files+=("$library")
 done
 
@@ -244,6 +254,12 @@ if [[ $help_output != *'Usage:'* \
     printf 'packaged server did not complete the expected loader/help smoke check\n' >&2
     exit 1
 fi
+
+if [[ ! -f $compliance_validator ]]; then
+    printf 'compliance validator is missing: %s\n' "$compliance_validator" >&2
+    exit 1
+fi
+ruby "$compliance_validator" "$package_dir"
 
 printf 'Validated macOS package: %s\n' "$package_dir"
 printf 'Architectures: %s\n' "$server_architecture_list"

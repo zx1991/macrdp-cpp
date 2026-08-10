@@ -7,15 +7,15 @@ large feature drops.
 ## Before you start
 
 Read the [architecture](docs/architecture.md), [testing](docs/testing.md),
-[roadmap](docs/roadmap.md), and [security](SECURITY.md) documents. Check open
-issues before starting work that changes protocol behavior or the FreeRDP
-integration boundary.
+[roadmap](docs/roadmap.md), [release engineering](docs/release.md), and
+[security](SECURITY.md) documents. Check open issues before starting work that
+changes protocol behavior or the FreeRDP integration boundary.
 
 ## Development environment
 
 The supported development environment is a logged-in macOS 15 session with
-CMake, Apple Clang, FFmpeg, and OpenSSL 3. Homebrew is the simplest way to
-install the non-system dependencies:
+CMake, Apple Clang, Ruby, FFmpeg, and OpenSSL 3. Homebrew is the simplest way
+to install the non-system dependencies:
 
 ```bash
 brew install cmake ffmpeg openssl@3
@@ -41,6 +41,10 @@ should also build and validate the developer payload:
 ```bash
 cmake --build build --target macrdp-package-validate
 ```
+
+This target must regenerate and validate the CycloneDX SBOM, dependency graph,
+third-party notices, FFmpeg build configuration, and license texts. Do not
+manually edit generated compliance files under `build/macrdp-dist`.
 
 Memory-safety, ownership, and lifecycle changes should also use the isolated
 sanitizer build and deterministic stress command documented in

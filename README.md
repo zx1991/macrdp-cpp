@@ -41,8 +41,9 @@ and backpressure details.
 - Current Homebrew FFmpeg and OpenSSL arm64 packages require macOS 15. Older
   targets need a separately built compatible dependency set.
 - The package target creates a relocatable, ad-hoc-signed developer payload.
-  Developer ID signing, notarization, third-party license collection, SBOM
-  generation, and deployment-target enforcement are still release work.
+  It includes license texts and a validated CycloneDX SBOM, but the current
+  Homebrew FFmpeg build is GPL-3.0-or-later. A purpose-built codec dependency
+  set, Developer ID signing, and notarization are still release work.
 - The automated loopback client verifies protocol delivery, but final input,
   Retina, reconnect, and sleep/wake behavior still needs a real Windows
   `mstsc` validation matrix on supported hardware.
@@ -54,7 +55,7 @@ The prioritized acceptance gates are tracked in [Roadmap](docs/roadmap.md).
 - A logged-in graphical macOS session. ScreenCaptureKit generally cannot
   capture the desktop from an SSH-only session.
 - macOS 15 and Apple Silicon for the currently documented Homebrew build.
-- Xcode Command Line Tools, CMake 3.25 or newer, FFmpeg, and OpenSSL 3.
+- Xcode Command Line Tools, CMake 3.25 or newer, Ruby, FFmpeg, and OpenSSL 3.
 - Screen Recording permission for capture. Accessibility permission is required
   for interactive sessions, but not when the server uses `--view-only`.
 
@@ -171,10 +172,19 @@ cmake --build build --target macrdp-package-validate
 The output is `build/macrdp-dist`. The packaging script copies non-system
 dynamic libraries, rewrites load paths, rejects references that escape the
 package, and applies an ad-hoc signature. The validation target independently
-checks load paths, architectures, minimum macOS versions, signatures, and a
-packaged `--help` loader smoke check. It does not start a listener or require
+checks load paths, architectures, minimum macOS versions, signatures, unused
+FFmpeg components, and a packaged `--help` loader smoke check. FreeRDP's broad
+component discovery is narrowed to the codec, utility, scaling, and resampling
+libraries used by this server. Validation does not start a listener or require
 TCC permissions. The payload is not a notarized installer and should not be
 published as a release artifact yet.
+
+The package also contains `share/macrdp/sbom.cdx.json`, generated third-party
+notices, the exact FFmpeg build configuration, and the license files associated
+with every copied Homebrew formula. Validation recomputes hashes for every
+payload and compliance file and checks the dependency references in the SBOM.
+See [Release engineering](docs/release.md) for the current GPL implications and
+remaining release gates.
 
 For a long-running instance, create an owner-only one-line password file and
 install the supplied per-user LaunchAgent:
@@ -294,4 +304,6 @@ not a public issue.
 
 Project-owned code and documentation are licensed under Apache License 2.0.
 See [LICENSE](LICENSE) and [NOTICE](NOTICE). FreeRDP and bundled runtime
-dependencies retain their own upstream licenses and notices.
+dependencies retain their own upstream licenses and notices. The current
+Homebrew-derived developer package includes GPL components; see
+[Release engineering](docs/release.md) before distributing binaries.

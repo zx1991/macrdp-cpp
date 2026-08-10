@@ -39,6 +39,12 @@ are acceptance gates rather than promised dates.
 - Instrument the complete static build with AddressSanitizer and
   UndefinedBehaviorSanitizer in CI, run the deterministic suite, and repeat
   lifecycle-focused state-machine tests without TCC or input side effects.
+- Remove unused FFmpeg device, filter, format, and post-processing components
+  from FreeRDP's static link interface and reject them during package
+  validation, reducing the Homebrew-derived runtime dependency closure.
+- Bundle project, FreeRDP, and Homebrew formula license texts with generated
+  third-party notices and a CycloneDX 1.6 SBOM whose payload, compliance-file,
+  and dependency references are validated during packaging.
 
 ## P0: correctness and lifecycle
 
@@ -65,14 +71,9 @@ validation in CI.
 
 ## P2: release engineering
 
-- Make the executable and every bundled dynamic library agree on the supported
-  macOS deployment target. Fail packaging when a dependency requires a newer
-  system than the advertised target.
-- Reduce the current Homebrew-derived FFmpeg dependency closure or replace it
-  with a purpose-built codec configuration. Record the exact build options and
-  verify GPL implications before distributing binaries.
-- Bundle third-party notices and license texts and generate an SBOM for FreeRDP,
-  FFmpeg, OpenSSL, and transitive libraries.
+- Replace the remaining Homebrew-derived FFmpeg codec closure with a
+  purpose-built configuration that is version-pinned and has an explicit
+  distribution license. Keep recording its exact build options.
 - Build, sign, and notarize a Developer ID package. Define upgrade and rollback
   behavior for generated certificates, configuration, and SAM files.
 
