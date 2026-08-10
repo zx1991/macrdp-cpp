@@ -22,7 +22,7 @@ shadow server.
 | Input | Serialized keyboard, Unicode, pointer, button, drag, and wheel injection through a private CoreGraphics event source |
 | Clipboard | Bidirectional `CF_UNICODETEXT` and `CF_TEXT` through `NSPasteboard` |
 | Audio | Screen audio capture and RDPSND output; AAC or PCM depends on negotiation |
-| Security | NLA by default, one concurrent client, view-only and clipboard opt-out controls, private configuration paths |
+| Security | NLA and loopback-only listening by default, one concurrent client, explicit legacy-security opt-in, view-only and clipboard opt-out controls |
 | Reliability | Per-client input ownership isolated from local HID state, bounded queues, capture restart backoff, and generation-isolated capture lifecycle |
 | Validation | Local state-machine and injected capture-lifecycle tests, real FreeRDP loopback client, and deterministic shaped-network profiles |
 
@@ -127,15 +127,18 @@ printf '%s\n' "$macrdp_password" | \
 unset macrdp_password
 ```
 
-This local-only example requires a tunnel or a client on the same Mac. For a
-remote client, replace `127.0.0.1` with the Mac's address on the trusted network
-used by that client. Omitting `--bind-address` listens on all local addresses.
-The default port is TCP 3389; use `--port 3390` and connect to `host:3390` when
-needed. IPv6 literals must include brackets, for example `[::1]`.
+This local-only example requires a tunnel or a client on the same Mac. Omitting
+`--bind-address` has the same loopback-only behavior. For a remote client,
+explicitly set the Mac's address on the trusted network used by that client;
+avoid wildcard addresses such as `0.0.0.0` unless a firewall or VPN restricts
+reachability. The default port is TCP 3389; use `--port 3390` and connect to
+`host:3390` when needed. IPv6 literals must include brackets, for example
+`[::1]`.
 
 NLA is the default and recommended security mode. `--security tls` and
-`--security rdp` exist for compatibility testing. Empty passwords are rejected.
-An existing FreeRDP SAM can be supplied with `--sam-file`.
+`--security rdp` exist only for compatibility testing, disable NLA, and are
+rejected unless `--allow-insecure-security` is also supplied. Empty passwords
+are rejected. An existing FreeRDP SAM can be supplied with `--sam-file`.
 
 Access and media controls can be appended to the server command above:
 
@@ -162,13 +165,16 @@ the complete option list.
 Create the relocatable developer payload with:
 
 ```bash
-cmake --build build --target macrdp-package
+cmake --build build --target macrdp-package-validate
 ```
 
 The output is `build/macrdp-dist`. The packaging script copies non-system
 dynamic libraries, rewrites load paths, rejects references that escape the
-package, and applies an ad-hoc signature. It does not produce a notarized
-installer and should not be published as a release artifact yet.
+package, and applies an ad-hoc signature. The validation target independently
+checks load paths, architectures, minimum macOS versions, signatures, and a
+packaged `--help` loader smoke check. It does not start a listener or require
+TCC permissions. The payload is not a notarized installer and should not be
+published as a release artifact yet.
 
 For a long-running instance, create an owner-only one-line password file and
 install the supplied per-user LaunchAgent:
@@ -191,8 +197,26 @@ unset macrdp_password
 The service runs in the logged-in Aqua session and writes logs below
 `~/Library/Logs/macrdp-cpp`. Grant TCC permissions to the exact packaged
 executable used by the LaunchAgent. To apply access controls or other server
-options, pass them after `--`. For a screen-only service, append
-`-- --view-only --no-clipboard --no-audio` to the installer command.
+options, pass them after `--`. Because the listener defaults to loopback, a
+remote service must explicitly append
+`-- --bind-address <trusted-interface-address>`.
+For a screen-only service, add `--view-only --no-clipboard --no-audio` after
+the same `--` separator.
+
+Rotate the LaunchAgent's RDP password interactively with:
+
+```bash
+./scripts/rotate_launch_agent_password.sh \
+  "$HOME/Library/Application Support/macrdp-cpp/password"
+```
+
+The helper verifies that the loaded LaunchAgent uses that exact owner-only
+password file, atomically replaces it, and restarts the service. Existing
+sessions are terminated by the restart; verify a new connection with the new
+password and confirm the old password no longer works. A secret manager can
+pipe exactly one password line with `--stdin`. This workflow does not rotate an
+externally managed `--sam-file`; replace that SAM through its own provisioning
+process and restart the service instead.
 
 ## Tests
 

@@ -774,6 +774,16 @@ if(APPLE)
         DEPENDS macrdp-server
         USES_TERMINAL
     )
+
+    add_custom_target(macrdp-package-validate
+        COMMAND ${CMAKE_COMMAND} -E env bash
+            "${CMAKE_CURRENT_SOURCE_DIR}/scripts/validate_macos_package.sh"
+            "${CMAKE_CURRENT_BINARY_DIR}/macrdp-dist"
+            "${CMAKE_OSX_ARCHITECTURES}"
+            "${CMAKE_OSX_DEPLOYMENT_TARGET}"
+        DEPENDS macrdp-package
+        USES_TERMINAL
+    )
 endif()
 
 if(MACRDP_FREERDP_WITH_FFMPEG)
@@ -999,6 +1009,49 @@ add_test(
 set_tests_properties(server_invalid_security PROPERTIES WILL_FAIL TRUE)
 
 add_test(
+    NAME server_tls_requires_insecure_opt_in
+    COMMAND bash
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests/expect_command_failure.sh
+        "requires --allow-insecure-security"
+        $<TARGET_FILE:macrdp-server>
+        --security tls
+        --user macrdp-test-user
+        --password test
+)
+
+add_test(
+    NAME server_rdp_requires_insecure_opt_in
+    COMMAND bash
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests/expect_command_failure.sh
+        "requires --allow-insecure-security"
+        $<TARGET_FILE:macrdp-server>
+        --security rdp
+        --user macrdp-test-user
+        --password test
+)
+
+add_test(
+    NAME server_insecure_opt_in_requires_compatibility_mode
+    COMMAND bash
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests/expect_command_failure.sh
+        "valid only with --security tls or rdp"
+        $<TARGET_FILE:macrdp-server>
+        --allow-insecure-security
+        --user macrdp-test-user
+        --password test
+)
+
+add_test(
+    NAME server_tls_opt_in_reaches_credential_validation
+    COMMAND bash
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests/expect_command_failure.sh
+        "TLS/RDP authentication requires non-empty --user and --password"
+        $<TARGET_FILE:macrdp-server>
+        --security tls
+        --allow-insecure-security
+)
+
+add_test(
     NAME server_invalid_port
     COMMAND macrdp-server
         --port 0
@@ -1061,3 +1114,10 @@ add_test(
         --password test
 )
 set_tests_properties(server_incompatible_h264_encoder PROPERTIES WILL_FAIL TRUE)
+
+add_test(
+    NAME rotate_launch_agent_password
+    COMMAND bash
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests/rotate_launch_agent_password_test.sh
+        ${CMAKE_CURRENT_SOURCE_DIR}/scripts/rotate_launch_agent_password.sh
+)

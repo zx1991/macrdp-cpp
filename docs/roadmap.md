@@ -30,6 +30,12 @@ are acceptance gates rather than promised dates.
 - Prevent private CoreGraphics keyboard state from crossing events or clients,
   require clean modifier probes after loopback profiles, and provide an
   Aqua-capable harness for at least 20 bounded real server start/stop cycles.
+- Default the listener to loopback, require explicit acknowledgement for
+  non-NLA compatibility modes, and provide atomic LaunchAgent credential
+  rotation with exact password-file validation.
+- Build and validate the relocatable developer payload in CI, including its
+  load paths, architectures, minimum macOS versions, signatures, and loader
+  behavior.
 
 ## P0: correctness and lifecycle
 
@@ -46,14 +52,9 @@ and the Windows matrix has recorded results for every interactive path.
 
 ## P1: deployment safety
 
-- Document listener exposure and credential rotation. Keep NLA as the default
-  and make insecure combinations difficult to select accidentally.
 - Add sanitizer builds and lifecycle-focused stress tests. Keep the real
   loopback test opt-in because it changes the system clipboard and injects
   keyboard and pointer events.
-- Add CI jobs that build the distributable bundle and validate its load paths,
-  architectures, minimum macOS version, and launch behavior rather than testing
-  only the build tree.
 
 P1 is complete when an operator can deliberately grant view-only, clipboard,
 and input capabilities, bound session concurrency, and reproduce the package

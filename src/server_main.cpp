@@ -50,8 +50,9 @@ enum class H264EncoderMode {
 
 struct Options {
     std::uint16_t port = 3389;
-    std::string bind_address;
+    std::string bind_address = "127.0.0.1";
     SecurityMode security = SecurityMode::nla;
+    bool allow_insecure_security = false;
     std::string username;
     std::string domain;
     std::string password;
@@ -102,9 +103,10 @@ void print_usage(const char* program) {
         << "\n"
         << "  --preflight                 Check macOS capture/input access and exit\n"
         << "  --port <number>             Listen port (default: 3389)\n"
-        << "  --bind-address <address>    Optional address to bind (default: all)\n"
+        << "  --bind-address <address>    Address to bind (default: 127.0.0.1)\n"
         << "  --max-clients <number>      Concurrent client limit, 1-64 (default: 1)\n"
         << "  --security <nla|tls|rdp>    Security protocol (default: nla)\n"
+        << "  --allow-insecure-security   Required with TLS/RDP compatibility modes\n"
         << "  --view-only                 Disable remote keyboard and pointer input\n"
         << "  --no-clipboard              Disable clipboard redirection\n"
         << "  --bitrate <value>           H.264 rate, e.g. 16M (default: 16M)\n"
@@ -340,6 +342,8 @@ bool parse_options(int argc, char** argv, Options& options) {
                 std::cerr << "--security must be nla, tls, or rdp\n";
                 return false;
             }
+        } else if (argument == "--allow-insecure-security") {
+            options.allow_insecure_security = true;
         } else if (argument == "--bitrate") {
             if (!next_value(index, argc, argv, value)
                 || !parse_bitrate(value, options.h264_bitrate)) {
@@ -454,6 +458,16 @@ bool parse_options(int argc, char** argv, Options& options) {
     if (options.preflight) {
         clear_secret(options.password);
         return true;
+    }
+
+    if (options.security != SecurityMode::nla && !options.allow_insecure_security) {
+        std::cerr << "--security tls/rdp requires --allow-insecure-security;"
+                     " these compatibility modes disable NLA\n";
+        return false;
+    }
+    if (options.security == SecurityMode::nla && options.allow_insecure_security) {
+        std::cerr << "--allow-insecure-security is valid only with --security tls or rdp\n";
+        return false;
     }
 
     if (options.password_from_stdin) {
@@ -889,6 +903,7 @@ int main(int argc, char** argv) {
     std::signal(SIGINT, handle_signal);
     std::signal(SIGTERM, handle_signal);
     std::cout << "macrdp-server listening on port " << options.port
+              << " address=" << options.bind_address
               << " with "
               << (options.security == SecurityMode::nla
                       ? "NLA"

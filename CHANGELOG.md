@@ -67,3 +67,11 @@ This project has not published a stable release yet.
   modifier cleanup without retaining its ephemeral credentials or config.
 - Extended the non-identifying macOS system probe with active, asleep, and
   online display state for observable sleep/wake hardware evidence.
+- Defaulted the RDP listener to `127.0.0.1` and required an explicit
+  `--allow-insecure-security` acknowledgement before selecting TLS or classic
+  RDP compatibility modes without NLA.
+- Added atomic LaunchAgent RDP password rotation with owner, permission,
+  configured-path, and loaded-service checks.
+- Added reproducible package validation for Mach-O load paths, architectures,
+  minimum macOS versions, signatures, and packaged loader behavior, and run it
+  in macOS CI.

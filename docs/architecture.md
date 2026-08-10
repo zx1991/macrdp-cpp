@@ -99,9 +99,11 @@ target and links Apple frameworks only at the platform boundary.
 
 ## Security boundary
 
-The server uses FreeRDP NLA by default and creates its certificate/SAM files in
-a private configuration directory. macOS TCC permissions remain enforced by
-the operating system: Screen Recording is required for capture and Accessibility
+The server listens on loopback and uses FreeRDP NLA by default. Selecting
+another interface is explicit, and non-NLA compatibility modes require a
+separate risk acknowledgement. Certificate and SAM files are created in a
+private configuration directory. macOS TCC permissions remain enforced by the
+operating system: Screen Recording is required for capture and Accessibility
 is required for input injection. The server does not bypass those controls.
 
 An authenticated client receives screen and audio by default, with interactive

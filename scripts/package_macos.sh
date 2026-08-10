@@ -22,6 +22,7 @@ fi
 mkdir -p "$output/bin" "$output/lib"
 output_dir=$(cd "$output" && pwd -P)
 packaged_server="$output_dir/bin/macrdp-server"
+executable_dir=$(dirname "$packaged_server")
 
 # Rebuild the generated payload from the current binary and dependency set.
 # Keep unrelated files in the caller's output directory untouched.
@@ -82,7 +83,7 @@ resolve_dependency() {
             return 0
             ;;
         @executable_path/*)
-            candidate="$output_dir/${dependency#@executable_path/}"
+            candidate="$executable_dir/${dependency#@executable_path/}"
             [[ -f "$candidate" ]] || return 1
             printf '%s\n' "$candidate"
             return 0
@@ -96,7 +97,7 @@ resolve_dependency() {
                         rpath_base="$(dirname "$owner")/${candidate#@loader_path/}"
                         ;;
                     @executable_path/*)
-                        rpath_base="$output_dir/${candidate#@executable_path/}"
+                        rpath_base="$executable_dir/${candidate#@executable_path/}"
                         ;;
                     /*)
                         rpath_base="$candidate"
@@ -167,7 +168,7 @@ while [[ ${#queue[@]} -gt 0 ]]; do
         if [[ ! -e "$destination" ]]; then
             cp -L "$resolved" "$destination"
             chmod u+w "$destination"
-            install_name_tool -id "@loader_path/$name" "$destination"
+            install_name_tool -id "@loader_path/$name" "$destination" 2>/dev/null
         fi
 
         if [[ "$current" == "$packaged_server" ]]; then
@@ -190,7 +191,7 @@ delete_non_system_rpaths() {
     while read -r rpath; do
         [[ -n "$rpath" ]] || continue
         if ! is_system_dependency "$rpath"; then
-            install_name_tool -delete_rpath "$rpath" "$file"
+            install_name_tool -delete_rpath "$rpath" "$file" 2>/dev/null
         fi
     done < <(otool -l "$file" | awk '$1 == "path" { print $2 }')
 }
@@ -274,11 +275,22 @@ done < <(find "$output_dir" -type f \( -name 'macrdp-server' -o -name '*.dylib' 
 
 # install_name_tool invalidates an existing signature. Re-sign the modified
 # payload ad hoc so macOS does not kill the packaged process at load time.
+sign_ad_hoc() {
+    local file=$1
+    local signing_output
+
+    if ! signing_output=$(codesign --force --sign - "$file" 2>&1); then
+        printf 'unable to apply ad-hoc signature to %s\n' "$file" >&2
+        printf '%s\n' "$signing_output" >&2
+        return 1
+    fi
+}
+
 for library in "$output_dir"/lib/*.dylib; do
     [[ -f "$library" ]] || continue
-    codesign --force --sign - "$library" >/dev/null
+    sign_ad_hoc "$library"
 done
-codesign --force --sign - "$packaged_server" >/dev/null
+sign_ad_hoc "$packaged_server"
 
 printf 'Packaged macrdp-server at %s\n' "$output_dir"
 printf 'Non-system dylibs: %s\n' "$(find "$output_dir/lib" -type f | wc -l | tr -d ' ')"

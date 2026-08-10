@@ -35,6 +35,13 @@ Run the local test suite before opening a pull request:
 ctest --test-dir build --output-on-failure
 ```
 
+Changes to packaging, dependencies, deployment targets, or startup options
+should also build and validate the developer payload:
+
+```bash
+cmake --build build --target macrdp-package-validate
+```
+
 Protocol changes should also use the separate FreeRDP loopback client and the
 network profiles described in [docs/testing.md](docs/testing.md). Keep smoke
 test artifacts when diagnosing a failure:

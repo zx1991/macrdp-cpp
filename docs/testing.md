@@ -18,16 +18,18 @@ The local suite covers display dimensions, frame coalescing, VideoToolbox and
 FreeRDP H.264 paths, the asynchronous encoder worker, input ownership and queue
 behavior, ledger-bounded modifier cleanup, signed 9-bit RDP wheel-delta
 translation, asynchronous completion and timeout cleanup semantics, injected
-capture lifecycle races, configuration permissions, and server argument
-validation. It does not require Screen Recording permission for the synthetic
-encoder and state-machine tests.
+capture lifecycle races, configuration permissions, password rotation, and
+server argument validation. It does not require Screen Recording permission
+for the synthetic encoder and state-machine tests.
 
 The access-policy test instantiates the real macOS shadow subsystem without
 starting ScreenCaptureKit. It verifies that view-only synchronize, keyboard,
 Unicode, absolute, relative, and extended-pointer callbacks do not mutate the
 shadow input state; it also confirms that interactive pointer callbacks remain
 active and disabled clipboard initialization does not create a channel context.
-Server argument tests reject concurrent-client limits outside 1 through 64.
+Server argument tests reject concurrent-client limits outside 1 through 64 and
+require explicit acknowledgement before selecting a non-NLA compatibility
+mode.
 
 The asynchronous completion test covers completion, duplicate and late result
 rejection, timeout cleanup installed both before and after a timeout, and
@@ -44,6 +46,22 @@ wheel callbacks reach the server's real input path, but it cannot observe the
 resulting macOS scroll distance or direction directly. A release candidate
 therefore still needs a manual vertical and horizontal wheel check from the
 supported Windows client matrix.
+
+## Developer package validation
+
+Build and validate the relocatable developer payload with:
+
+```bash
+cmake --build build --target macrdp-package-validate
+```
+
+The target rebuilds `build/macrdp-dist`, then independently checks that every
+Mach-O payload contains the server architectures, requires no macOS version
+newer than the documented macOS 15 baseline, resolves only system or in-package
+load paths, and has a valid ad-hoc signature. It runs the packaged executable
+with `--help` to exercise the dynamic loader without creating credentials,
+requesting TCC permissions, opening a listener, or injecting input. CI runs the
+same target.
 
 ## Exact-server preflight and hardware evidence
 

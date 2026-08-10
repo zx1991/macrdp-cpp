@@ -32,10 +32,14 @@ maintainer can reproduce or triage them.
 
 ## Deployment notes
 
-The default security mode is NLA and empty passwords are rejected. TLS
-certificates are generated under the configured private directory. The
-`/cert:ignore` option shown in the loopback test is for a local test client
-only and must not be used as a general deployment recommendation.
+The server listens only on `127.0.0.1` unless `--bind-address` explicitly
+selects another interface. The default security mode is NLA and empty passwords
+are rejected. TLS certificates are generated under the configured private
+directory. The `/cert:ignore` option shown in the loopback test is for a local
+test client only and must not be used as a general deployment recommendation.
+The `tls` and `rdp` compatibility modes disable NLA and require the additional
+`--allow-insecure-security` acknowledgement. Do not use them as routine
+deployment modes.
 
 The server accepts one concurrent client by default; `--max-clients` can set an
 explicit limit from 1 through 64, enforced before FreeRDP accepts a new shadow
@@ -49,3 +53,11 @@ Bind to the narrowest practical interface and restrict network reachability
 with a host firewall, trusted network, or VPN. Capability flags limit what an
 authenticated session can do; they are not a substitute for listener isolation,
 strong unique credentials, or rotating credentials after suspected exposure.
+
+For a LaunchAgent installed by this project, rotate the RDP credential with
+`scripts/rotate_launch_agent_password.sh`. It validates the configured
+owner-only password file, replaces it atomically, and restarts the service so
+the old in-memory credential and existing sessions are discarded. Test the new
+credential and reject the old one before considering rotation complete. The
+helper does not manage an external `--sam-file`; operators using one must
+replace it through their SAM provisioning process and restart the service.
