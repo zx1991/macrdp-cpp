@@ -515,7 +515,7 @@ bool post_keyboard_event(
     UINT16 flags,
     UINT8 code,
     bool autorepeat = false) {
-    if (subsystem == nullptr || subsystem->input_event_source == nullptr) {
+    if (subsystem == nullptr) {
         return false;
     }
 
@@ -531,11 +531,17 @@ bool post_keyboard_event(
     // A missing RELEASE bit represents a key press, including the initial
     // press where KBD_FLAGS_DOWN is not set.
     const bool key_down = (flags & KBD_FLAGS_RELEASE) == 0;
-    CGEventRef event = CGEventCreateKeyboardEvent(
-        subsystem->input_event_source,
-        *key_code,
-        key_down);
+    // Reusing one private source across clients can leave its internal key
+    // state latched even after CoreGraphics accepts the matching key-up. A
+    // fresh private source preserves local-HID isolation without carrying
+    // synthetic modifier state into the next keyboard event or client.
+    CGEventSourceRef event_source = CGEventSourceCreate(kCGEventSourceStatePrivate);
+    if (event_source == nullptr) {
+        return false;
+    }
+    CGEventRef event = CGEventCreateKeyboardEvent(event_source, *key_code, key_down);
     if (event == nullptr) {
+        CFRelease(event_source);
         return false;
     }
 
@@ -574,6 +580,7 @@ bool post_keyboard_event(
              static_cast<std::uint64_t>(posted_event_flags));
     CGEventPost(kCGHIDEventTap, event);
     CFRelease(event);
+    CFRelease(event_source);
     return true;
 }
 

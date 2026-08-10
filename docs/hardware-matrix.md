@@ -94,7 +94,7 @@ terminal summary or add the retained log with `--server-log`.
 | AUTO-04 | Loopback `wifi --reconnect` | Variable low-bandwidth link and explicit reconnect cases pass. | `NOT RUN` | |
 | AUTO-05 | Loopback `outage` | Periodic forwarding stalls and reconnect cases pass. | `NOT RUN` | |
 | AUTO-06 | Loopback `bad --reconnect` | Extreme backpressure completes within the configured budgets. | `NOT RUN` | |
-| AUTO-07 | Post-run system probe | All physical modifier key states are false, except an intentionally enabled Caps Lock toggle. | `NOT RUN` | |
+| AUTO-07 | Harness post-run system probe | Every automated profile reports zero modifier flags and no held modifier key. | `NOT RUN` | |
 
 Run network profiles in the documented order: `direct`, `wan`, `wifi`,
 `outage`, then `bad`. See [Testing](testing.md) for proxy requirements and
@@ -116,6 +116,19 @@ and the exact error for every deliberate failure.
 | LIFE-07 | System sleep/wake | Sleep and wake the Mac with a connected client. | No deadlock or orphan server; reconnect and input ownership recover cleanly. | `NOT RUN` | |
 | LIFE-08 | Display reconfiguration | Change resolution/scaling and attach or detach a supported display. | Frames remain valid or the server fails cleanly; requested resize still works afterward. | `NOT RUN` | |
 | LIFE-09 | Repeated lifecycle | Start, stop, and restart the same signed binary at least 20 times. | Every stop is bounded; no process, listener, or held input state remains. | `NOT RUN` | |
+
+Automate `LIFE-09` against the unchanged server binary. Use `--aqua` when the
+controller is an SSH session; the harness retains no credential or generated
+server configuration:
+
+```bash
+tools/run_hardware_lifecycle.sh \
+  --server build/macrdp-server \
+  --aqua
+```
+
+Record the printed evidence path, cycle count, maximum observed startup and
+shutdown durations, final modifier state, server hash, and harness result.
 
 After each lifecycle case, create another bundle and compare its binary hash,
 display geometry, preflight result, and modifier state with the baseline.

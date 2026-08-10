@@ -76,6 +76,31 @@ logs and `--skip-preflight` when only post-failure metadata is needed. Supplied
 logs are copied verbatim and can contain credentials or other sensitive data.
 Raw bundles belong in a private temporary location, not the repository.
 
+The repeated lifecycle harness starts and gracefully stops the exact server 20
+times by default. Each cycle uses a fresh owner-only configuration directory,
+waits for the real listener log and socket, sends `SIGTERM`, and requires the
+process and listener to disappear within the configured bound. It uses
+`--view-only --no-clipboard --no-audio`, generates an ephemeral password in
+memory, and fails immediately if a per-cycle system probe finds an active
+modifier. Run it from a graphical terminal with:
+
+```bash
+tools/run_hardware_lifecycle.sh --server build/macrdp-server
+```
+
+From SSH, place the harness in the logged-in user's Aqua session:
+
+```bash
+tools/run_hardware_lifecycle.sh \
+  --server build/macrdp-server \
+  --aqua
+```
+
+The command prints an owner-only evidence directory containing the summary,
+per-cycle logs, and modifier probes. Generated certificates, SAM data, and the
+test password are not retained. Use at least the default 20 cycles when
+recording `LIFE-09` in the supported-hardware matrix.
+
 Protocol automation does not replace physical behavior checks. Record TCC
 denial, lock/sleep, display reconfiguration, real `mstsc`, wheel direction,
 Retina, audio, and post-input modifier results in the
@@ -220,12 +245,14 @@ The first input batch also sends two repeated key-down events for F17. The
 server reports them as `keyboard_repeats` and marks the injected macOS events
 with the autorepeat flag. This covers both slow-path `KBD_FLAGS_DOWN` input and
 FastPath input, where the repeat bit is not carried on the wire. CoreGraphics
-adds SecondaryFn when it constructs a logical function-key event and its private
-event source can retain stale device-dependent modifier flags across later
-events. Before posting the already-logical RDP key, the server preserves only
-non-modifier source attributes and rebuilds Control, Shift, Option, and Command
+adds SecondaryFn when it constructs a logical function-key event, and a reused
+private event source can retain synthetic key state across clients. The server
+creates a fresh private source for every keyboard event, preserves only
+non-modifier source attributes, and rebuilds Control, Shift, Option, and Command
 from the remote ownership ledger. A locally held hardware modifier is outside
-the private remote event source and remains untouched.
+the private remote event source and remains untouched. After all server phases
+stop, the harness runs the system probe and fails if any modifier key or flag
+remains active.
 
 The direct profile's slow-client case allows two seconds after connection for
 graphics and dynamic virtual channels to initialize, then adds the configured

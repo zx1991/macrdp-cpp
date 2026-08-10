@@ -544,6 +544,32 @@ fail() {
 	failed=1
 }
 
+check_post_run_modifier_state() {
+	probe="$script_dir/macrdp_system_probe.swift"
+	if [ ! -x "$probe" ]; then
+		fail "post-run modifier probe is missing or not executable: $probe"
+		return
+	fi
+	if ! modifier_state=$("$probe" 2>&1); then
+		printf '%s\n' "$modifier_state" >&2
+		fail "post-run modifier probe failed"
+		return
+	fi
+	modifier_flags=$(printf '%s\n' "$modifier_state" \
+		| awk -F= '$1 == "modifier_flags" { print $2; exit }')
+	modifier_key_count=$(printf '%s\n' "$modifier_state" \
+		| awk -F= '$1 ~ /^key_.*_down$/ { count++ } END { print count + 0 }')
+	invalid_modifiers=$(printf '%s\n' "$modifier_state" \
+		| awk -F= '$1 ~ /^key_.*_down$/ && $2 != "false" { print $1 "=" $2 }')
+	echo "post-run modifiers: flags=${modifier_flags:-missing}"
+	if [ "$modifier_flags" != "0x0000000000000000" ] \
+		|| [ "$modifier_key_count" -ne 10 ] \
+		|| [ -n "$invalid_modifiers" ]; then
+		printf '%s\n' "$modifier_state" >&2
+		fail "loopback left a macOS modifier active"
+	fi
+}
+
 wait_for_log() {
 	log_file=$1
 	pattern=$2
@@ -1215,6 +1241,7 @@ stop_server
 if [ "$run_nogfx" = "1" ]; then
 	check_input_pipeline nogfx
 fi
+check_post_run_modifier_state
 
 if [ "$failed" -ne 0 ]; then
 	exit 1

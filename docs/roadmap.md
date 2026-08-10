@@ -27,6 +27,9 @@ are acceptance gates rather than promised dates.
   bundle, and a repeatable P0 acceptance matrix whose built-in probes do not
   query hardware serial numbers, network addresses, credentials, or keychain
   contents.
+- Prevent private CoreGraphics keyboard state from crossing events or clients,
+  require clean modifier probes after loopback profiles, and provide an
+  Aqua-capable harness for at least 20 bounded real server start/stop cycles.
 
 ## P0: correctness and lifecycle
 

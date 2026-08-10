@@ -213,6 +213,11 @@ sizes, slow clients, and shaped network profiles.
 See [Testing](docs/testing.md) for build commands, safety notes, profile
 parameters, expected metrics, and failure diagnosis.
 
+The view-only hardware lifecycle harness can exercise 20 bounded server
+start/stop cycles without connecting a client. From SSH, run
+`tools/run_hardware_lifecycle.sh --aqua`; its owner-only evidence includes
+per-cycle listener, shutdown, and modifier-state checks.
+
 The standalone capture/encoder example remains available:
 
 ```bash

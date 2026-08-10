@@ -50,6 +50,9 @@ This project has not published a stable release yet.
 - Rebuilt posted Control, Shift, Option, and Command flags from the remote input
   ownership ledger, removing CoreGraphics' synthetic SecondaryFn and stale
   device-dependent flags so one key event cannot contaminate later modifiers.
+- Created a fresh private CoreGraphics source for every injected keyboard event
+  and made loopback profiles fail on active post-run modifiers, preventing
+  synthetic key state from leaking across clients.
 - Corrected the slow-client loopback warm-up to use the established connection
   timestamp, preserving protocol setup before deliberate event-loop stalls.
 - Prevented the loopback clipboard verifier from treating the expected
@@ -59,3 +62,6 @@ This project has not published a stable release yet.
   path can run preflight through a temporary Aqua LaunchAgent without loading
   credentials from stdin, files, or the environment, creating server
   configuration, or opening a listener.
+- Added an Aqua-capable hardware lifecycle harness that verifies repeated
+  bounded startup, SIGTERM shutdown, listener cleanup, binary identity, and
+  modifier cleanup without retaining its ephemeral credentials or config.

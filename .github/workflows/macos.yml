@@ -19,6 +19,7 @@ jobs:
       - name: Validate hardware diagnostic tools
         run: |
           bash -n tools/collect_hardware_diagnostics.sh
+          bash -n tools/run_hardware_lifecycle.sh
           xcrun swiftc -typecheck tools/macrdp_system_probe.swift
 
       - name: Install dependencies
