@@ -30,8 +30,10 @@ FreeRDP client callback -> per-client input queue -> macOS input worker
 
 Audio and clipboard have separate service paths. Audio capture/pacing runs in
 its own loop and publishes bounded PCM chunks to the FreeRDP shadow clients.
-The clipboard monitor observes `NSPasteboard`, while channel callbacks perform
-format negotiation and data transfer under a channel lock. When clipboard
+The clipboard monitor observes `NSPasteboard` after the client capability
+exchange, while channel callbacks perform format negotiation and data transfer
+under a per-connection operation lock. Ordered remote data responses consume a
+bounded FIFO of formats that were actually requested. When clipboard
 redirection is disabled, the adapter short-circuits before it creates a channel
 context or monitor thread.
 
@@ -78,6 +80,13 @@ removed, capture waits for the same ID to return instead of switching screens.
   transport input and control-channel events before starting the next frame,
   and keeps completed H.264 output pending until the transport is writable, so
   video backpressure does not delay input or clipboard control traffic.
+- Clipboard publication does not begin until FreeRDP receives client
+  capabilities. Monitor publications and channel callbacks are serialized per
+  connection, and only a response correlated with an outstanding text request
+  may mutate `NSPasteboard`. Disconnect marks that transfer state inactive,
+  wakes and joins the monitor, then lets FreeRDP stop and join its receive
+  thread before the context is released. A reconnect starts with an empty
+  request queue and independent publication state.
 - Input ownership is per RDP client. Keyboard, Unicode, and pointer events share
   one lifetime-scoped private CoreGraphics event source, keeping remote
   modifier and button state independent from local hardware input. Disconnect

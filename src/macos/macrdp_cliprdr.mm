@@ -4,12 +4,14 @@
 #include <freerdp/server/cliprdr.h>
 #include <freerdp/server/shadow.h>
 
+#include "macrdp/clipboard_transfer.hpp"
 #include "macrdp/cliprdr_adapter.h"
 
 #include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cinttypes>
+#include <condition_variable>
 #include <cstdint>
 #include <cstring>
 #include <memory>
@@ -26,8 +28,6 @@ namespace {
 
 std::atomic_bool g_clipboard_enabled{true};
 
-constexpr UINT32 kCfText = 1;
-constexpr UINT32 kCfUnicodeText = 13;
 constexpr std::size_t kMaxClipboardBytes = 16U * 1024U * 1024U;
 std::mutex pasteboard_mutex;
 
@@ -37,15 +37,16 @@ struct PasteboardSnapshot {
 };
 
 struct CliprdrState {
-    rdpShadowClient* client = nullptr;
     CliprdrServerContext* context = nullptr;
     std::atomic_bool stop_requested{false};
     std::thread monitor_thread;
-    std::mutex channel_mutex;
-    std::mutex clipboard_mutex;
+    std::mutex monitor_mutex;
+    std::condition_variable monitor_cv;
+    std::mutex operation_mutex;
+    macrdp::ClipboardTransferState transfer;
+    bool channel_ready = false;
     NSInteger last_change_count = -1;
     std::string last_published_text;
-    UINT32 pending_remote_format = kCfUnicodeText;
 };
 
 CliprdrState* state_for(CliprdrServerContext* context) {
@@ -111,7 +112,7 @@ std::vector<BYTE> encode_text(const std::string& text, UINT32 format_id) {
             return result;
         }
 
-        NSStringEncoding encoding = format_id == kCfUnicodeText
+        NSStringEncoding encoding = format_id == macrdp::clipboard_format_unicode_text
             ? NSUTF16LittleEndianStringEncoding
             : NSWindowsCP1252StringEncoding;
         NSData* data = [value dataUsingEncoding:encoding allowLossyConversion:YES];
@@ -119,10 +120,12 @@ std::vector<BYTE> encode_text(const std::string& text, UINT32 format_id) {
             return result;
         }
 
-        result.resize([data length] + (format_id == kCfUnicodeText ? 2U : 1U));
+        result.resize(
+            [data length]
+            + (format_id == macrdp::clipboard_format_unicode_text ? 2U : 1U));
         std::memcpy(result.data(), [data bytes], [data length]);
         result[result.size() - 1U] = 0;
-        if (format_id == kCfUnicodeText) {
+        if (format_id == macrdp::clipboard_format_unicode_text) {
             result[result.size() - 2U] = 0;
         }
     }
@@ -130,12 +133,14 @@ std::vector<BYTE> encode_text(const std::string& text, UINT32 format_id) {
 }
 
 std::optional<std::string> decode_text(const BYTE* data, std::size_t size, UINT32 format_id) {
-    if ((data == nullptr && size != 0) || size > kMaxClipboardBytes) {
+    if ((data == nullptr && size != 0) || size > kMaxClipboardBytes
+        || !macrdp::ClipboardTransferState::has_valid_payload_alignment(
+            format_id,
+            size)) {
         return std::nullopt;
     }
 
-    if (format_id == kCfUnicodeText) {
-        size &= ~static_cast<std::size_t>(1U);
+    if (format_id == macrdp::clipboard_format_unicode_text) {
         while (size >= 2U && data[size - 1U] == 0 && data[size - 2U] == 0) {
             size -= 2U;
         }
@@ -146,7 +151,7 @@ std::optional<std::string> decode_text(const BYTE* data, std::size_t size, UINT3
     }
 
     @autoreleasepool {
-        NSStringEncoding encoding = format_id == kCfUnicodeText
+        NSStringEncoding encoding = format_id == macrdp::clipboard_format_unicode_text
             ? NSUTF16LittleEndianStringEncoding
             : NSWindowsCP1252StringEncoding;
         NSString* value = [[NSString alloc]
@@ -172,8 +177,8 @@ UINT send_local_format_list(CliprdrState* state, const PasteboardSnapshot& snaps
     CLIPRDR_FORMAT formats[2] = {};
     UINT32 format_count = 0;
     if (snapshot.text.has_value()) {
-        formats[format_count++].formatId = kCfUnicodeText;
-        formats[format_count++].formatId = kCfText;
+        formats[format_count++].formatId = macrdp::clipboard_format_unicode_text;
+        formats[format_count++].formatId = macrdp::clipboard_format_text;
     }
 
     CLIPRDR_FORMAT_LIST list = {};
@@ -181,25 +186,22 @@ UINT send_local_format_list(CliprdrState* state, const PasteboardSnapshot& snaps
     list.numFormats = format_count;
     list.formats = formats;
 
-    std::lock_guard lock(state->channel_mutex);
     return state->context->ServerFormatList(state->context, &list);
 }
 
-void publish_if_changed(CliprdrState* state, bool force) {
-    if (state == nullptr || state->stop_requested.load()) {
+void publish_if_changed_locked(CliprdrState* state, bool force) {
+    if (state == nullptr || state->stop_requested.load(std::memory_order_acquire)
+        || !state->channel_ready) {
         return;
     }
 
     const auto snapshot = read_pasteboard();
-    {
-        std::lock_guard lock(state->clipboard_mutex);
-        if (!force && snapshot.change_count == state->last_change_count) {
-            return;
-        }
-        if (!force && snapshot.text.value_or(std::string{}) == state->last_published_text) {
-            state->last_change_count = snapshot.change_count;
-            return;
-        }
+    if (!force && snapshot.change_count == state->last_change_count) {
+        return;
+    }
+    if (!force && snapshot.text.value_or(std::string{}) == state->last_published_text) {
+        state->last_change_count = snapshot.change_count;
+        return;
     }
 
     const UINT status = send_local_format_list(state, snapshot);
@@ -208,16 +210,31 @@ void publish_if_changed(CliprdrState* state, bool force) {
         return;
     }
 
-    std::lock_guard lock(state->clipboard_mutex);
     state->last_change_count = snapshot.change_count;
     state->last_published_text = snapshot.text.value_or(std::string{});
+}
+
+void publish_if_changed(CliprdrState* state, bool force) {
+    if (state == nullptr) {
+        return;
+    }
+    std::lock_guard operation_lock(state->operation_mutex);
+    publish_if_changed_locked(state, force);
 }
 
 UINT client_capabilities(
     CliprdrServerContext* context,
     const CLIPRDR_CAPABILITIES*) {
     auto* state = state_for(context);
-    publish_if_changed(state, true);
+    if (state == nullptr) {
+        return ERROR_INVALID_HANDLE;
+    }
+    std::lock_guard operation_lock(state->operation_mutex);
+    if (state->stop_requested.load(std::memory_order_acquire)) {
+        return CHANNEL_RC_OK;
+    }
+    state->channel_ready = true;
+    publish_if_changed_locked(state, true);
     return CHANNEL_RC_OK;
 }
 
@@ -229,53 +246,57 @@ UINT client_format_list(
         || (format_list->numFormats != 0 && format_list->formats == nullptr)) {
         return ERROR_INVALID_PARAMETER;
     }
+    std::lock_guard operation_lock(state->operation_mutex);
+    if (state->stop_requested.load(std::memory_order_acquire)) {
+        return CHANNEL_RC_OK;
+    }
 
     UINT32 requested_format = 0;
     for (UINT32 index = 0; index < format_list->numFormats; ++index) {
         const UINT32 format_id = format_list->formats[index].formatId;
-        if (format_id == kCfUnicodeText) {
-            requested_format = kCfUnicodeText;
+        if (format_id == macrdp::clipboard_format_unicode_text) {
+            requested_format = macrdp::clipboard_format_unicode_text;
             break;
         }
-        if (format_id == kCfText) {
-            requested_format = kCfText;
+        if (format_id == macrdp::clipboard_format_text) {
+            requested_format = macrdp::clipboard_format_text;
         }
     }
 
-    if (requested_format == 0) {
-        CLIPRDR_FORMAT_LIST_RESPONSE response = {};
-        response.common.msgType = CB_FORMAT_LIST_RESPONSE;
-        response.common.msgFlags = CB_RESPONSE_FAIL;
-
-        std::lock_guard lock(state->channel_mutex);
-        if (context->ServerFormatListResponse == nullptr) {
-            return ERROR_INVALID_HANDLE;
-        }
-        return context->ServerFormatListResponse(context, &response);
+    if (context->ServerFormatListResponse == nullptr) {
+        return ERROR_INVALID_HANDLE;
     }
 
     CLIPRDR_FORMAT_LIST_RESPONSE response = {};
     response.common.msgType = CB_FORMAT_LIST_RESPONSE;
-    response.common.msgFlags = CB_RESPONSE_OK;
+    response.common.msgFlags = requested_format == 0 ? CB_RESPONSE_FAIL : CB_RESPONSE_OK;
+
+    if (requested_format == 0) {
+        return context->ServerFormatListResponse(context, &response);
+    }
+    if (context->ServerFormatDataRequest == nullptr) {
+        return ERROR_INVALID_HANDLE;
+    }
+    if (!state->transfer.begin_remote_request(requested_format)) {
+        response.common.msgFlags = CB_RESPONSE_FAIL;
+        WLog_WARN(TAG, "Remote clipboard request queue is full or stopped");
+        return context->ServerFormatListResponse(context, &response);
+    }
 
     CLIPRDR_FORMAT_DATA_REQUEST request = {};
     request.common.msgType = CB_FORMAT_DATA_REQUEST;
     request.requestedFormatId = requested_format;
-    {
-        std::lock_guard lock(state->clipboard_mutex);
-        state->pending_remote_format = requested_format;
-    }
 
-    std::lock_guard lock(state->channel_mutex);
-    if (context->ServerFormatListResponse == nullptr
-        || context->ServerFormatDataRequest == nullptr) {
-        return ERROR_INVALID_HANDLE;
-    }
     const UINT response_status = context->ServerFormatListResponse(context, &response);
     if (response_status != CHANNEL_RC_OK) {
+        (void)state->transfer.cancel_latest_remote_request(requested_format);
         return response_status;
     }
-    return context->ServerFormatDataRequest(context, &request);
+    const UINT request_status = context->ServerFormatDataRequest(context, &request);
+    if (request_status != CHANNEL_RC_OK) {
+        (void)state->transfer.cancel_latest_remote_request(requested_format);
+    }
+    return request_status;
 }
 
 UINT client_format_data_request(
@@ -285,9 +306,13 @@ UINT client_format_data_request(
     if (state == nullptr || request == nullptr) {
         return ERROR_INVALID_PARAMETER;
     }
+    std::lock_guard operation_lock(state->operation_mutex);
+    if (state->stop_requested.load(std::memory_order_acquire)) {
+        return CHANNEL_RC_OK;
+    }
 
-    const bool supported = request->requestedFormatId == kCfUnicodeText
-        || request->requestedFormatId == kCfText;
+    const bool supported = macrdp::ClipboardTransferState::is_text_format(
+        request->requestedFormatId);
     const auto snapshot = read_pasteboard();
     const auto data = supported && snapshot.text.has_value()
         ? encode_text(*snapshot.text, request->requestedFormatId)
@@ -301,7 +326,6 @@ UINT client_format_data_request(
     response.common.dataLen = static_cast<UINT32>(data.size());
     response.requestedFormatData = data.empty() ? nullptr : data.data();
 
-    std::lock_guard lock(state->channel_mutex);
     if (context->ServerFormatDataResponse == nullptr) {
         return ERROR_INVALID_HANDLE;
     }
@@ -315,29 +339,33 @@ UINT client_format_data_response(
     if (state == nullptr || response == nullptr) {
         return ERROR_INVALID_PARAMETER;
     }
-    if ((response->common.msgFlags & CB_RESPONSE_FAIL) != 0) {
+    std::lock_guard operation_lock(state->operation_mutex);
+    if (state->stop_requested.load(std::memory_order_acquire)) {
         return CHANNEL_RC_OK;
     }
 
-    UINT32 format_id = kCfUnicodeText;
-    {
-        std::lock_guard lock(state->clipboard_mutex);
-        format_id = state->pending_remote_format;
+    const auto format_id = state->transfer.finish_remote_request();
+    if (!format_id.has_value()) {
+        WLog_WARN(TAG, "Ignoring unsolicited remote clipboard data response");
+        return CHANNEL_RC_OK;
+    }
+    if ((response->common.msgFlags & CB_RESPONSE_FAIL) != 0
+        || (response->common.msgFlags & CB_RESPONSE_OK) == 0) {
+        return CHANNEL_RC_OK;
     }
     const auto text = decode_text(
         response->requestedFormatData,
         response->common.dataLen,
-        format_id);
+        *format_id);
     WLog_INFO(TAG,
               "Received client clipboard data: format=%" PRIu32 " bytes=%" PRIu32,
-              format_id,
+              *format_id,
               response->common.dataLen);
     if (!text.has_value() || !write_pasteboard(*text)) {
         return ERROR_INVALID_DATA;
     }
 
     const auto snapshot = read_pasteboard();
-    std::lock_guard lock(state->clipboard_mutex);
     state->last_change_count = snapshot.change_count;
     state->last_published_text = *text;
     return CHANNEL_RC_OK;
@@ -362,9 +390,17 @@ UINT client_unlock_clipboard_data(
 }
 
 void clipboard_monitor(CliprdrState* state) {
-    while (!state->stop_requested.load()) {
+    std::unique_lock stop_lock(state->monitor_mutex);
+    while (!state->stop_requested.load(std::memory_order_acquire)) {
+        stop_lock.unlock();
         publish_if_changed(state, false);
-        std::this_thread::sleep_for(std::chrono::milliseconds{250});
+        stop_lock.lock();
+        state->monitor_cv.wait_for(
+            stop_lock,
+            std::chrono::milliseconds{250},
+            [state] {
+                return state->stop_requested.load(std::memory_order_acquire);
+            });
     }
 }
 
@@ -389,7 +425,6 @@ extern "C" BOOL macrdp_shadow_cliprdr_init(rdpShadowClient* client) {
         return FALSE;
     }
 
-    state->client = client;
     state->context = context;
     context->custom = state.get();
     context->useLongFormatNames = FALSE;
@@ -436,7 +471,13 @@ extern "C" void macrdp_shadow_cliprdr_uninit(rdpShadowClient* client) {
     auto* context = client->cliprdr;
     auto* state = state_for(context);
     if (state != nullptr) {
-        state->stop_requested.store(true);
+        {
+            std::lock_guard operation_lock(state->operation_mutex);
+            state->stop_requested.store(true, std::memory_order_release);
+            state->channel_ready = false;
+            state->transfer.stop();
+        }
+        state->monitor_cv.notify_all();
         if (state->monitor_thread.joinable()) {
             state->monitor_thread.join();
         }
@@ -445,6 +486,7 @@ extern "C" void macrdp_shadow_cliprdr_uninit(rdpShadowClient* client) {
         (void)context->Stop(context);
     }
     client->cliprdr = nullptr;
+    context->custom = nullptr;
     cliprdr_server_context_free(context);
     delete state;
 }

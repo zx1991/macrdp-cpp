@@ -66,6 +66,11 @@ are acceptance gates rather than promised dates.
   generation-tagged surface, capture, and input geometry. Deterministic tests
   cover main-display, resolution/scaling, rotation, negative-origin, Retina,
   detach/reconnect, and stale-callback transitions; exact IDs never fall back.
+- Gate clipboard publication on client capabilities, correlate ordered remote
+  responses with a bounded per-connection request queue, and stop monitor and
+  callback side effects before releasing a disconnected channel. Deterministic
+  tests cover queue bounds, rollback, unsolicited responses, and reconnect
+  isolation without touching `NSPasteboard`.
 
 ## P0: correctness and lifecycle
 

@@ -1154,6 +1154,10 @@ add_executable(macrdp-input-ownership-test
     src/input_ownership_test.cpp
 )
 
+add_executable(macrdp-clipboard-transfer-test
+    src/clipboard_transfer_test.cpp
+)
+
 add_executable(macrdp-async-completion-test
     src/async_completion_test.cpp
 )
@@ -1204,6 +1208,16 @@ target_compile_options(macrdp-input-ownership-test PRIVATE
 )
 
 target_include_directories(macrdp-input-ownership-test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+
+target_compile_options(macrdp-clipboard-transfer-test PRIVATE
+    -Wall
+    -Wextra
+    -Wpedantic
+)
+
+target_include_directories(macrdp-clipboard-transfer-test PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
 
@@ -1290,6 +1304,11 @@ add_test(
 add_test(
     NAME input_ownership
     COMMAND macrdp-input-ownership-test
+)
+
+add_test(
+    NAME clipboard_transfer
+    COMMAND macrdp-clipboard-transfer-test
 )
 
 add_test(
@@ -1502,6 +1521,7 @@ add_test(
 set_tests_properties(
     access_policy
     async_completion
+    clipboard_transfer
     display_capture_lifecycle
     display_topology
     h264_worker

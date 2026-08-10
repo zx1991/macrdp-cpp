@@ -14,6 +14,10 @@ This project has not published a stable release yet.
   loopback comparisons.
 - Serialized macOS pasteboard access and expanded shaped-link reconnect,
   resize, and clipboard-change validation.
+- Added a capability-gated clipboard monitor, bounded FIFO correlation for
+  remote data responses, and a disconnect barrier that rejects unsolicited,
+  failed, malformed, and stopped-connection clipboard data before pasteboard
+  mutation.
 - Added explicit `--reconnect` and `--no-reconnect` controls for running the
   long-budget Wi-Fi and bad-link reconnect profiles.
 - Added raw keyboard-path diagnostics, queue-delay metrics, and loopback

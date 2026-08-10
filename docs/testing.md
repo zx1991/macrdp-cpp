@@ -18,11 +18,13 @@ The local suite covers display selection, bounded output dimensions, Retina
 and negative-origin input mapping, generation-aware frame coalescing, direct
 VideoToolbox AVC420, FreeRDP AVC420 and AVC444 paths, the asynchronous encoder
 worker, input ownership and queue behavior, ledger-bounded modifier cleanup,
-signed 9-bit RDP wheel-delta translation, asynchronous completion and timeout cleanup
-semantics, injected capture lifecycle races, configuration permissions,
-password rotation, the complete versioned install/upgrade/rollback/uninstall
-state machine, and server argument validation. It does not require Screen
-Recording permission for the synthetic encoder and state-machine tests.
+signed 9-bit RDP wheel-delta translation, bounded clipboard response
+correlation and reconnect isolation, asynchronous completion and timeout
+cleanup semantics, injected capture lifecycle races, configuration
+permissions, password rotation, the complete versioned
+install/upgrade/rollback/uninstall state machine, and server argument
+validation. It does not require Screen Recording permission for the synthetic
+encoder and state-machine tests.
 
 The access-policy test instantiates the real macOS shadow subsystem without
 starting ScreenCaptureKit. It verifies that view-only synchronize, keyboard,
@@ -32,6 +34,12 @@ active and disabled clipboard initialization does not create a channel context.
 Server argument tests reject concurrent-client limits outside 1 through 64 and
 require explicit acknowledgement before selecting a non-NLA compatibility
 mode.
+
+The clipboard transfer test uses only portable fixed-capacity state and never
+reads or writes `NSPasteboard`. It covers FIFO response correlation, failed-send
+rollback, queue bounds and wraparound, unsupported or unsolicited responses,
+disconnect cleanup, and fresh state on reconnect. Real clipboard content and
+client behavior remain in the opt-in loopback and Windows matrices.
 
 `macrdp-server --list-displays` is a non-capture diagnostic that reports active
 CoreGraphics IDs, pixel and point sizes, and global origins without credentials
