@@ -98,3 +98,10 @@ This project has not published a stable release yet.
 - Disabled unused FreeRDP Azure AD and optional JSON backends so clean release
   builds cannot acquire an opportunistic cJSON runtime dependency from the
   host environment.
+- Added a versioned per-user installation manager with complete SBOM hash and
+  signature verification, stable LaunchAgent paths, atomic upgrade, automatic
+  failed-restart recovery, reversible rollback, state-preserving uninstall,
+  and explicit state purge semantics.
+- Added deterministic installation lifecycle coverage using temporary package,
+  HOME, LaunchAgent, certificate, and credential state without touching a real
+  service or macOS TCC permissions.

@@ -65,9 +65,15 @@ components.each do |component|
   end
 end
 
-actual_payload = ["bin/macrdp-server"] + Dir.glob(package_dir.join("lib", "*.dylib").to_s)
-                                               .map { |path| Pathname.new(path).relative_path_from(package_dir).to_s }
-                                               .sort
+actual_payload = %w[
+  bin/macrdp-install-launch-agent
+  bin/macrdp-manage
+  bin/macrdp-rotate-password
+  bin/macrdp-server
+  bin/macrdp-verify-package
+] + Dir.glob(package_dir.join("lib", "*.dylib").to_s)
+       .map { |path| Pathname.new(path).relative_path_from(package_dir).to_s }
+       .sort
 unless packaged_hashes.keys.sort == actual_payload.sort
   missing = actual_payload - packaged_hashes.keys
   extra = packaged_hashes.keys - actual_payload

@@ -64,9 +64,10 @@ other dependencies must resolve to a specific Homebrew Cellar version. A file
 with conflicting origins, an unknown dependency, or an unexpected FFmpeg
 component fails packaging.
 
-Validation requires every binary and dylib to have an SBOM SHA-256 entry,
-every component to declare a license and non-empty license directory, and every
-generated compliance file to have a verified SHA-256 entry. It also rejects
+Validation requires every binary, management tool, and dylib to have an SBOM
+SHA-256 entry, every component to declare a license and non-empty license
+directory, and every generated compliance file to have a verified SHA-256
+entry. It also rejects
 unknown component references, missing dependency rows, symbolic links in the
 compliance tree, stale files not covered by the SBOM, and managed FFmpeg builds
 that omit the required codec or library flags.
@@ -99,13 +100,41 @@ modified builds and locally re-sign the result. Do not enable library-validation
 settings that prevent that workflow without a separately reviewed LGPL
 compliance design.
 
+## Installation lifecycle
+
+`bin/macrdp-manage` implements the per-user lifecycle without modifying system
+directories. Before installation or upgrade it rejects symbolic links and
+unrecorded files, verifies every SHA-256 property in the packaged SBOM, and
+checks the server and dylib signatures. It repeats those checks after copying.
+These checks detect corruption and incomplete payloads; authenticity still
+depends on the future Developer ID signed and notarized outer distribution.
+
+Each release is installed at
+`~/Library/Application Support/macrdp-cpp/releases/<version-sbom-hash>`. The
+LaunchAgent uses the stable `current/bin/macrdp-server` path, and `previous`
+identifies the one-command rollback target. Upgrades never rewrite the
+LaunchAgent arguments, password, certificate, configuration directory, or an
+external SAM. A failed `launchctl kickstart` restores the old `current` and
+`previous` links before attempting to restart the old release.
+
+Ordinary uninstall unloads and removes the LaunchAgent and deletes all release
+payloads. It deliberately retains the installation marker and state so a later
+install can reuse the certificate and credentials. `uninstall --purge-state`
+also removes the installation root and macrdp log directory. It therefore
+removes passwords, certificates, or SAM files stored inside that root, but it
+never deletes external paths passed through `--password-file`, `--config-dir`,
+or `--sam-file`.
+
+Generated NLA SAM files remain process-lifetime data and are securely removed
+by the server on exit. Persistent FreeRDP certificates remain in the selected
+configuration directory. Operators are responsible for provisioning and
+rotating an explicit external SAM.
+
 ## Remaining release gates
 
-1. Define install, upgrade, rollback, and uninstall behavior for certificates,
-   configuration, SAM files, and LaunchAgent state.
-2. Sign the final package with Developer ID, submit it for notarization, staple
+1. Sign the final package with Developer ID, submit it for notarization, staple
    the ticket, and verify installation and removal on a clean supported Mac.
-3. Publish the binary, project source, FFmpeg corresponding source, checksums,
+2. Publish the binary, project source, FFmpeg corresponding source, checksums,
    and release notes together through an automated release workflow.
-4. Complete the supported hardware and Windows `mstsc` acceptance rows tracked
+3. Complete the supported hardware and Windows `mstsc` acceptance rows tracked
    in the hardware matrix.

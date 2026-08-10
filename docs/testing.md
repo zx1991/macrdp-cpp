@@ -19,8 +19,9 @@ VideoToolbox AVC420, FreeRDP AVC420 and AVC444 paths, the asynchronous encoder
 worker, input ownership and queue behavior, ledger-bounded modifier cleanup,
 signed 9-bit RDP wheel-delta
 translation, asynchronous completion and timeout cleanup semantics, injected
-capture lifecycle races, configuration permissions, password rotation, and
-server argument validation. It does not require Screen Recording permission
+capture lifecycle races, configuration permissions, password rotation, the
+complete versioned install/upgrade/rollback/uninstall state machine, and server
+argument validation. It does not require Screen Recording permission
 for the synthetic encoder and state-machine tests.
 
 The access-policy test instantiates the real macOS shadow subsystem without
@@ -109,6 +110,17 @@ surface, four-library allowlist, source provenance, notices, SBOM, and the
 self-checking `build/macrdp-ffmpeg-sources-7.1.1.tar.gz` corresponding-source
 archive. A Homebrew-configured package remains a development artifact even if
 its structural validation passes.
+
+The packaged `macrdp-verify-package` independently requires exact SBOM hash
+coverage for every executable, management script, dylib, license, notice, and
+provenance file, and rejects symbolic links or unrecorded files. The isolated
+installation lifecycle test builds synthetic signed-package stand-ins under a
+temporary HOME and uses a fake `launchctl`. It covers initial installation,
+failed-install cleanup, stable LaunchAgent paths, state preservation, upgrade,
+tampered or non-executable package rejection, symbolic-release rejection,
+failed-restart recovery, current and rollback integrity rejection, safe purge
+boundaries, ordinary uninstall, reinstall, and explicit state purge without
+loading a real service or requesting TCC.
 
 ## Exact-server preflight and hardware evidence
 

@@ -65,6 +65,12 @@ and `build/macrdp-ffmpeg-sources-7.1.1.tar.gz`. Do not manually edit or commit
 generated package, dependency, provenance, or source-archive files under
 `build/`.
 
+Changes to installation management must preserve the separation between
+immutable `releases/` payloads and persistent certificate/credential state.
+They must extend `manage_macos_install_test.sh` for both the success path and
+transactional failure recovery; tests must use directory overrides and a fake
+`launchctl`, never the developer's real LaunchAgent.
+
 Memory-safety, ownership, and lifecycle changes should also use the isolated
 sanitizer build and deterministic stress command documented in
 [docs/testing.md](docs/testing.md#sanitizers-and-deterministic-stress). Do not

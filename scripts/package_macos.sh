@@ -15,6 +15,10 @@ project_version=$5
 ffmpeg_provenance=${6:-}
 script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
 compliance_generator="$script_dir/generate_macos_compliance.rb"
+install_manager="$project_source/scripts/manage_macos_install.sh"
+launch_agent_installer="$project_source/scripts/install_launch_agent.sh"
+package_verifier="$project_source/scripts/verify_macos_package.rb"
+password_rotator="$project_source/scripts/rotate_launch_agent_password.sh"
 
 if [[ ! -x "$server" ]]; then
     printf 'server executable is missing or not executable: %s\n' "$server" >&2
@@ -32,6 +36,14 @@ if [[ ! -f "$compliance_generator" ]]; then
     printf 'compliance generator is missing: %s\n' "$compliance_generator" >&2
     exit 1
 fi
+for project_script in "$install_manager" "$launch_agent_installer" \
+    "$package_verifier" "$password_rotator"; do
+    if [[ ! -x $project_script ]]; then
+        printf 'package management script is missing or not executable: %s\n' \
+            "$project_script" >&2
+        exit 1
+    fi
+done
 if [[ -n $ffmpeg_provenance && ! -f $ffmpeg_provenance ]]; then
     printf 'FFmpeg provenance is missing: %s\n' "$ffmpeg_provenance" >&2
     exit 1
@@ -50,11 +62,17 @@ dependency_origins=$(mktemp "${TMPDIR:-/tmp}/macrdp-dependencies.XXXXXX")
 trap 'rm -f "$dependency_origins"' EXIT
 
 # Rebuild the generated payload from the current binary and dependency set.
-# Keep unrelated files in the caller's output directory untouched.
+# Unexpected stale files are left in place so the exact-coverage verifier fails
+# instead of silently deleting caller-owned data from an arbitrary output path.
 rm -f "$packaged_server"
 find "$output_dir/lib" -maxdepth 1 \( -type f -o -type l \) -name '*.dylib' -delete
 cp -f "$server" "$packaged_server"
 chmod u+w "$packaged_server"
+install -m 755 "$install_manager" "$output_dir/bin/macrdp-manage"
+install -m 755 "$launch_agent_installer" \
+    "$output_dir/bin/macrdp-install-launch-agent"
+install -m 755 "$package_verifier" "$output_dir/bin/macrdp-verify-package"
+install -m 755 "$password_rotator" "$output_dir/bin/macrdp-rotate-password"
 
 is_system_dependency() {
     case "$1" in

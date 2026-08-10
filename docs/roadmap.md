@@ -51,6 +51,10 @@ are acceptance gates rather than promised dates.
 - Generate and self-validate an FFmpeg corresponding-source archive containing
   the pristine upstream source, applied patches, manifest, build driver, probe,
   rebuild instructions, and checksums for publication beside a binary release.
+- Add a versioned per-user installation manager with complete package hash and
+  signature checks, stable LaunchAgent paths, atomic upgrade, failed-restart
+  recovery, one-command rollback, state-preserving uninstall, and explicit
+  state purge behavior.
 
 ## P0: correctness and lifecycle
 
@@ -77,8 +81,9 @@ validation in CI.
 
 ## P2: release engineering
 
-- Build, sign, and notarize a Developer ID package. Define upgrade and rollback
-  behavior for generated certificates, configuration, and SAM files.
+- Build, sign, and notarize a Developer ID distribution, then exercise the
+  implemented install, upgrade, rollback, and uninstall behavior on a clean
+  supported Mac.
 - Automate publication of the binary, tagged project source, FFmpeg
   corresponding-source archive, checksums, SBOM, and release notes as one
   versioned release set.

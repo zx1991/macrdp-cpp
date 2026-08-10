@@ -1321,6 +1321,16 @@ add_test(
         ${CMAKE_CURRENT_SOURCE_DIR}/scripts/rotate_launch_agent_password.sh
 )
 
+add_test(
+    NAME manage_macos_install
+    COMMAND bash
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests/manage_macos_install_test.sh
+        ${CMAKE_CURRENT_SOURCE_DIR}/scripts/manage_macos_install.sh
+        ${CMAKE_CURRENT_SOURCE_DIR}/scripts/install_launch_agent.sh
+        ${CMAKE_CURRENT_SOURCE_DIR}/scripts/verify_macos_package.rb
+        ${CMAKE_CURRENT_SOURCE_DIR}/scripts/rotate_launch_agent_password.sh
+)
+
 set_tests_properties(
     access_policy
     async_completion

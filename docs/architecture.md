@@ -106,6 +106,14 @@ private configuration directory. macOS TCC permissions remain enforced by the
 operating system: Screen Recording is required for capture and Accessibility
 is required for input injection. The server does not bypass those controls.
 
+The per-user installation keeps immutable, SBOM-verified payloads under
+`releases/` and selects one through a stable `current` link. `previous` is the
+rollback target. Certificates, credentials, configuration, and external SAM
+files are not part of a release switch, so binary rollback cannot silently
+roll back security state. Ordinary uninstall preserves that state; explicit
+purge removes only state inside the managed installation root and its log
+directory.
+
 An authenticated client receives screen and audio by default, with interactive
 keyboard/pointer input and text clipboard synchronization. Operators can remove
 input with `--view-only`, remove clipboard access with `--no-clipboard`, and

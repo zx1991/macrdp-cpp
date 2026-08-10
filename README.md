@@ -41,9 +41,10 @@ and backpressure details.
 - The pinned release dependency set and current Homebrew development packages
   target macOS 15. Older targets need a separately built compatible set.
 - The package target creates a relocatable, ad-hoc-signed developer payload,
-  not an installer. The pinned LGPL FFmpeg build, compliance metadata, and
-  corresponding-source bundle are implemented; Developer ID signing,
-  notarization, installation, upgrade, and rollback remain release work.
+  not a notarized distribution archive. The pinned LGPL FFmpeg build,
+  compliance metadata, corresponding-source bundle, and versioned per-user
+  lifecycle are implemented; Developer ID signing, notarization, and
+  clean-machine release validation remain release work.
 - The automated loopback client verifies protocol delivery, but final input,
   Retina, reconnect, and sleep/wake behavior still needs a real Windows
   `mstsc` validation matrix on supported hardware.
@@ -209,48 +210,85 @@ bundle for the distributed FFmpeg libraries. Validation does not start a
 listener or require TCC permissions. The payload is not a notarized installer
 and should not be published as an official artifact yet.
 
-The package contains `share/macrdp/sbom.cdx.json`, generated third-party
+The package contains the `bin/macrdp-manage` lifecycle command, the offline
+`bin/macrdp-verify-package` integrity verifier,
+`share/macrdp/sbom.cdx.json`, generated third-party
 notices, the exact FFmpeg build configuration and source provenance, and the
 license files associated with every copied dependency. Validation recomputes
-hashes for every payload and compliance file and checks the dependency
-references in the SBOM. A future official release must attach the matching
-macrdp project source and FFmpeg corresponding-source archive alongside the
-binary; the FFmpeg source does not need to be stored inside the application
-payload. See [Release engineering](docs/release.md) for the exact artifact set
-and remaining gates.
+hashes for every executable, management tool, dynamic library, and compliance
+file and checks the dependency references in the SBOM. A future official
+release must attach the matching macrdp project source and FFmpeg
+corresponding-source archive alongside the binary; the FFmpeg source does not
+need to be stored inside the application payload. See
+[Release engineering](docs/release.md) for the exact artifact set and
+remaining gates.
 
 For a long-running instance, create an owner-only one-line password file and
-install the supplied per-user LaunchAgent:
+install the versioned per-user service:
 
 ```bash
+macrdp_root="$HOME/Library/Application Support/macrdp-cpp"
+password_file="$macrdp_root/state/password"
 umask 077
-mkdir -p "$HOME/Library/Application Support/macrdp-cpp"
+mkdir -p "$macrdp_root/state"
 read -r -s macrdp_password
 printf '\n'
-printf '%s\n' "$macrdp_password" \
-  > "$HOME/Library/Application Support/macrdp-cpp/password"
+printf '%s\n' "$macrdp_password" > "$password_file"
 unset macrdp_password
 
-./scripts/install_launch_agent.sh \
-  ./build/macrdp-dist/bin/macrdp-server \
-  example-user \
-  "$HOME/Library/Application Support/macrdp-cpp/password"
+./build/macrdp-dist/bin/macrdp-manage install \
+  --package ./build/macrdp-dist \
+  --user example-user \
+  --password-file "$password_file"
 ```
 
+The manager verifies all SBOM hashes and Mach-O signatures before and after
+copying the payload. Releases are stored below `releases/<version-sbom-hash>`;
+the LaunchAgent always runs the stable `current/bin/macrdp-server` path, while
+`previous` records the rollback target. Certificates and generated
+configuration live under `state/config` and are not copied into a release.
+
 The service runs in the logged-in Aqua session and writes logs below
-`~/Library/Logs/macrdp-cpp`. Grant TCC permissions to the exact packaged
+`~/Library/Logs/macrdp-cpp`. Grant TCC permissions to the exact `current`
 executable used by the LaunchAgent. To apply access controls or other server
 options, pass them after `--`. Because the listener defaults to loopback, a
 remote service must explicitly append
-`-- --bind-address <trusted-interface-address>`.
-For a screen-only service, add `--view-only --no-clipboard --no-audio` after
-the same `--` separator.
+`-- --bind-address <trusted-interface-address>`. For a screen-only service,
+add `--view-only --no-clipboard --no-audio` after the same separator.
+
+Use the manager from a newly validated package for upgrades, and the installed
+manager for status, rollback, and removal:
+
+```bash
+macrdp_root="$HOME/Library/Application Support/macrdp-cpp"
+./new-macrdp-dist/bin/macrdp-manage upgrade \
+  --package ./new-macrdp-dist
+
+"$macrdp_root/current/bin/macrdp-manage" status
+"$macrdp_root/current/bin/macrdp-manage" rollback
+"$macrdp_root/current/bin/macrdp-manage" uninstall
+```
+
+Upgrade switches `current` atomically and restarts the service. If that restart
+command fails, it restores both release links and restarts the old release.
+Rollback exchanges `current` and `previous`, so it can be reversed. Ordinary
+uninstall removes the LaunchAgent and all installed releases but preserves the
+installation root, certificate, password, configuration, and SAM state. Add
+`--purge-state` only when those project-managed files and logs should also be
+deleted. Files outside the installation root, including an externally managed
+SAM or password file, are never deleted.
+
+When adopting an older manual installation whose default root already contains
+`shadow/`, the manager keeps that directory as the certificate/configuration
+root. An explicit `--config-dir` always takes precedence.
 
 Rotate the LaunchAgent's RDP password interactively with:
 
 ```bash
-./scripts/rotate_launch_agent_password.sh \
-  "$HOME/Library/Application Support/macrdp-cpp/password"
+macrdp_root="$HOME/Library/Application Support/macrdp-cpp"
+password_file="$macrdp_root/state/password"
+"$macrdp_root/current/bin/macrdp-rotate-password" \
+  "$password_file"
 ```
 
 The helper verifies that the loaded LaunchAgent uses that exact owner-only

@@ -27,11 +27,26 @@ done
 
 package_dir=$(cd "$package_input" && pwd -P)
 packaged_server="$package_dir/bin/macrdp-server"
+install_manager="$package_dir/bin/macrdp-manage"
+launch_agent_installer="$package_dir/bin/macrdp-install-launch-agent"
+package_verifier="$package_dir/bin/macrdp-verify-package"
+password_rotator="$package_dir/bin/macrdp-rotate-password"
 executable_dir=$(dirname "$packaged_server")
 if [[ ! -x $packaged_server || -L $packaged_server ]]; then
     printf 'packaged server must be an executable regular file: %s\n' "$packaged_server" >&2
     exit 1
 fi
+for project_script in "$install_manager" "$launch_agent_installer" \
+    "$package_verifier" "$password_rotator"; do
+    if [[ ! -x $project_script || -L $project_script ]]; then
+        printf 'packaged management tool must be an executable regular file: %s\n' \
+            "$project_script" >&2
+        exit 1
+    fi
+done
+bash -n "$install_manager" "$launch_agent_installer" "$password_rotator"
+ruby -c "$package_verifier" >/dev/null
+"$install_manager" --help >/dev/null 2>&1
 
 is_system_path() {
     case $1 in
@@ -260,6 +275,7 @@ if [[ ! -f $compliance_validator ]]; then
     exit 1
 fi
 ruby "$compliance_validator" "$package_dir"
+"$package_verifier" "$package_dir" >/dev/null
 
 printf 'Validated macOS package: %s\n' "$package_dir"
 printf 'Architectures: %s\n' "$server_architecture_list"

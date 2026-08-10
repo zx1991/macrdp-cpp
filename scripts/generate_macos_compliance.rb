@@ -330,8 +330,17 @@ end
 
 root_ref = "pkg:github/zx1991/macrdp-cpp@#{purl_escape(project_version)}"
 server_relative = "bin/macrdp-server"
-server_path = package_dir.join(server_relative)
-raise "packaged server is missing" unless server_path.file?
+project_payload_relatives = %w[
+  bin/macrdp-install-launch-agent
+  bin/macrdp-manage
+  bin/macrdp-rotate-password
+  bin/macrdp-server
+  bin/macrdp-verify-package
+]
+project_payload_relatives.each do |relative|
+  path = package_dir.join(relative)
+  raise "project payload file is missing: #{relative}" unless path.file? && !path.symlink?
+end
 
 git_stdout, _git_stderr, git_status = Open3.capture3(
   "git", "-C", project_source.to_s, "rev-parse", "HEAD"
@@ -353,12 +362,15 @@ root_component = {
   "version" => project_version,
   "purl" => root_ref,
   "licenses" => [{ "expression" => "Apache-2.0" }],
-  "evidence" => { "occurrences" => [{ "location" => server_relative }] },
+  "evidence" => {
+    "occurrences" => project_payload_relatives.map { |relative| { "location" => relative } }
+  },
   "properties" => [
     { "name" => "macrdp:git-revision", "value" => source_revision },
-    { "name" => "macrdp:packaged-file-sha256", "value" => "#{server_relative}=#{sha256(server_path)}" },
     { "name" => "macrdp:license-directory", "value" => "share/macrdp/licenses/macrdp-cpp" }
-  ] + compliance_properties(license_sets.fetch("macrdp-cpp") + [notices_path], package_dir)
+  ] + project_payload_relatives.map do |relative|
+    { "name" => "macrdp:packaged-file-sha256", "value" => "#{relative}=#{sha256(package_dir.join(relative))}" }
+  end + compliance_properties(license_sets.fetch("macrdp-cpp") + [notices_path], package_dir)
 }
 
 freerdp_ref = "pkg:github/FreeRDP/FreeRDP@3.30.0"
