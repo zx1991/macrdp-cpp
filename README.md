@@ -228,6 +228,13 @@ cmake --build build --parallel 8
 ctest --test-dir build --output-on-failure
 ```
 
+CI also builds the full static dependency graph with AddressSanitizer and
+UndefinedBehaviorSanitizer, runs the deterministic suite, and repeats the
+concurrency and lifecycle state-machine tests 50 times. This job does not open
+an RDP listener, capture the display, or inject input. See
+[Testing](docs/testing.md) for the equivalent isolated build and runtime
+options.
+
 The real loopback smoke test builds a separate FreeRDP client, starts the
 server, changes the logged-in user's clipboard, and injects actual keyboard and
 pointer events. Run it only in a controlled graphical session. It covers NLA,

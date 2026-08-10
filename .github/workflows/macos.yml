@@ -52,3 +52,47 @@ jobs:
 
       - name: Build and validate developer package
         run: cmake --build build --target macrdp-package-validate
+
+  sanitizers:
+    runs-on: macos-15
+
+    env:
+      ASAN_OPTIONS: abort_on_error=1:detect_leaks=0:halt_on_error=1
+      UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: brew install ffmpeg openssl@3
+
+      - name: Configure sanitizers
+        run: |
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DCMAKE_OSX_ARCHITECTURES=arm64 \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET=15.0 \
+            -DMACRDP_ENABLE_SANITIZERS=ON \
+            -DOPENSSL_ROOT_DIR="$(brew --prefix openssl@3)" \
+            -DCMAKE_PREFIX_PATH="$(brew --prefix ffmpeg);$(brew --prefix openssl@3)"
+
+      - name: Build with sanitizers
+        run: cmake --build build --parallel 3
+
+      - name: Verify sanitizer instrumentation
+        run: |
+          ninja -C build -t commands macrdp-server \
+            | awk 'index($0, "server_main.cpp") && index($0, "-fsanitize=address,undefined") { found = 1 } END { exit !found }'
+          otool -L build/macrdp-server \
+            | awk 'index($0, "libclang_rt.asan_osx_dynamic.dylib") { found = 1 } END { exit !found }'
+
+      - name: Run deterministic suite
+        run: ctest --test-dir build --output-on-failure
+
+      - name: Stress lifecycle state machines
+        run: |
+          ctest --test-dir build \
+            --output-on-failure \
+            --repeat until-fail:50 \
+            -L deterministic-stress

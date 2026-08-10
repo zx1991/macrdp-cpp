@@ -42,6 +42,11 @@ should also build and validate the developer payload:
 cmake --build build --target macrdp-package-validate
 ```
 
+Memory-safety, ownership, and lifecycle changes should also use the isolated
+sanitizer build and deterministic stress command documented in
+[docs/testing.md](docs/testing.md#sanitizers-and-deterministic-stress). Do not
+replace a signed TCC-authorized development server with a sanitizer binary.
+
 Protocol changes should also use the separate FreeRDP loopback client and the
 network profiles described in [docs/testing.md](docs/testing.md). Keep smoke
 test artifacts when diagnosing a failure:

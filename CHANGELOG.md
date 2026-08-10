@@ -75,3 +75,6 @@ This project has not published a stable release yet.
 - Added reproducible package validation for Mach-O load paths, architectures,
   minimum macOS versions, signatures, and packaged loader behavior, and run it
   in macOS CI.
+- Added an opt-in AppleClang AddressSanitizer and UndefinedBehaviorSanitizer
+  build, plus arm64 CI coverage that runs the deterministic suite and repeats
+  lifecycle-focused state-machine tests 50 times without live system input.

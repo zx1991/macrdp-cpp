@@ -31,6 +31,46 @@ Server argument tests reject concurrent-client limits outside 1 through 64 and
 require explicit acknowledgement before selecting a non-NLA compatibility
 mode.
 
+## Sanitizers and deterministic stress
+
+`MACRDP_ENABLE_SANITIZERS=ON` instruments the project and its statically built
+FreeRDP dependency with AppleClang AddressSanitizer and
+UndefinedBehaviorSanitizer. Use an isolated build because sanitizer flags and
+runtime linkage must not replace a normal signed server used for TCC grants:
+
+```bash
+cmake -S . -B build-sanitized -G Ninja \
+  -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+  -DCMAKE_OSX_ARCHITECTURES=arm64 \
+  -DCMAKE_OSX_DEPLOYMENT_TARGET=15.0 \
+  -DMACRDP_ENABLE_SANITIZERS=ON
+cmake --build build-sanitized --parallel 3
+
+ASAN_OPTIONS=abort_on_error=1:detect_leaks=0:halt_on_error=1 \
+UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1 \
+  ctest --test-dir build-sanitized --output-on-failure
+```
+
+The macOS CI job disables LeakSanitizer because Apple frameworks and FreeRDP
+retain process-lifetime global state; ASan heap, stack, bounds, and lifetime
+checks remain enabled. It then repeats only the deterministic concurrency and
+lifecycle tests:
+
+```bash
+ASAN_OPTIONS=abort_on_error=1:detect_leaks=0:halt_on_error=1 \
+UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1 \
+  ctest --test-dir build-sanitized \
+    --output-on-failure \
+    --repeat until-fail:50 \
+    -L deterministic-stress
+```
+
+These repeated tests use injected backends and synthetic state. They do not
+start ScreenCaptureKit, open a listener, change the clipboard, or inject
+keyboard and pointer events. Every `deterministic-stress` test has a 30-second
+per-run timeout. They complement rather than replace the opt-in loopback and
+supported-hardware matrices.
+
 The asynchronous completion test covers completion, duplicate and late result
 rejection, timeout cleanup installed both before and after a timeout, and
 explicit failure cleanup. The injected capture-backend test exercises separate

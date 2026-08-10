@@ -19,6 +19,27 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+option(MACRDP_ENABLE_SANITIZERS
+    "Build with AddressSanitizer and UndefinedBehaviorSanitizer"
+    OFF
+)
+
+if(MACRDP_ENABLE_SANITIZERS)
+    if(NOT CMAKE_C_COMPILER_ID MATCHES "Clang"
+       OR NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+        message(FATAL_ERROR
+            "MACRDP_ENABLE_SANITIZERS requires Clang-compatible C and C++ compilers"
+        )
+    endif()
+
+    add_compile_options(
+        "$<$<COMPILE_LANGUAGE:C,CXX,OBJC,OBJCXX>:-fsanitize=address,undefined>"
+        "$<$<COMPILE_LANGUAGE:C,CXX,OBJC,OBJCXX>:-fno-omit-frame-pointer>"
+        "$<$<COMPILE_LANGUAGE:C,CXX,OBJC,OBJCXX>:-fno-sanitize-recover=all>"
+    )
+    add_link_options(-fsanitize=address,undefined)
+endif()
+
 find_library(FOUNDATION_FRAMEWORK Foundation REQUIRED)
 find_library(CORE_GRAPHICS_FRAMEWORK CoreGraphics REQUIRED)
 find_library(CORE_MEDIA_FRAMEWORK CoreMedia REQUIRED)
@@ -1120,4 +1141,15 @@ add_test(
     COMMAND bash
         ${CMAKE_CURRENT_SOURCE_DIR}/tests/rotate_launch_agent_password_test.sh
         ${CMAKE_CURRENT_SOURCE_DIR}/scripts/rotate_launch_agent_password.sh
+)
+
+set_tests_properties(
+    access_policy
+    async_completion
+    display_capture_lifecycle
+    h264_worker
+    input_ownership
+    PROPERTIES
+        LABELS deterministic-stress
+        TIMEOUT 30
 )

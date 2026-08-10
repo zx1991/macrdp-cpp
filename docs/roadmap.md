@@ -36,6 +36,9 @@ are acceptance gates rather than promised dates.
 - Build and validate the relocatable developer payload in CI, including its
   load paths, architectures, minimum macOS versions, signatures, and loader
   behavior.
+- Instrument the complete static build with AddressSanitizer and
+  UndefinedBehaviorSanitizer in CI, run the deterministic suite, and repeat
+  lifecycle-focused state-machine tests without TCC or input side effects.
 
 ## P0: correctness and lifecycle
 
@@ -52,9 +55,9 @@ and the Windows matrix has recorded results for every interactive path.
 
 ## P1: deployment safety
 
-- Add sanitizer builds and lifecycle-focused stress tests. Keep the real
-  loopback test opt-in because it changes the system clipboard and injects
-  keyboard and pointer events.
+The planned deployment-safety implementation is complete. The real loopback
+test remains opt-in because it changes the system clipboard and injects
+keyboard and pointer events.
 
 P1 is complete when an operator can deliberately grant view-only, clipboard,
 and input capabilities, bound session concurrency, and reproduce the package
