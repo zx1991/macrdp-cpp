@@ -31,7 +31,9 @@ FreeRDP client callback -> per-client input queue -> macOS input worker
 Audio and clipboard have separate service paths. Audio capture/pacing runs in
 its own loop and publishes bounded PCM chunks to the FreeRDP shadow clients.
 The clipboard monitor observes `NSPasteboard`, while channel callbacks perform
-format negotiation and data transfer under a channel lock.
+format negotiation and data transfer under a channel lock. When clipboard
+redirection is disabled, the adapter short-circuits before it creates a channel
+context or monitor thread.
 
 ## Concurrency boundaries
 
@@ -66,7 +68,13 @@ format negotiation and data transfer under a channel lock.
   pointer motion is discarded before critical keyboard, button, wheel, and
   reset events are allowed to wait for capacity. RDP wheel rotation is decoded
   from its signed 9-bit field before vertical or horizontal line events are
-  sent to CoreGraphics.
+  sent to CoreGraphics. In view-only mode every project-owned input callback is
+  gated before client registration or queueing, and the subsystem does not
+  create its CoreGraphics event source or input worker. This remains the final
+  policy boundary even if a FreeRDP control channel changes a client's
+  `mayInteract` flag.
+- FreeRDP checks the configured concurrent-client limit in its listener accept
+  path before allocating a new shadow client. The default limit is one.
 - Shutdown joins capture, audio, publish, input, and encoder workers in a
   defined order before FreeRDP state is released.
 
@@ -96,12 +104,13 @@ a private configuration directory. macOS TCC permissions remain enforced by
 the operating system: Screen Recording is required for capture and Accessibility
 is required for input injection. The server does not bypass those controls.
 
-An authenticated client currently receives the complete interactive session:
-screen, keyboard and pointer injection, text clipboard synchronization, and
-audio when enabled. There is not yet a view-only mode, clipboard opt-out, or
-configurable client limit. Until those policy controls exist, deployments must
-treat an account as granting full remote-control access and restrict listener
-exposure accordingly.
+An authenticated client receives screen and audio by default, with interactive
+keyboard/pointer input and text clipboard synchronization. Operators can remove
+input with `--view-only`, remove clipboard access with `--no-clipboard`, and
+bound concurrent clients with `--max-clients` (default one, maximum 64). The
+input and clipboard controls are independent: view-only still exposes the
+clipboard unless both options are selected. These controls reduce session
+capabilities; they do not make an Internet-exposed listener safe.
 
 ## Design constraints
 

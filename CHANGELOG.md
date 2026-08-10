@@ -35,3 +35,6 @@ This project has not published a stable release yet.
 - Added an injectable capture backend and deterministic tests for consumer
   wakeups, generation isolation, start/stop transitions, and concurrent
   stop/reconfigure lifecycle races without Screen Recording permission.
+- Added independent `--view-only` and `--no-clipboard` access policies, a
+  configurable 1-64 concurrent-client limit that defaults to one, and
+  deterministic policy-gate coverage without macOS TCC permissions.

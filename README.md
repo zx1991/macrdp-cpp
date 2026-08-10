@@ -22,7 +22,7 @@ shadow server.
 | Input | Serialized keyboard, Unicode, pointer, button, drag, and wheel injection through a private CoreGraphics event source |
 | Clipboard | Bidirectional `CF_UNICODETEXT` and `CF_TEXT` through `NSPasteboard` |
 | Audio | Screen audio capture and RDPSND output; AAC or PCM depends on negotiation |
-| Security | NLA by default, generated or existing SAM credentials, private configuration paths |
+| Security | NLA by default, one concurrent client, view-only and clipboard opt-out controls, private configuration paths |
 | Reliability | Per-client input ownership isolated from local HID state, bounded queues, capture restart backoff, and generation-isolated capture lifecycle |
 | Validation | Local state-machine and injected capture-lifecycle tests, real FreeRDP loopback client, and deterministic shaped-network profiles |
 
@@ -33,8 +33,8 @@ and backpressure details.
 ## Current limits
 
 - The main display is the only capture target; there is no monitor picker.
-- An authenticated client receives full interactive access. There is no
-  view-only mode, clipboard opt-out, or configurable concurrent-client limit.
+- Multi-client sessions share one captured display and have not completed the
+  supported Windows hardware matrix; keep the concurrent-client limit low.
 - Clipboard redirection is text-only. File, image, and directory transfer are
   not implemented.
 - RDPSND speaker output is supported, but microphone/AUDIN input is disabled.
@@ -55,8 +55,8 @@ The prioritized acceptance gates are tracked in [Roadmap](docs/roadmap.md).
   capture the desktop from an SSH-only session.
 - macOS 15 and Apple Silicon for the currently documented Homebrew build.
 - Xcode Command Line Tools, CMake 3.25 or newer, FFmpeg, and OpenSSL 3.
-- Screen Recording permission for capture and Accessibility permission for
-  remote keyboard and pointer injection.
+- Screen Recording permission for capture. Accessibility permission is required
+  for interactive sessions, but not when the server uses `--view-only`.
 
 Install the development dependencies with Homebrew:
 
@@ -85,8 +85,9 @@ same target.
 
 ## Run the server
 
-Grant Screen Recording and Accessibility permission to the terminal or exact
-server executable before starting it. The server checks both permissions before
+Grant Screen Recording permission to the terminal or exact server executable
+before starting it. Interactive sessions also require Accessibility permission.
+The server checks every permission required by the selected access policy before
 opening the RDP listener.
 
 Use a placeholder account name such as `example-user` only in documentation;
@@ -114,10 +115,13 @@ NLA is the default and recommended security mode. `--security tls` and
 `--security rdp` exist for compatibility testing. Empty passwords are rejected.
 An existing FreeRDP SAM can be supplied with `--sam-file`.
 
-Common media choices can be appended to the server command above:
+Access and media controls can be appended to the server command above:
 
 | Goal | Option |
 | --- | --- |
+| Disable remote keyboard and pointer input | `--view-only` |
+| Disable clipboard redirection | `--no-clipboard` |
+| Allow up to four concurrent clients | `--max-clients 4` |
 | Higher AVC420 bitrate | `--bitrate 24M` |
 | Require direct macOS AVC420 | `--h264-encoder videotoolbox` |
 | Force software AVC420 | `--h264-encoder ffmpeg` |
@@ -125,8 +129,11 @@ Common media choices can be appended to the server command above:
 | Classic incremental updates | `--no-gfx` |
 | Disable screen audio and RDPSND | `--no-audio` |
 
-Run `./build/macrdp-server --help` for the complete option list. There is
-currently no option that disables clipboard or input independently.
+The concurrent-client limit defaults to one and accepts values from 1 through
+64. `--view-only` disables only remote keyboard and pointer input; clipboard and
+audio remain independent capabilities. For a screen-only session, combine
+`--view-only --no-clipboard --no-audio`. Run `./build/macrdp-server --help` for
+the complete option list.
 
 ## Package and LaunchAgent
 
@@ -161,7 +168,9 @@ unset macrdp_password
 
 The service runs in the logged-in Aqua session and writes logs below
 `~/Library/Logs/macrdp-cpp`. Grant TCC permissions to the exact packaged
-executable used by the LaunchAgent.
+executable used by the LaunchAgent. To apply access controls or other server
+options, pass them after `--`. For a screen-only service, append
+`-- --view-only --no-clipboard --no-audio` to the installer command.
 
 ## Tests
 
@@ -215,10 +224,11 @@ Keep changes focused, update tests and documentation together, and never commit
 generated `build/_deps` content. Changes to the FreeRDP boundary must update the
 checked-in patch and its pinned-version assumptions together.
 
-This software exposes the desktop, clipboard, audio, and input injection. Treat
-every listener and credential as security-sensitive. Report vulnerabilities
-through the repository's private security reporting channel, not a public
-issue.
+This software exposes the desktop and, unless disabled, clipboard, audio, and
+input injection. Treat every listener and credential as security-sensitive,
+grant only the capabilities needed for the deployment, and report
+vulnerabilities through the repository's private security reporting channel,
+not a public issue.
 
 ## License
 

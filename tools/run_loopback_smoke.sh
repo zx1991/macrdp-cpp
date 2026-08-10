@@ -619,7 +619,7 @@ wait_for_server() {
 	case_name=$1
 	server_log=$2
 	for attempt in $(seq 1 100); do
-		if nc -z 127.0.0.1 "$port" >/dev/null 2>&1; then
+		if grep -q 'macrdp-server listening on port' "$server_log"; then
 			return 0
 		fi
 		if ! kill -0 "$server_pid" >/dev/null 2>&1; then
@@ -679,6 +679,7 @@ start_server() {
 		"$server"
 		--port "$port"
 		--bind-address 127.0.0.1
+		--max-clients 2
 		--user "$user"
 		--config-dir "$case_dir/config"
 		--log-level "$server_log_level"

@@ -24,6 +24,8 @@
 
 namespace {
 
+std::atomic_bool g_clipboard_enabled{true};
+
 constexpr UINT32 kCfText = 1;
 constexpr UINT32 kCfUnicodeText = 13;
 constexpr std::size_t kMaxClipboardBytes = 16U * 1024U * 1024U;
@@ -369,6 +371,9 @@ void clipboard_monitor(CliprdrState* state) {
 } // namespace
 
 extern "C" BOOL macrdp_shadow_cliprdr_init(rdpShadowClient* client) {
+    if (!g_clipboard_enabled.load(std::memory_order_acquire)) {
+        return TRUE;
+    }
     if (client == nullptr || client->vcm == nullptr) {
         return FALSE;
     }
@@ -417,6 +422,10 @@ extern "C" BOOL macrdp_shadow_cliprdr_init(rdpShadowClient* client) {
     state.release();
     WLog_INFO(TAG, "Clipboard channel enabled (text formats only)");
     return TRUE;
+}
+
+extern "C" void macrdp_shadow_cliprdr_set_enabled(BOOL enabled) {
+    g_clipboard_enabled.store(enabled != FALSE, std::memory_order_release);
 }
 
 extern "C" void macrdp_shadow_cliprdr_uninit(rdpShadowClient* client) {

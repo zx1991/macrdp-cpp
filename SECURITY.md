@@ -36,3 +36,16 @@ The default security mode is NLA and empty passwords are rejected. TLS
 certificates are generated under the configured private directory. The
 `/cert:ignore` option shown in the loopback test is for a local test client
 only and must not be used as a general deployment recommendation.
+
+The server accepts one concurrent client by default; `--max-clients` can set an
+explicit limit from 1 through 64, enforced before FreeRDP accepts a new shadow
+client. Interactive input and text clipboard redirection are enabled by
+default. Use `--view-only` to disable keyboard and pointer injection and
+`--no-clipboard` to prevent creation of the clipboard channel context and
+monitor. These options are independent, so a view-only session still has
+clipboard and audio access unless those capabilities are disabled separately.
+
+Bind to the narrowest practical interface and restrict network reachability
+with a host firewall, trusted network, or VPN. Capability flags limit what an
+authenticated session can do; they are not a substitute for listener isolation,
+strong unique credentials, or rotating credentials after suspected exposure.

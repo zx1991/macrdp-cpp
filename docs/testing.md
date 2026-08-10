@@ -22,6 +22,13 @@ capture lifecycle races, configuration permissions, and server argument
 validation. It does not require Screen Recording permission for the synthetic
 encoder and state-machine tests.
 
+The access-policy test instantiates the real macOS shadow subsystem without
+starting ScreenCaptureKit. It verifies that view-only synchronize, keyboard,
+Unicode, absolute, relative, and extended-pointer callbacks do not mutate the
+shadow input state; it also confirms that interactive pointer callbacks remain
+active and disabled clipboard initialization does not create a channel context.
+Server argument tests reject concurrent-client limits outside 1 through 64.
+
 The asynchronous completion test covers completion, duplicate and late result
 rejection, timeout cleanup installed both before and after a timeout, and
 explicit failure cleanup. The injected capture-backend test exercises separate
@@ -105,7 +112,15 @@ tools/run_loopback_smoke.sh
 ```
 
 The server still needs Screen Recording and Accessibility permission because
-the loopback test exercises the actual macOS capture and input paths.
+the loopback test exercises the actual macOS capture and interactive input
+paths. The deterministic access-policy test is the non-invasive coverage for
+view-only and clipboard-disabled behavior.
+
+The harness waits for the server's listening log instead of opening a TCP
+readiness connection, because the default one-client policy treats even a probe
+as a transient shadow client. It starts the reconnect matrix with
+`--max-clients 2` so a replacement connection can overlap bounded cleanup of the
+previous client.
 
 The direct profile requests AVC420 unless `--gfx-codec AVC444` is supplied:
 

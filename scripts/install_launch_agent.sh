@@ -1,16 +1,33 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [[ $# -lt 3 || $# -gt 5 ]]; then
-    printf 'usage: %s <macrdp-server> <user> <password-file> [port] [config-dir]\n' "$0" >&2
+if [[ $# -lt 3 ]]; then
+    printf 'usage: %s <macrdp-server> <user> <password-file> [port] [config-dir] [-- server-options...]\n' "$0" >&2
     exit 2
 fi
 
 server_input=$1
 username=$2
 password_file_input=$3
-port=${4:-3389}
-config_dir_input=${5:-"$HOME/Library/Application Support/macrdp-cpp"}
+shift 3
+
+port=3389
+config_dir_input="$HOME/Library/Application Support/macrdp-cpp"
+if [[ $# -gt 0 && $1 != '--' ]]; then
+    port=$1
+    shift
+fi
+if [[ $# -gt 0 && $1 != '--' ]]; then
+    config_dir_input=$1
+    shift
+fi
+if [[ $# -gt 0 ]]; then
+    if [[ $1 != '--' ]]; then
+        printf 'server options must follow --\n' >&2
+        exit 2
+    fi
+    shift
+fi
 label='com.macrdp.cpp.server'
 
 if [[ ! -x "$server_input" ]]; then
@@ -54,6 +71,17 @@ plutil -insert ProgramArguments.5 -string '--password-file' "$temporary_plist"
 plutil -insert ProgramArguments.6 -string "$password_file" "$temporary_plist"
 plutil -insert ProgramArguments.7 -string '--config-dir' "$temporary_plist"
 plutil -insert ProgramArguments.8 -string "$config_dir" "$temporary_plist"
+argument_index=9
+view_only=0
+if [[ $# -gt 0 ]]; then
+    for server_option in "$@"; do
+        plutil -insert "ProgramArguments.$argument_index" -string "$server_option" "$temporary_plist"
+        if [[ $server_option == '--view-only' ]]; then
+            view_only=1
+        fi
+        argument_index=$((argument_index + 1))
+    done
+fi
 plutil -insert RunAtLoad -bool true "$temporary_plist"
 plutil -insert KeepAlive -bool true "$temporary_plist"
 plutil -insert ProcessType -string Interactive "$temporary_plist"
@@ -74,4 +102,8 @@ launchctl kickstart -k "$gui_domain/$label"
 printf 'Installed and started %s\n' "$label"
 printf 'Plist: %s\n' "$plist"
 printf 'Logs: %s\n' "$log_dir"
-printf 'Grant Screen Recording and Accessibility to this exact server executable before connecting.\n'
+if [[ $view_only -eq 1 ]]; then
+    printf 'Grant Screen Recording to this exact server executable before connecting.\n'
+else
+    printf 'Grant Screen Recording and Accessibility to this exact server executable before connecting.\n'
+fi

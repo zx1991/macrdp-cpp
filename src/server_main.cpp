@@ -7,6 +7,7 @@
 #include <winpr/ssl.h>
 #include <winpr/synch.h>
 
+#include "macrdp/cliprdr_adapter.h"
 #include "macrdp/config_permissions.hpp"
 #include "mac_shadow_subsystem.hpp"
 #include "macrdp/videotoolbox_h264.h"
@@ -60,10 +61,13 @@ struct Options {
     std::uint32_t frame_rate = 30;
     std::uint32_t max_width = 0;
     std::uint32_t max_height = 0;
+    std::uint32_t max_clients = 1;
     H264EncoderMode h264_encoder = H264EncoderMode::automatic;
     bool avc444 = false;
     bool no_gfx = false;
     bool audio_enabled = true;
+    bool view_only = false;
+    bool clipboard_enabled = true;
     bool password_from_stdin = false;
     std::string password_file;
     std::string log_level = "INFO";
@@ -97,7 +101,10 @@ void print_usage(const char* program) {
         << "\n"
         << "  --port <number>             Listen port (default: 3389)\n"
         << "  --bind-address <address>    Optional address to bind (default: all)\n"
+        << "  --max-clients <number>      Concurrent client limit, 1-64 (default: 1)\n"
         << "  --security <nla|tls|rdp>    Security protocol (default: nla)\n"
+        << "  --view-only                 Disable remote keyboard and pointer input\n"
+        << "  --no-clipboard              Disable clipboard redirection\n"
         << "  --bitrate <value>           H.264 rate, e.g. 16M (default: 16M)\n"
         << "  --fps <number>              Capture/encode rate, 1-60 (default: 30)\n"
         << "  --max-width <pixels>        Optional capture width limit\n"
@@ -317,6 +324,12 @@ bool parse_options(int argc, char** argv, Options& options) {
                 std::cerr << "--bind-address requires one non-empty address without commas\n";
                 return false;
             }
+        } else if (argument == "--max-clients") {
+            if (!next_value(index, argc, argv, value)
+                || !parse_uint32_range(value, 1, 64, options.max_clients)) {
+                std::cerr << "--max-clients must be between 1 and 64\n";
+                return false;
+            }
         } else if (argument == "--security") {
             if (!next_value(index, argc, argv, value)
                 || !parse_security(value, options.security)) {
@@ -367,6 +380,10 @@ bool parse_options(int argc, char** argv, Options& options) {
             options.no_gfx = true;
         } else if (argument == "--no-audio") {
             options.audio_enabled = false;
+        } else if (argument == "--view-only") {
+            options.view_only = true;
+        } else if (argument == "--no-clipboard") {
+            options.clipboard_enabled = false;
         } else if (argument == "--user") {
             if (!next_value(index, argc, argv, options.username)) {
                 std::cerr << "--user requires a non-empty value\n";
@@ -622,7 +639,8 @@ bool configure_server(rdpShadowServer* server, const Options& options, const std
     }
     server->selectedMonitor = 0;
     server->mayView = TRUE;
-    server->mayInteract = TRUE;
+    server->mayInteract = options.view_only ? FALSE : TRUE;
+    server->maxClientsConnected = options.max_clients;
     server->authentication = TRUE;
     server->ShowMouseCursor = FALSE;
     // Windows 11 24H2 clients are more reliable with one bitmap rectangle.
@@ -642,6 +660,8 @@ bool configure_server(rdpShadowServer* server, const Options& options, const std
         options.max_height,
         options.frame_rate,
         options.audio_enabled);
+    macrdp_shadow_set_input_enabled(!options.view_only);
+    macrdp_shadow_cliprdr_set_enabled(options.clipboard_enabled ? TRUE : FALSE);
 
     // This server currently exposes only the TCP RDP transport. These
     // features use the MCS message channel and must stay off until their
@@ -797,7 +817,7 @@ int main(int argc, char** argv) {
     }
 
     std::string input_error;
-    if (!macrdp_shadow_preflight_input(input_error)) {
+    if (!options.view_only && !macrdp_shadow_preflight_input(input_error)) {
         std::cerr << "Unable to inject macOS input before starting the RDP listener: "
                   << input_error << "\n"
                   << "Grant Accessibility permission to this executable or Terminal.\n";
@@ -825,6 +845,9 @@ int main(int argc, char** argv) {
                       ? "NLA"
                       : options.security == SecurityMode::tls ? "TLS" : "RDP")
               << " security h264_encoder=" << h264_encoder_name(options.h264_encoder)
+              << " input=" << (options.view_only ? "disabled" : "enabled")
+              << " clipboard=" << (options.clipboard_enabled ? "enabled" : "disabled")
+              << " max_clients=" << options.max_clients
               << std::endl;
 
     bool server_failed = false;

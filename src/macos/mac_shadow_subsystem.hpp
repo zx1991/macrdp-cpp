@@ -25,6 +25,8 @@ void macrdp_shadow_set_capture_options(
     std::uint32_t frame_rate,
     bool audio_enabled);
 
+void macrdp_shadow_set_input_enabled(bool enabled);
+
 #ifdef __cplusplus
 }
 

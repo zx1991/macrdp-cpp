@@ -792,6 +792,29 @@ add_executable(macrdp-config-permissions-test
     src/config_permissions_test.cpp
 )
 
+add_executable(macrdp-access-policy-test
+    src/access_policy_test.cpp
+)
+
+target_compile_options(macrdp-access-policy-test PRIVATE
+    -Wall
+    -Wextra
+    -Wpedantic
+)
+
+target_include_directories(macrdp-access-policy-test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/macos
+    ${freerdp_SOURCE_DIR}/include
+    ${freerdp_SOURCE_DIR}/winpr/include
+    ${freerdp_BINARY_DIR}/include
+    ${freerdp_BINARY_DIR}/winpr/include
+)
+
+target_link_libraries(macrdp-access-policy-test PRIVATE
+    macrdp_freerdp_shadow
+)
+
 target_compile_options(macrdp-config-permissions-test PRIVATE
     -Wall
     -Wextra
@@ -898,6 +921,11 @@ add_test(
 )
 
 add_test(
+    NAME access_policy
+    COMMAND macrdp-access-policy-test
+)
+
+add_test(
     NAME server_help
     COMMAND macrdp-server --help
 )
@@ -968,6 +996,24 @@ add_test(
         --password test
 )
 set_tests_properties(server_invalid_fps PROPERTIES WILL_FAIL TRUE)
+
+add_test(
+    NAME server_invalid_max_clients_zero
+    COMMAND macrdp-server
+        --max-clients 0
+        --user macrdp-test-user
+        --password test
+)
+set_tests_properties(server_invalid_max_clients_zero PROPERTIES WILL_FAIL TRUE)
+
+add_test(
+    NAME server_invalid_max_clients_high
+    COMMAND macrdp-server
+        --max-clients 65
+        --user macrdp-test-user
+        --password test
+)
+set_tests_properties(server_invalid_max_clients_high PROPERTIES WILL_FAIL TRUE)
 
 add_test(
     NAME server_invalid_h264_encoder

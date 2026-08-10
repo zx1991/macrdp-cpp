@@ -57,6 +57,7 @@ struct CaptureConfig {
 
 std::mutex g_capture_config_mutex;
 CaptureConfig g_capture_config;
+std::atomic_bool g_input_enabled{true};
 
 void clear_secret(std::string& value) {
     volatile char* data = value.empty() ? nullptr : value.data();
@@ -121,6 +122,7 @@ struct mac_shadow_subsystem {
     std::deque<InputEvent> input_queue;
     std::thread input_thread;
     CGEventSourceRef input_event_source = nullptr;
+    bool input_enabled = true;
     std::atomic_bool input_stop_requested{false};
     macrdp::InputOwnership input_ownership;
     std::mutex client_ids_mutex;
@@ -2127,12 +2129,14 @@ int mac_shadow_subsystem_start(rdpShadowSubsystem* base) {
         subsystem->capture.reset();
         return -1;
     }
-    subsystem->input_event_source = CGEventSourceCreate(kCGEventSourceStatePrivate);
-    if (subsystem->input_event_source == nullptr) {
-        WLog_ERR(TAG, "Unable to create private CoreGraphics input event source");
-        subsystem->capture->stop();
-        subsystem->capture.reset();
-        return -1;
+    if (subsystem->input_enabled) {
+        subsystem->input_event_source = CGEventSourceCreate(kCGEventSourceStatePrivate);
+        if (subsystem->input_event_source == nullptr) {
+            WLog_ERR(TAG, "Unable to create private CoreGraphics input event source");
+            subsystem->capture->stop();
+            subsystem->capture.reset();
+            return -1;
+        }
     }
 
     subsystem->stop_requested.store(false);
@@ -2197,7 +2201,9 @@ int mac_shadow_subsystem_start(rdpShadowSubsystem* base) {
         subsystem->next_client_id = 1;
     }
     try {
-        subsystem->input_thread = std::thread(input_loop, subsystem);
+        if (subsystem->input_enabled) {
+            subsystem->input_thread = std::thread(input_loop, subsystem);
+        }
         subsystem->publish_thread = std::thread(publish_loop, subsystem);
         subsystem->capture_thread = std::thread(capture_loop, subsystem);
         if (options->capture_audio) {
@@ -2222,8 +2228,10 @@ int mac_shadow_subsystem_start(rdpShadowSubsystem* base) {
         if (subsystem->input_thread.joinable()) {
             subsystem->input_thread.join();
         }
-        CFRelease(subsystem->input_event_source);
-        subsystem->input_event_source = nullptr;
+        if (subsystem->input_event_source != nullptr) {
+            CFRelease(subsystem->input_event_source);
+            subsystem->input_event_source = nullptr;
+        }
         {
             std::lock_guard input_lock(subsystem->input_queue_mutex);
             subsystem->input_queue.clear();
@@ -2318,10 +2326,14 @@ rdpShadowSubsystem* mac_shadow_subsystem_new() {
         std::lock_guard lock(g_capture_config_mutex);
         subsystem->capture_config = g_capture_config;
     }
+    subsystem->input_enabled = g_input_enabled.load(std::memory_order_acquire);
 
     subsystem->common.SynchronizeEvent = [](rdpShadowSubsystem* base, rdpShadowClient* client,
                                             UINT32 flags) {
         auto* mac = reinterpret_cast<MacShadowSubsystem*>(base);
+        if (mac == nullptr || !mac->input_enabled) {
+            return mac != nullptr;
+        }
         return queue_synchronize_event(mac, input_client_id(mac, client), flags)
             ? true
             : false;
@@ -2329,6 +2341,9 @@ rdpShadowSubsystem* mac_shadow_subsystem_new() {
     subsystem->common.KeyboardEvent = [](rdpShadowSubsystem* base, rdpShadowClient* client, UINT16 flags,
                                          UINT8 code) {
         auto* mac = reinterpret_cast<MacShadowSubsystem*>(base);
+        if (mac == nullptr || !mac->input_enabled) {
+            return mac != nullptr;
+        }
         return queue_keyboard_event(mac, input_client_id(mac, client), flags, code)
             ? true
             : false;
@@ -2336,6 +2351,9 @@ rdpShadowSubsystem* mac_shadow_subsystem_new() {
     subsystem->common.UnicodeKeyboardEvent =
         [](rdpShadowSubsystem* base, rdpShadowClient* client, UINT16 flags, UINT16 code) {
             auto* mac = reinterpret_cast<MacShadowSubsystem*>(base);
+            if (mac == nullptr || !mac->input_enabled) {
+                return mac != nullptr;
+            }
             return queue_unicode_event(mac, input_client_id(mac, client), flags, code)
                 ? true
                 : false;
@@ -2343,6 +2361,9 @@ rdpShadowSubsystem* mac_shadow_subsystem_new() {
     subsystem->common.MouseEvent =
         [](rdpShadowSubsystem* base, rdpShadowClient* client, UINT16 flags, UINT16 x, UINT16 y) {
             auto* mac = reinterpret_cast<MacShadowSubsystem*>(base);
+            if (mac == nullptr || !mac->input_enabled) {
+                return mac != nullptr;
+            }
             return queue_mouse_event(mac, client, input_client_id(mac, client), flags, x, y)
             ? true
             : false;
@@ -2350,6 +2371,9 @@ rdpShadowSubsystem* mac_shadow_subsystem_new() {
     subsystem->common.ExtendedMouseEvent =
         [](rdpShadowSubsystem* base, rdpShadowClient* client, UINT16 flags, UINT16 x, UINT16 y) {
             auto* mac = reinterpret_cast<MacShadowSubsystem*>(base);
+            if (mac == nullptr || !mac->input_enabled) {
+                return mac != nullptr;
+            }
             return queue_extended_mouse_event(
                        mac, client, input_client_id(mac, client), flags, x, y)
                 ? true
@@ -2360,6 +2384,9 @@ rdpShadowSubsystem* mac_shadow_subsystem_new() {
             auto* mac = reinterpret_cast<MacShadowSubsystem*>(base);
             if (mac == nullptr) {
                 return false;
+            }
+            if (!mac->input_enabled) {
+                return true;
             }
             std::int32_t pointer_x = 0;
             std::int32_t pointer_y = 0;
@@ -2407,10 +2434,13 @@ rdpShadowSubsystem* mac_shadow_subsystem_new() {
     };
     subsystem->common.ClientConnect = [](rdpShadowSubsystem* base, rdpShadowClient* client) {
         auto* mac = reinterpret_cast<MacShadowSubsystem*>(base);
-        return register_input_client(mac, client) != 0;
+        return mac != nullptr && (!mac->input_enabled || register_input_client(mac, client) != 0);
     };
     subsystem->common.ClientDisconnect = [](rdpShadowSubsystem* base, rdpShadowClient* client) {
         auto* mac = reinterpret_cast<MacShadowSubsystem*>(base);
+        if (mac == nullptr || !mac->input_enabled) {
+            return;
+        }
         const auto client_id = unregister_input_client(mac, client);
         if (client_id != 0) {
             (void)queue_input_reset(mac, client_id);
@@ -2459,6 +2489,10 @@ extern "C" void macrdp_shadow_set_capture_options(
     g_capture_config.max_height = max_height;
     g_capture_config.frame_rate = std::clamp(frame_rate, std::uint32_t{1}, std::uint32_t{60});
     g_capture_config.audio_enabled = audio_enabled;
+}
+
+extern "C" void macrdp_shadow_set_input_enabled(bool enabled) {
+    g_input_enabled.store(enabled, std::memory_order_release);
 }
 
 bool macrdp_shadow_preflight_capture(std::string& error) {

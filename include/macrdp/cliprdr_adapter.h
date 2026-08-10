@@ -9,6 +9,7 @@ extern "C"
 
 BOOL macrdp_shadow_cliprdr_init(rdpShadowClient* client);
 void macrdp_shadow_cliprdr_uninit(rdpShadowClient* client);
+void macrdp_shadow_cliprdr_set_enabled(BOOL enabled);
 
 #ifdef __cplusplus
 }

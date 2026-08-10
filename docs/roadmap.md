@@ -20,6 +20,9 @@ are acceptance gates rather than promised dates.
 - Add an injectable capture backend and deterministic coverage for separate
   frame/audio wakeups, generation isolation, start/stop transitions, and
   concurrent stop/reconfigure serialization without TCC or a display.
+- Add independent `--view-only` and `--no-clipboard` policies, default the
+  listener to one concurrent client, and enforce a configurable 1-64 client
+  limit before accepting a new shadow session.
 
 ## P0: correctness and lifecycle
 
@@ -35,8 +38,6 @@ and the Windows matrix has recorded results for every interactive path.
 
 ## P1: deployment safety
 
-- Add explicit `--no-clipboard` and view-only modes, and enforce a configurable
-  concurrent-client limit before accepting interactive sessions.
 - Document listener exposure and credential rotation. Keep NLA as the default
   and make insecure combinations difficult to select accidentally.
 - Add sanitizer builds and lifecycle-focused stress tests. Keep the real
