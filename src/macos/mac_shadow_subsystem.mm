@@ -12,6 +12,7 @@
 #include "macrdp/display_capture.hpp"
 #include "macrdp/input_ownership.hpp"
 #include "macrdp/input_queue.hpp"
+#include "macrdp/input_translation.hpp"
 #include "mac_shadow_subsystem.hpp"
 #include "shadow_screen.h"
 
@@ -821,10 +822,7 @@ bool post_mouse_event(
 
     const CGPoint point = display_point(subsystem, x, y);
     if ((flags & PTR_FLAGS_WHEEL) != 0 || (flags & PTR_FLAGS_HWHEEL) != 0) {
-        const int rotation = static_cast<int>(flags & WheelRotationMask) / 120;
-        const int signed_rotation = (flags & PTR_FLAGS_WHEEL_NEGATIVE) != 0
-            ? -std::abs(rotation)
-            : rotation;
+        const int signed_rotation = macrdp::decode_rdp_wheel_delta(flags) / 120;
         const int horizontal = (flags & PTR_FLAGS_HWHEEL) != 0
             ? signed_rotation
             : 0;

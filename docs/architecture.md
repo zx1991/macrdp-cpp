@@ -37,7 +37,14 @@ format negotiation and data transfer under a channel lock.
 
 - Screen capture is isolated from protocol callbacks. A capture failure can
   restart with bounded backoff without making the RDP listener thread own
-  ScreenCaptureKit state.
+  ScreenCaptureKit state. Content discovery and stream start share a 15-second
+  deadline; stream stop waits at most 5 seconds before detaching its outputs.
+  Each start has a generation token, so frames and delegate callbacks from a
+  timed-out or replaced stream cannot mutate the active stream's state.
+- ScreenCaptureKit keeps independent newest-frame and newest-audio slots. Each
+  slot has its own condition variable, so video and audio callbacks wake only
+  their corresponding consumer. Stop, reconfigure, and capture-error paths
+  wake both consumers.
 - A client receives the newest useful video state. Old video work may be
   coalesced when the client is slower than the capture rate.
 - H.264 work is per client, so a slow encoder or blocked client does not make
@@ -49,7 +56,8 @@ format negotiation and data transfer under a channel lock.
   buttons owned by that client; platform injection is serialized in the input
   worker. When the bounded queue is full, obsolete pointer motion is discarded
   before critical keyboard, button, wheel, and reset events are allowed to
-  wait for capacity.
+  wait for capacity. RDP wheel rotation is decoded from its signed 9-bit field
+  before vertical or horizontal line events are sent to CoreGraphics.
 - Shutdown joins capture, audio, publish, input, and encoder workers in a
   defined order before FreeRDP state is released.
 
@@ -78,6 +86,13 @@ The server uses FreeRDP NLA by default and creates its certificate/SAM files in
 a private configuration directory. macOS TCC permissions remain enforced by
 the operating system: Screen Recording is required for capture and Accessibility
 is required for input injection. The server does not bypass those controls.
+
+An authenticated client currently receives the complete interactive session:
+screen, keyboard and pointer injection, text clipboard synchronization, and
+audio when enabled. There is not yet a view-only mode, clipboard opt-out, or
+configurable client limit. Until those policy controls exist, deployments must
+treat an account as granting full remote-control access and restrict listener
+exposure accordingly.
 
 ## Design constraints
 

@@ -61,8 +61,8 @@ public:
     DisplayCapture& operator=(DisplayCapture&&) noexcept;
 
     // Starts an asynchronous stream for the main display. This method waits
-    // until ScreenCaptureKit has either started the stream or reported an
-    // error, so a true return means next_frame() can be used immediately.
+    // for ScreenCaptureKit to start or report an error, with a finite internal
+    // deadline. A true return means next_frame() can be used immediately.
     [[nodiscard]] bool start();
 
     // Returns the newest available frame. Older pending frames are discarded
@@ -83,6 +83,8 @@ public:
     // used when macOS changes the selected display's pixel dimensions.
     [[nodiscard]] bool reconfigure(DisplayCaptureOptions options);
 
+    // Stops capture with a finite internal wait for ScreenCaptureKit. Late
+    // callbacks are isolated from any later stream generation.
     void stop() noexcept;
 
     [[nodiscard]] std::string last_error() const;

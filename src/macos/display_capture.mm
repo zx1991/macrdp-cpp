@@ -5,6 +5,7 @@
 #import <AudioToolbox/AudioToolbox.h>
 #import <ScreenCaptureKit/ScreenCaptureKit.h>
 
+#include "macrdp/async_completion.hpp"
 #include "macrdp/display_capture.hpp"
 
 #include <algorithm>
@@ -38,39 +39,18 @@ std::string error_description(NSError* error) {
     return [description UTF8String];
 }
 
-struct CompletionWaiter {
-    std::mutex mutex;
-    std::condition_variable condition;
-    bool complete = false;
-    std::string error;
-
-    void finish(NSError* error_value) {
-        finish_message(error_value == nil ? std::string{} : error_description(error_value));
-    }
-
-    void finish_message(std::string error_message) {
-        {
-            std::lock_guard lock(mutex);
-            complete = true;
-            error = std::move(error_message);
-        }
-        condition.notify_one();
-    }
-
-    [[nodiscard]] bool wait() {
-        std::unique_lock lock(mutex);
-        condition.wait(lock, [this] { return complete; });
-        return error.empty();
-    }
-};
+constexpr auto capture_start_timeout = std::chrono::milliseconds{15000};
+constexpr auto capture_stop_timeout = std::chrono::milliseconds{5000};
 
 struct CaptureState {
     mutable std::mutex mutex;
-    std::condition_variable condition;
+    std::condition_variable frame_condition;
+    std::condition_variable audio_condition;
     std::optional<macrdp::Frame> latest_frame;
     std::optional<macrdp::AudioFrame> latest_audio;
     std::optional<macrdp::Frame> reusable_frame;
     std::string error;
+    std::uint64_t generation = 0;
     bool accepting_frames = false;
     bool stopped = true;
 };
@@ -594,17 +574,21 @@ std::pair<std::size_t, std::size_t> output_size(
 @interface MacCaptureOutput : NSObject <SCStreamOutput, SCStreamDelegate> {
 @private
     std::shared_ptr<CaptureState> state_;
+    std::uint64_t generation_;
 }
 
-- (instancetype)initWithState:(std::shared_ptr<CaptureState>)state;
+- (instancetype)initWithState:(std::shared_ptr<CaptureState>)state
+    generation:(std::uint64_t)generation;
 @end
 
 @implementation MacCaptureOutput
 
-- (instancetype)initWithState:(std::shared_ptr<CaptureState>)state {
+- (instancetype)initWithState:(std::shared_ptr<CaptureState>)state
+    generation:(std::uint64_t)generation {
     self = [super init];
     if (self != nil) {
         state_ = std::move(state);
+        generation_ = generation;
     }
     return self;
 }
@@ -623,13 +607,19 @@ std::pair<std::size_t, std::size_t> output_size(
         if (!audio.has_value()) {
             return;
         }
-        std::lock_guard lock(state->mutex);
-        if (state->accepting_frames) {
-            // The audio consumer runs independently from video and keeps the
-            // newest block only, so audio backpressure cannot stall SCK.
-            state->latest_audio = std::move(*audio);
+        bool published = false;
+        {
+            std::lock_guard lock(state->mutex);
+            if (state->generation == generation_ && state->accepting_frames) {
+                // The audio consumer runs independently from video and keeps the
+                // newest block only, so audio backpressure cannot stall SCK.
+                state->latest_audio = std::move(*audio);
+                published = true;
+            }
         }
-        state->condition.notify_one();
+        if (published) {
+            state->audio_condition.notify_one();
+        }
         return;
     }
     if (type != SCStreamOutputTypeScreen) {
@@ -643,7 +633,7 @@ std::pair<std::size_t, std::size_t> output_size(
     bool reused_pending_frame = false;
     {
         std::lock_guard lock(state->mutex);
-        if (!state->accepting_frames) {
+        if (state->generation != generation_ || !state->accepting_frames) {
             return;
         }
 
@@ -662,7 +652,8 @@ std::pair<std::size_t, std::size_t> output_size(
 
     if (!copy_sample_buffer(sampleBuffer, frame)) {
         std::lock_guard lock(state->mutex);
-        if (reused_pending_frame && state->accepting_frames
+        if (reused_pending_frame && state->generation == generation_
+            && state->accepting_frames
             && !state->latest_frame.has_value()) {
             frame.dirty_rects = std::move(dropped_dirty_rects);
             state->latest_frame = std::move(frame);
@@ -682,13 +673,13 @@ std::pair<std::size_t, std::size_t> output_size(
 
     {
         std::lock_guard lock(state->mutex);
-        if (!state->accepting_frames) {
+        if (state->generation != generation_ || !state->accepting_frames) {
             recycle_frame_locked(*state, std::move(frame));
             return;
         }
         state->latest_frame = std::move(frame);
     }
-    state->condition.notify_one();
+    state->frame_condition.notify_one();
 }
 
 - (void)stream:(SCStream*)stream didStopWithError:(NSError*)error {
@@ -696,6 +687,9 @@ std::pair<std::size_t, std::size_t> output_size(
     const auto state = state_;
     {
         std::lock_guard lock(state->mutex);
+        if (state->generation != generation_) {
+            return;
+        }
         if (error != nil) {
             state->error = error_description(error);
         } else if (state->accepting_frames) {
@@ -704,7 +698,8 @@ std::pair<std::size_t, std::size_t> output_size(
         state->accepting_frames = false;
         state->stopped = true;
     }
-    state->condition.notify_all();
+    state->frame_condition.notify_all();
+    state->audio_condition.notify_all();
 }
 
 @end
@@ -740,14 +735,74 @@ namespace {
 
 void set_capture_error(
     const std::shared_ptr<CaptureState>& state,
+    std::uint64_t generation,
     std::string error) {
     {
         std::lock_guard lock(state->mutex);
+        if (state->generation != generation) {
+            return;
+        }
+        ++state->generation;
         state->error = std::move(error);
         state->accepting_frames = false;
         state->stopped = true;
     }
-    state->condition.notify_all();
+    state->frame_condition.notify_all();
+    state->audio_condition.notify_all();
+}
+
+bool activate_capture_generation(
+    const std::shared_ptr<CaptureState>& state,
+    std::uint64_t generation) {
+    std::lock_guard lock(state->mutex);
+    if (state->generation != generation || state->stopped) {
+        return false;
+    }
+    state->accepting_frames = true;
+    return true;
+}
+
+void deactivate_capture_generation(
+    const std::shared_ptr<CaptureState>& state,
+    std::uint64_t generation) {
+    {
+        std::lock_guard lock(state->mutex);
+        if (state->generation != generation) {
+            return;
+        }
+        state->accepting_frames = false;
+        state->stopped = true;
+    }
+    state->frame_condition.notify_all();
+    state->audio_condition.notify_all();
+}
+
+void remove_stream_outputs(
+    SCStream* stream,
+    MacCaptureOutput* output,
+    bool audio_registered) {
+    if (stream == nil || output == nil) {
+        return;
+    }
+    if (audio_registered) {
+        [stream removeStreamOutput:output type:SCStreamOutputTypeAudio error:nil];
+    }
+    [stream removeStreamOutput:output type:SCStreamOutputTypeScreen error:nil];
+}
+
+void stop_stream_without_waiting(
+    SCStream* stream,
+    MacCaptureOutput* output,
+    bool audio_registered) {
+    if (stream == nil) {
+        return;
+    }
+    [stream stopCaptureWithCompletionHandler:^(NSError* error) {
+        if (error != nil) {
+            NSLog(@"macrdp: asynchronous ScreenCaptureKit stop failed: %@", error);
+        }
+    }];
+    remove_stream_outputs(stream, output, audio_registered);
 }
 
 void stop_stream(SCStream* stream, MacCaptureOutput* output, bool audio_registered) {
@@ -755,25 +810,28 @@ void stop_stream(SCStream* stream, MacCaptureOutput* output, bool audio_register
         return;
     }
 
-    auto waiter = std::make_shared<CompletionWaiter>();
+    auto waiter = std::make_shared<AsyncCompletion>();
     [stream stopCaptureWithCompletionHandler:^(NSError* error) {
-        waiter->finish(error);
+        (void)waiter->finish(
+            error == nil ? std::string{} : error_description(error));
     }];
-    (void)waiter->wait();
-
-    if (output != nil) {
-        if (audio_registered) {
-            [stream removeStreamOutput:output type:SCStreamOutputTypeAudio error:nil];
-        }
-        [stream removeStreamOutput:output type:SCStreamOutputTypeScreen error:nil];
+    const auto result = waiter->wait_for(capture_stop_timeout);
+    if (!result.completed) {
+        NSLog(@"macrdp: ScreenCaptureKit stop timed out after %lld ms",
+              static_cast<long long>(capture_stop_timeout.count()));
+    } else if (!result.error.empty()) {
+        NSLog(@"macrdp: ScreenCaptureKit stop failed: %s", result.error.c_str());
     }
+    remove_stream_outputs(stream, output, audio_registered);
 }
 
 } // namespace
 
 bool DisplayCapture::Impl::start_locked() {
+    std::uint64_t generation = 0;
     {
         std::lock_guard lock(state->mutex);
+        generation = ++state->generation;
         if (state->latest_frame.has_value()) {
             recycle_frame_locked(*state, std::move(*state->latest_frame));
         }
@@ -786,7 +844,7 @@ bool DisplayCapture::Impl::start_locked() {
 
     const auto state_for_callback = state;
     const auto capture_options = options;
-    auto waiter = std::make_shared<CompletionWaiter>();
+    auto waiter = std::make_shared<AsyncCompletion>();
     __block SCStream* new_stream = nil;
     __block MacCaptureOutput* new_output = nil;
     __block bool audio_registered = false;
@@ -795,12 +853,15 @@ bool DisplayCapture::Impl::start_locked() {
         onScreenWindowsOnly:YES
         completionHandler:^(SCShareableContent* content, NSError* error) {
         @autoreleasepool {
+            if (waiter->timed_out()) {
+                return;
+            }
             if (error != nil) {
-                waiter->finish(error);
+                (void)waiter->finish(error_description(error));
                 return;
             }
             if (content == nil || [content.displays count] == 0) {
-                waiter->finish_message(
+                (void)waiter->finish(
                     "ScreenCaptureKit returned no shareable displays");
                 return;
             }
@@ -820,7 +881,7 @@ bool DisplayCapture::Impl::start_locked() {
             const auto display_id = [selected_display displayID];
             const auto [width, height] = output_size(display_id, capture_options);
             if (width == 0 || height == 0) {
-                waiter->finish_message(
+                (void)waiter->finish(
                     "Unable to determine the selected display dimensions");
                 return;
             }
@@ -850,7 +911,9 @@ bool DisplayCapture::Impl::start_locked() {
             configuration.shouldBeOpaque = YES;
             configuration.ignoreShadowsDisplay = YES;
 
-            new_output = [[MacCaptureOutput alloc] initWithState:state_for_callback];
+            new_output = [[MacCaptureOutput alloc]
+                initWithState:state_for_callback
+                generation:generation];
             new_stream = [[SCStream alloc] initWithFilter:filter
                 configuration:configuration
                 delegate:new_output];
@@ -863,7 +926,12 @@ bool DisplayCapture::Impl::start_locked() {
                 type:SCStreamOutputTypeScreen
                 sampleHandlerQueue:sample_queue
                 error:&add_error]) {
-                waiter->finish(add_error);
+                (void)waiter->finish(
+                    add_error == nil
+                        ? "Unable to register ScreenCaptureKit video output"
+                        : error_description(add_error));
+                new_stream = nil;
+                new_output = nil;
                 return;
             }
 
@@ -880,37 +948,83 @@ bool DisplayCapture::Impl::start_locked() {
                 }
             }
 
-            {
-                std::lock_guard lock(state_for_callback->mutex);
-                state_for_callback->accepting_frames = true;
-            }
-
             if (!audio_registered && audio_add_error != nil) {
                 // Screen capture remains useful when the system has no audio
                 // source or refuses audio output; RDPSND will simply stay idle.
                 NSLog(@"macrdp: audio capture unavailable: %@", audio_add_error);
             }
 
+            if (waiter->timed_out()) {
+                remove_stream_outputs(new_stream, new_output, audio_registered);
+                new_stream = nil;
+                new_output = nil;
+                audio_registered = false;
+                return;
+            }
+
+            auto cleanup_stream = [
+                state_for_callback,
+                generation,
+                stream_to_stop = new_stream,
+                output_to_remove = new_output,
+                audio_registered_for_cleanup = audio_registered] {
+                deactivate_capture_generation(state_for_callback, generation);
+                stop_stream_without_waiting(
+                    stream_to_stop,
+                    output_to_remove,
+                    audio_registered_for_cleanup);
+            };
+            waiter->set_timeout_handler(cleanup_stream);
+            if (waiter->timed_out()) {
+                return;
+            }
+
             [new_stream startCaptureWithCompletionHandler:^(NSError* start_error) {
-                waiter->finish(start_error);
+                if (start_error != nil) {
+                    (void)waiter->finish_and_invoke_timeout_handler(
+                        error_description(start_error));
+                    return;
+                }
+
+                if (!activate_capture_generation(state_for_callback, generation)) {
+                    (void)waiter->finish_and_invoke_timeout_handler(
+                        "ScreenCaptureKit stream was superseded while starting");
+                    return;
+                }
+
+                if (!waiter->finish()) {
+                    deactivate_capture_generation(state_for_callback, generation);
+                }
             }];
+            if (waiter->timed_out()) {
+                // The timeout handler may have raced immediately before the
+                // start request. Issue a second stop after start was invoked.
+                stop_stream_without_waiting(
+                    new_stream,
+                    new_output,
+                    audio_registered);
+            }
         }
     }];
 
-    const bool started = waiter->wait();
-    if (!started) {
-        if (new_stream != nil) {
-            stop_stream(new_stream, new_output, audio_registered);
-        }
-        {
-            std::lock_guard lock(state->mutex);
-            state->accepting_frames = false;
-        }
-        if (!waiter->error.empty()) {
-            set_capture_error(state, waiter->error);
-        } else {
-            set_capture_error(state, "Unable to start ScreenCaptureKit stream");
-        }
+    const auto result = waiter->wait_for(capture_start_timeout);
+    if (!result.completed) {
+        set_capture_error(
+            state,
+            generation,
+            "ScreenCaptureKit start timed out after "
+                + std::to_string(capture_start_timeout.count()) + " ms");
+        return false;
+    }
+    if (!result.error.empty()) {
+        set_capture_error(state, generation, result.error);
+        return false;
+    }
+    if (new_stream == nil || new_output == nil) {
+        set_capture_error(
+            state,
+            generation,
+            "ScreenCaptureKit completed without a valid stream");
         return false;
     }
 
@@ -936,7 +1050,8 @@ bool DisplayCapture::Impl::reconfigure(DisplayCaptureOptions next_options) {
             state->accepting_frames = false;
             state->stopped = true;
         }
-        state->condition.notify_all();
+        state->frame_condition.notify_all();
+        state->audio_condition.notify_all();
         stop_stream(stream, output, audio_output_registered);
         stream = nil;
         output = nil;
@@ -952,7 +1067,7 @@ std::optional<Frame> DisplayCapture::Impl::next_frame(
     const auto ready = [this] {
         return state->latest_frame.has_value() || state->stopped;
     };
-    if (!state->condition.wait_for(lock, timeout, ready)) {
+    if (!state->frame_condition.wait_for(lock, timeout, ready)) {
         return std::nullopt;
     }
     if (!state->latest_frame.has_value()) {
@@ -970,7 +1085,7 @@ std::optional<AudioFrame> DisplayCapture::Impl::next_audio(
     const auto ready = [this] {
         return state->latest_audio.has_value() || state->stopped;
     };
-    if (!state->condition.wait_for(lock, timeout, ready)) {
+    if (!state->audio_condition.wait_for(lock, timeout, ready)) {
         return std::nullopt;
     }
     if (!state->latest_audio.has_value()) {
@@ -1001,7 +1116,8 @@ void DisplayCapture::Impl::stop() noexcept {
         state->accepting_frames = false;
         state->stopped = true;
     }
-    state->condition.notify_all();
+    state->frame_condition.notify_all();
+    state->audio_condition.notify_all();
 
     if (stream != nil) {
         stop_stream(stream, output, audio_output_registered);

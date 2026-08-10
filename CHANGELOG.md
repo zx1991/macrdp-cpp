@@ -18,3 +18,14 @@ This project has not published a stable release yet.
   long-budget Wi-Fi and bad-link reconnect profiles.
 - Added raw keyboard-path diagnostics, queue-delay metrics, and loopback
   coverage for FastPath, classic input, Pause/E1, and modifier-release recovery.
+- Corrected vertical and horizontal negative wheel deltas by decoding RDP's
+  signed 9-bit wheel value before converting it to CoreGraphics line units.
+- Separated ScreenCaptureKit frame and audio wakeups so one producer cannot
+  wake the other path's consumer and leave the intended consumer waiting.
+- Reordered the roadmap around lifecycle reliability, remote-control policy,
+  release compliance, and deployment-target validation.
+- Added finite ScreenCaptureKit discovery/start and stop waits, cleanup for
+  timed-out attempts, and generation isolation for late stream callbacks.
+- Added deterministic asynchronous completion/timeout tests and rewrote the
+  root README around Alpha status, security boundaries, quick start, and
+  release blockers.

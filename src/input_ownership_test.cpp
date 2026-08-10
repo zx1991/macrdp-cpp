@@ -1,5 +1,6 @@
 #include "macrdp/input_ownership.hpp"
 #include "macrdp/input_queue.hpp"
+#include "macrdp/input_translation.hpp"
 
 #include <deque>
 #include <iostream>
@@ -77,10 +78,26 @@ bool test_discard_motion_for_critical_input() {
                    "critical input discard removed a non-coalescible event");
 }
 
+bool test_wheel_delta_decoding() {
+    return expect(macrdp::decode_rdp_wheel_delta(0x0078U) == 120,
+                  "positive wheel delta was decoded incorrectly")
+        && expect(macrdp::decode_rdp_wheel_delta(0x0188U) == -120,
+                  "negative wheel delta was not sign-extended from 9 bits")
+        && expect(macrdp::decode_rdp_wheel_delta(0x0001U) == 1,
+                  "small positive wheel delta was decoded incorrectly")
+        && expect(macrdp::decode_rdp_wheel_delta(0x01FFU) == -1,
+                  "small negative wheel delta was decoded incorrectly")
+        && expect(macrdp::decode_rdp_wheel_delta(0x0278U) == 120,
+                  "vertical wheel event flags changed the decoded delta")
+        && expect(macrdp::decode_rdp_wheel_delta(0x0588U) == -120,
+                  "horizontal wheel event flags changed the decoded delta");
+}
+
 } // namespace
 
 int main() {
-    bool ok = test_reset_priority();
+    bool ok = test_wheel_delta_decoding();
+    ok = test_reset_priority() && ok;
     ok = test_motion_coalescing() && ok;
     ok = test_discard_motion_for_critical_input() && ok;
     macrdp::InputOwnership ownership;

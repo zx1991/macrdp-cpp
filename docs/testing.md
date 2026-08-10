@@ -15,9 +15,23 @@ ctest --test-dir build --output-on-failure
 ```
 
 The local suite covers display dimensions, frame coalescing, VideoToolbox and
-FreeRDP H.264 paths, the asynchronous encoder worker, input ownership,
-configuration permissions, and server argument validation. It does not require
-Screen Recording permission for the synthetic encoder tests.
+FreeRDP H.264 paths, the asynchronous encoder worker, input ownership and queue
+behavior, signed 9-bit RDP wheel-delta translation, asynchronous completion and
+timeout cleanup semantics, configuration permissions, and server argument
+validation. It does not require Screen Recording permission for the synthetic
+encoder and state-machine tests.
+
+The asynchronous completion test covers completion, duplicate and late result
+rejection, timeout cleanup installed both before and after a timeout, and
+explicit failure cleanup. Apple API fault injection is still needed to exercise
+the full capture generation and delegate path deterministically.
+
+Wheel translation tests cover positive and negative deltas, both pointer event
+types, and the signed field boundaries. The loopback smoke test confirms that
+wheel callbacks reach the server's real input path, but it cannot observe the
+resulting macOS scroll distance or direction directly. A release candidate
+therefore still needs a manual vertical and horizontal wheel check from the
+supported Windows client matrix.
 
 ## Loopback client
 

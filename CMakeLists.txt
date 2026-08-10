@@ -780,6 +780,10 @@ add_executable(macrdp-input-ownership-test
     src/input_ownership_test.cpp
 )
 
+add_executable(macrdp-async-completion-test
+    src/async_completion_test.cpp
+)
+
 add_executable(macrdp-config-permissions-test
     src/config_permissions_test.cpp
 )
@@ -799,6 +803,16 @@ target_compile_options(macrdp-input-ownership-test PRIVATE
 )
 
 target_include_directories(macrdp-input-ownership-test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+
+target_compile_options(macrdp-async-completion-test PRIVATE
+    -Wall
+    -Wextra
+    -Wpedantic
+)
+
+target_include_directories(macrdp-async-completion-test PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
 
@@ -852,6 +866,11 @@ add_test(
 add_test(
     NAME input_ownership
     COMMAND macrdp-input-ownership-test
+)
+
+add_test(
+    NAME async_completion
+    COMMAND macrdp-async-completion-test
 )
 
 add_test(
