@@ -5,6 +5,7 @@
 #ifdef __cplusplus
 #include <cstdint>
 #include <string>
+#include <vector>
 #endif
 
 #ifdef __cplusplus
@@ -20,6 +21,7 @@ void macrdp_shadow_set_credentials(
     const char* password);
 
 void macrdp_shadow_set_capture_options(
+    std::uint32_t display_id,
     std::uint32_t max_width,
     std::uint32_t max_height,
     std::uint32_t frame_rate,
@@ -29,6 +31,29 @@ void macrdp_shadow_set_input_enabled(bool enabled);
 
 #ifdef __cplusplus
 }
+
+struct MacrdpDisplayInfo {
+    std::uint32_t id = 0;
+    std::uint32_t pixel_width = 0;
+    std::uint32_t pixel_height = 0;
+    double point_width = 0.0;
+    double point_height = 0.0;
+    double origin_x = 0.0;
+    double origin_y = 0.0;
+    bool main = false;
+};
+
+// Enumerate active displays without starting ScreenCaptureKit or requesting
+// Screen Recording permission.
+bool macrdp_shadow_enumerate_displays(
+    std::vector<MacrdpDisplayInfo>& displays,
+    std::string& error);
+
+// Resolve zero to the current main display and validate exact non-zero IDs.
+bool macrdp_shadow_resolve_display_id(
+    std::uint32_t requested_display_id,
+    std::uint32_t& resolved_display_id,
+    std::string& error);
 
 // Validate ScreenCaptureKit before opening the RDP listener. The check uses a
 // tiny stream and waits for one complete frame, so TCC and GUI-session errors

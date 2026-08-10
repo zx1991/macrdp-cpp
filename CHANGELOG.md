@@ -111,3 +111,6 @@ This project has not published a stable release yet.
 - Added gated Developer ID signing, hardened runtime and timestamp checks,
   notarytool submission, explicit acceptance handling, stapling, Gatekeeper
   assessment, and credential-free notarization control-flow tests.
+- Added active-display discovery and exact `--display-id` capture selection,
+  with shared ScreenCaptureKit, RDP surface, preflight, and input geometry plus
+  deterministic negative-origin and Retina coordinate coverage.

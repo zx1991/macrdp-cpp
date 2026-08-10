@@ -17,7 +17,7 @@ shadow server.
 
 | Area | Current implementation |
 | --- | --- |
-| Display | Main-display ScreenCaptureKit capture with newest-frame coalescing |
+| Display | Startup selection of one active display with newest-frame coalescing |
 | Video | GFX/AVC420 through direct VideoToolbox, FFmpeg fallback, optional AVC444, or classic SurfaceBits |
 | Input | Serialized keyboard, Unicode, pointer, button, drag, and wheel injection through a private CoreGraphics event source |
 | Clipboard | Bidirectional `CF_UNICODETEXT` and `CF_TEXT` through `NSPasteboard` |
@@ -32,7 +32,8 @@ and backpressure details.
 
 ## Current limits
 
-- The main display is the only capture target; there is no monitor picker.
+- Capture targets one active display at a time; combined-desktop spanning and
+  live display switching are not implemented.
 - Multi-client sessions share one captured display and have not completed the
   supported Windows hardware matrix; keep the concurrent-client limit low.
 - Clipboard redirection is text-only. File, image, and directory transfer are
@@ -133,6 +134,18 @@ Interactive sessions also require Accessibility permission.
 The server checks every permission required by the selected access policy before
 opening the RDP listener.
 
+List active displays without credentials, TCC prompts, or a listening socket:
+
+```bash
+./build/macrdp-server --list-displays
+```
+
+Each row includes the display ID, main-display flag, pixel size, macOS point
+size, and global origin. Omit `--display-id` to select the main display at
+startup, or pass one listed ID to the server and preflight commands. An exact
+ID that is no longer active is rejected instead of falling back to a different
+screen; rerun the list command after changing the display arrangement.
+
 Check the exact signed executable without credential input, configuration
 changes, or a listening socket:
 
@@ -177,6 +190,7 @@ Access and media controls can be appended to the server command above:
 | --- | --- |
 | Disable remote keyboard and pointer input | `--view-only` |
 | Disable clipboard redirection | `--no-clipboard` |
+| Capture a listed display | `--display-id <id>` |
 | Allow up to four concurrent clients | `--max-clients 4` |
 | Higher AVC420 bitrate | `--bitrate 24M` |
 | Require direct macOS AVC420 | `--h264-encoder videotoolbox` |

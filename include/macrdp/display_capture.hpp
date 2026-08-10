@@ -17,12 +17,22 @@ class DisplayCaptureBackend;
 }
 
 struct DisplayCaptureOptions {
+    // Zero selects the current main display. A non-zero value is an exact
+    // CGDirectDisplayID and must not silently fall back to another display.
+    std::uint32_t display_id = 0;
     // Zero means the native pixel dimensions of the selected display.
     std::uint32_t max_width = 0;
     std::uint32_t max_height = 0;
     std::uint32_t frame_rate = 30;
     bool show_cursor = false;
     bool capture_audio = true;
+};
+
+struct DisplayBounds {
+    double origin_x = 0.0;
+    double origin_y = 0.0;
+    double width = 0.0;
+    double height = 0.0;
 };
 
 // ScreenCaptureKit audio normalized to interleaved signed 16-bit PCM. The
@@ -52,6 +62,23 @@ struct AudioFrame {
     std::uint32_t max_width,
     std::uint32_t max_height) noexcept;
 
+// Resolve an exact requested display, or the main/first available display
+// when requested_display_id is zero. Exact requests never fall back.
+[[nodiscard]] std::optional<std::uint32_t> display_capture_select_id(
+    std::uint32_t requested_display_id,
+    std::uint32_t main_display_id,
+    const std::vector<std::uint32_t>& available_display_ids) noexcept;
+
+// Map an RDP surface coordinate into the selected display's global macOS
+// point coordinates. Display bounds are expressed in points, while the RDP
+// surface may use Retina pixel dimensions.
+[[nodiscard]] std::pair<double, double> display_capture_input_point(
+    DisplayBounds bounds,
+    std::uint32_t surface_width,
+    std::uint32_t surface_height,
+    std::uint16_t x,
+    std::uint16_t y) noexcept;
+
 // C++-only interface for the macOS capture implementation. The implementation
 // uses ScreenCaptureKit, but no Apple framework types cross this boundary.
 class DisplayCapture final {
@@ -68,9 +95,10 @@ public:
     DisplayCapture(DisplayCapture&&) noexcept;
     DisplayCapture& operator=(DisplayCapture&&) noexcept;
 
-    // Starts an asynchronous stream for the main display. This method waits
-    // for ScreenCaptureKit to start or report an error, with a finite internal
-    // deadline. A true return means next_frame() can be used immediately.
+    // Starts an asynchronous stream for the selected display. This method
+    // waits for ScreenCaptureKit to start or report an error, with a finite
+    // internal deadline. A true return means next_frame() can be used
+    // immediately.
     [[nodiscard]] bool start();
 
     // Returns the newest available frame. Older pending frames are discarded

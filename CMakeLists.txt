@@ -1411,6 +1411,16 @@ add_test(
 set_tests_properties(server_invalid_fps PROPERTIES WILL_FAIL TRUE)
 
 add_test(
+    NAME server_invalid_display_id
+    COMMAND bash
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests/expect_command_failure.sh
+        "--display-id must be between 1 and 4294967295"
+        $<TARGET_FILE:macrdp-server>
+        --display-id 0
+        --preflight
+)
+
+add_test(
     NAME server_invalid_max_clients_zero
     COMMAND macrdp-server
         --max-clients 0

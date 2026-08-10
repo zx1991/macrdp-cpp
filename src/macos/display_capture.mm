@@ -599,6 +599,63 @@ std::pair<std::uint32_t, std::uint32_t> display_capture_output_size(
     return {scaled_width, scaled_height};
 }
 
+std::optional<std::uint32_t> display_capture_select_id(
+    std::uint32_t requested_display_id,
+    std::uint32_t main_display_id,
+    const std::vector<std::uint32_t>& available_display_ids) noexcept {
+    if (available_display_ids.empty()) {
+        return std::nullopt;
+    }
+
+    const auto contains = [&available_display_ids](std::uint32_t display_id) {
+        return std::find(
+                   available_display_ids.begin(),
+                   available_display_ids.end(),
+                   display_id)
+            != available_display_ids.end();
+    };
+    if (requested_display_id != 0) {
+        return contains(requested_display_id)
+            ? std::optional<std::uint32_t>{requested_display_id}
+            : std::nullopt;
+    }
+    if (main_display_id != 0 && contains(main_display_id)) {
+        return main_display_id;
+    }
+    return available_display_ids.front();
+}
+
+std::pair<double, double> display_capture_input_point(
+    DisplayBounds bounds,
+    std::uint32_t surface_width,
+    std::uint32_t surface_height,
+    std::uint16_t x,
+    std::uint16_t y) noexcept {
+    const auto map_axis = [](double origin,
+                             double extent,
+                             std::uint32_t surface_extent,
+                             std::uint16_t coordinate) {
+        if (!std::isfinite(origin)) {
+            origin = 0.0;
+        }
+        if (!std::isfinite(extent) || extent <= 0.0) {
+            return origin;
+        }
+        const double denominator = surface_extent > 1
+            ? static_cast<double>(surface_extent - 1)
+            : std::max(1.0, extent - 1.0);
+        const double normalized = std::clamp(
+            static_cast<double>(coordinate) / denominator,
+            0.0,
+            1.0);
+        return origin + normalized * std::max(0.0, extent - 1.0);
+    };
+
+    return {
+        map_axis(bounds.origin_x, bounds.width, surface_width, x),
+        map_axis(bounds.origin_y, bounds.height, surface_height, y)};
+}
+
 } // namespace macrdp
 
 namespace {
@@ -917,16 +974,36 @@ detail::DisplayCaptureBackendStartResult ScreenCaptureKitBackend::start(
                 return;
             }
 
-            SCDisplay* selected_display = nil;
-            const auto main_display_id = CGMainDisplayID();
+            std::vector<std::uint32_t> available_display_ids;
+            available_display_ids.reserve([content.displays count]);
             for (SCDisplay* display in content.displays) {
-                if ([display displayID] == main_display_id) {
+                available_display_ids.push_back([display displayID]);
+            }
+            const auto selected_display_id = macrdp::display_capture_select_id(
+                capture_options.display_id,
+                CGMainDisplayID(),
+                available_display_ids);
+            if (!selected_display_id.has_value()) {
+                const std::string description = capture_options.display_id == 0
+                    ? "ScreenCaptureKit returned no selectable display"
+                    : "Requested display ID "
+                        + std::to_string(capture_options.display_id)
+                        + " is not shareable";
+                (void)waiter->finish(description);
+                return;
+            }
+
+            SCDisplay* selected_display = nil;
+            for (SCDisplay* display in content.displays) {
+                if ([display displayID] == *selected_display_id) {
                     selected_display = display;
                     break;
                 }
             }
             if (selected_display == nil) {
-                selected_display = [content.displays firstObject];
+                (void)waiter->finish(
+                    "Selected display disappeared during ScreenCaptureKit discovery");
+                return;
             }
 
             const auto display_id = [selected_display displayID];

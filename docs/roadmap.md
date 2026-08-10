@@ -59,6 +59,9 @@ are acceptance gates rather than promised dates.
   Developer ID and hardened-runtime gates, notarytool submission, explicit
   acceptance checks, stapling, Gatekeeper validation, and credential-free CI
   coverage of the development image.
+- Add active-display discovery and exact startup selection, and use the same
+  display ID for ScreenCaptureKit, RDP surface dimensions, preflight, and input
+  mapping with deterministic negative-origin and Retina geometry coverage.
 
 ## P0: correctness and lifecycle
 
@@ -97,7 +100,8 @@ a signed artifact whose minimum OS, dependencies, and licensing are explicit.
 
 ## P3: compatibility and features
 
-- Add multi-monitor selection and robust Retina/display-mode handling.
+- Complete robust Retina/display-mode handling and validate selected external
+  displays, rotation, hot-plug failure, and main-display changes on hardware.
 - Add richer clipboard formats only after text transfer remains reliable under
   reconnect and shaped-link tests.
 - Evaluate microphone/AUDIN separately from speaker/RDPSND output.

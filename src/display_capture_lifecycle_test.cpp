@@ -187,6 +187,7 @@ bool test_reconfigure_rejects_old_generation_callbacks() {
     const auto first = fake->session(0);
 
     macrdp::DisplayCaptureOptions next_options;
+    next_options.display_id = 42;
     next_options.max_width = 1280;
     next_options.max_height = 720;
     next_options.capture_audio = false;
@@ -197,7 +198,8 @@ bool test_reconfigure_rejects_old_generation_callbacks() {
     const auto second = fake->session(1);
     ok = expect(second.generation != first.generation,
                 "reconfigure reused the previous capture generation") && ok;
-    ok = expect(second.options.max_width == 1280
+    ok = expect(second.options.display_id == 42
+                    && second.options.max_width == 1280
                     && second.options.max_height == 720
                     && !second.options.capture_audio,
                 "reconfigure did not pass new options to the backend") && ok;

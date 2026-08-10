@@ -31,6 +31,7 @@
 #include <string_view>
 #include <thread>
 #include <utility>
+#include <vector>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -60,6 +61,7 @@ struct Options {
     std::filesystem::path config_dir;
     std::uint32_t h264_bitrate = 16'000'000;
     std::uint32_t frame_rate = 30;
+    std::uint32_t display_id = 0;
     std::uint32_t max_width = 0;
     std::uint32_t max_height = 0;
     std::uint32_t max_clients = 1;
@@ -70,6 +72,7 @@ struct Options {
     bool view_only = false;
     bool clipboard_enabled = true;
     bool preflight = false;
+    bool list_displays = false;
     bool password_from_stdin = false;
     std::string password_file;
     std::string log_level = "INFO";
@@ -102,6 +105,8 @@ void print_usage(const char* program) {
         << "Usage: " << program << " [options]\n"
         << "\n"
         << "  --preflight                 Check macOS capture/input access and exit\n"
+        << "  --list-displays             List active display IDs and exit\n"
+        << "  --display-id <number>       Capture one exact display (default: main)\n"
         << "  --port <number>             Listen port (default: 3389)\n"
         << "  --bind-address <address>    Address to bind (default: 127.0.0.1)\n"
         << "  --max-clients <number>      Concurrent client limit, 1-64 (default: 1)\n"
@@ -317,6 +322,18 @@ bool parse_options(int argc, char** argv, Options& options) {
             return false;
         } else if (argument == "--preflight") {
             options.preflight = true;
+        } else if (argument == "--list-displays") {
+            options.list_displays = true;
+        } else if (argument == "--display-id") {
+            if (!next_value(index, argc, argv, value)
+                || !parse_uint32_range(
+                    value,
+                    1,
+                    std::numeric_limits<std::uint32_t>::max(),
+                    options.display_id)) {
+                std::cerr << "--display-id must be between 1 and 4294967295\n";
+                return false;
+            }
         } else if (argument == "--port") {
             if (!next_value(index, argc, argv, value)
                 || !parse_port(value, options.port)) {
@@ -452,10 +469,9 @@ bool parse_options(int argc, char** argv, Options& options) {
         return false;
     }
 
-    // Preflight deliberately avoids credential sources, generated
-    // configuration, TLS initialization, and listener setup. Only capability
-    // options such as --view-only and --no-audio affect the checks below.
-    if (options.preflight) {
+    // Discovery and preflight deliberately avoid credential sources,
+    // generated configuration, TLS initialization, and listener setup.
+    if (options.list_displays || options.preflight) {
         clear_secret(options.password);
         return true;
     }
@@ -682,6 +698,7 @@ bool configure_server(rdpShadowServer* server, const Options& options, const std
         && options.h264_encoder != H264EncoderMode::ffmpeg;
     macrdp_vt_h264_encoder_set_enabled(use_videotoolbox ? 1 : 0);
     macrdp_shadow_set_capture_options(
+        options.display_id,
         options.max_width,
         options.max_height,
         options.frame_rate,
@@ -734,8 +751,28 @@ bool configure_server(rdpShadowServer* server, const Options& options, const std
     return true;
 }
 
+int list_displays() {
+    std::vector<MacrdpDisplayInfo> displays;
+    std::string error;
+    if (!macrdp_shadow_enumerate_displays(displays, error)) {
+        std::cerr << "Unable to list displays: " << error << '\n';
+        return 1;
+    }
+
+    for (const auto& display : displays) {
+        std::cout << "display_id=" << display.id
+                  << " main=" << (display.main ? "yes" : "no")
+                  << " pixels=" << display.pixel_width << 'x' << display.pixel_height
+                  << " points=" << display.point_width << 'x' << display.point_height
+                  << " origin=" << display.origin_x << ',' << display.origin_y
+                  << '\n';
+    }
+    return 0;
+}
+
 int run_preflight(const Options& options) {
     macrdp_shadow_set_capture_options(
+        options.display_id,
         options.max_width,
         options.max_height,
         options.frame_rate,
@@ -745,6 +782,7 @@ int run_preflight(const Options& options) {
     const bool capture_available = macrdp_shadow_preflight_capture(capture_error);
     std::cout << "screen_capture="
               << (capture_available ? "available" : "unavailable") << '\n';
+    std::cout << "display_id=" << options.display_id << '\n';
     if (!capture_available) {
         std::cerr << "Screen capture preflight failed: " << capture_error << '\n';
     }
@@ -778,6 +816,22 @@ int main(int argc, char** argv) {
             ? 0
             : 1;
     }
+
+    if (options.list_displays) {
+        return list_displays();
+    }
+
+    std::string display_error;
+    std::uint32_t resolved_display_id = 0;
+    if (!macrdp_shadow_resolve_display_id(
+            options.display_id,
+            resolved_display_id,
+            display_error)) {
+        std::cerr << "Unable to select macOS display: " << display_error << '\n';
+        clear_secret(options.password);
+        return 1;
+    }
+    options.display_id = resolved_display_id;
 
     if (options.preflight) {
         return run_preflight(options);
@@ -911,6 +965,7 @@ int main(int argc, char** argv) {
               << " security h264_encoder=" << h264_encoder_name(options.h264_encoder)
               << " input=" << (options.view_only ? "disabled" : "enabled")
               << " clipboard=" << (options.clipboard_enabled ? "enabled" : "disabled")
+              << " display_id=" << options.display_id
               << " max_clients=" << options.max_clients
               << std::endl;
 

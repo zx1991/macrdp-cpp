@@ -49,6 +49,7 @@ std::mutex g_credentials_mutex;
 CredentialConfig g_credentials;
 
 struct CaptureConfig {
+    std::uint32_t display_id = 0;
     std::uint32_t max_width = 0;
     std::uint32_t max_height = 0;
     std::uint32_t frame_rate = 30;
@@ -317,10 +318,12 @@ void publish_pointer_position(
     ArrayList_Unlock(server->clients);
 }
 
-bool display_dimensions(std::uint32_t& width, std::uint32_t& height) {
-    const auto display = CGMainDisplayID();
-    const auto display_width = CGDisplayPixelsWide(display);
-    const auto display_height = CGDisplayPixelsHigh(display);
+bool display_dimensions(
+    std::uint32_t display_id,
+    std::uint32_t& width,
+    std::uint32_t& height) {
+    const auto display_width = CGDisplayPixelsWide(display_id);
+    const auto display_height = CGDisplayPixelsHigh(display_id);
     if (display_width == 0 || display_height == 0
         || display_width > UINT16_MAX || display_height > UINT16_MAX) {
         return false;
@@ -332,16 +335,19 @@ bool display_dimensions(std::uint32_t& width, std::uint32_t& height) {
 }
 
 UINT32 mac_shadow_enum_monitors(MONITOR_DEF* monitors, UINT32 max_monitors) {
-    std::uint32_t native_width = 0;
-    std::uint32_t native_height = 0;
-    if (!display_dimensions(native_width, native_height)) {
-        return 0;
-    }
-
     CaptureConfig capture_config;
     {
         std::lock_guard lock(g_capture_config_mutex);
         capture_config = g_capture_config;
+    }
+    std::uint32_t native_width = 0;
+    std::uint32_t native_height = 0;
+    if (capture_config.display_id == 0
+        || !display_dimensions(
+            capture_config.display_id,
+            native_width,
+            native_height)) {
+        return 0;
     }
     const auto [width, height] = macrdp::display_capture_output_size(
         native_width,
@@ -389,6 +395,7 @@ std::optional<macrdp::DisplayCaptureOptions> capture_options_for_surface(
     }
 
     macrdp::DisplayCaptureOptions options;
+    options.display_id = subsystem->capture_config.display_id;
     options.max_width = subsystem->capture_config.max_width == 0
         ? surface_width
         : std::min(subsystem->capture_config.max_width, surface_width);
@@ -401,20 +408,28 @@ std::optional<macrdp::DisplayCaptureOptions> capture_options_for_surface(
     return options;
 }
 
-CGPoint display_point(const MacShadowSubsystem* subsystem, UINT16 x, UINT16 y) {
-    const CGRect bounds = CGDisplayBounds(CGMainDisplayID());
+std::optional<CGPoint> display_point(
+    const MacShadowSubsystem* subsystem,
+    UINT16 x,
+    UINT16 y) {
+    if (subsystem == nullptr || subsystem->capture_config.display_id == 0
+        || !CGDisplayIsActive(subsystem->capture_config.display_id)) {
+        return std::nullopt;
+    }
+    const CGRect bounds = CGDisplayBounds(subsystem->capture_config.display_id);
     const auto [surface_width, surface_height] = shadow_surface_dimensions(subsystem);
-    const double width = surface_width == 0
-        ? std::max(1.0, bounds.size.width - 1.0)
-        : std::max(1.0, static_cast<double>(surface_width) - 1.0);
-    const double height = surface_height == 0
-        ? std::max(1.0, bounds.size.height - 1.0)
-        : std::max(1.0, static_cast<double>(surface_height) - 1.0);
-    const double normalized_x = std::clamp(static_cast<double>(x) / width, 0.0, 1.0);
-    const double normalized_y = std::clamp(static_cast<double>(y) / height, 0.0, 1.0);
-    return CGPointMake(
-        bounds.origin.x + normalized_x * std::max(0.0, bounds.size.width - 1.0),
-        bounds.origin.y + normalized_y * std::max(0.0, bounds.size.height - 1.0));
+    const auto [point_x, point_y] = macrdp::display_capture_input_point(
+        {
+            bounds.origin.x,
+            bounds.origin.y,
+            bounds.size.width,
+            bounds.size.height,
+        },
+        surface_width,
+        surface_height,
+        x,
+        y);
+    return CGPointMake(point_x, point_y);
 }
 
 std::optional<CGKeyCode> mac_modifier_key_code(UINT16 flags, UINT8 code) {
@@ -824,7 +839,10 @@ bool post_mouse_event(
         return false;
     }
 
-    const CGPoint point = display_point(subsystem, x, y);
+    const auto point = display_point(subsystem, x, y);
+    if (!point.has_value()) {
+        return false;
+    }
     if ((flags & PTR_FLAGS_WHEEL) != 0 || (flags & PTR_FLAGS_HWHEEL) != 0) {
         const int signed_rotation = macrdp::decode_rdp_wheel_delta(flags) / 120;
         const int horizontal = (flags & PTR_FLAGS_HWHEEL) != 0
@@ -842,7 +860,7 @@ bool post_mouse_event(
         if (event == nullptr) {
             return false;
         }
-        CGEventSetLocation(event, point);
+        CGEventSetLocation(event, *point);
         CGEventPost(kCGHIDEventTap, event);
         CFRelease(event);
         return true;
@@ -865,7 +883,7 @@ bool post_mouse_event(
         CGEventRef event = CGEventCreateMouseEvent(
             subsystem->input_event_source,
             move_type,
-            point,
+            *point,
             drag_button);
         if (event != nullptr) {
             CGEventPost(kCGHIDEventTap, event);
@@ -898,7 +916,7 @@ bool post_mouse_event(
         CGEventRef event = CGEventCreateMouseEvent(
             subsystem->input_event_source,
             button_type,
-            point,
+            *point,
             button);
         if (event == nullptr) {
             return false;
@@ -991,7 +1009,10 @@ bool post_extended_mouse_event(
         return false;
     }
 
-    const CGPoint point = display_point(subsystem, x, y);
+    const auto point = display_point(subsystem, x, y);
+    if (!point.has_value()) {
+        return false;
+    }
     const bool down = (flags & PTR_XFLAGS_DOWN) != 0;
     const UINT16 button_flags = flags & (PTR_XFLAGS_BUTTON1 | PTR_XFLAGS_BUTTON2);
     if (button_flags == 0) {
@@ -1003,7 +1024,7 @@ bool post_extended_mouse_event(
     CGEventRef event = CGEventCreateMouseEvent(
         subsystem->input_event_source,
         down ? kCGEventOtherMouseDown : kCGEventOtherMouseUp,
-        point,
+        *point,
         button);
     if (event == nullptr) {
         return false;
@@ -2534,11 +2555,13 @@ extern "C" void macrdp_shadow_set_credentials(
 }
 
 extern "C" void macrdp_shadow_set_capture_options(
+    std::uint32_t display_id,
     std::uint32_t max_width,
     std::uint32_t max_height,
     std::uint32_t frame_rate,
     bool audio_enabled) {
     std::lock_guard lock(g_capture_config_mutex);
+    g_capture_config.display_id = display_id;
     g_capture_config.max_width = max_width;
     g_capture_config.max_height = max_height;
     g_capture_config.frame_rate = std::clamp(frame_rate, std::uint32_t{1}, std::uint32_t{60});
@@ -2549,6 +2572,100 @@ extern "C" void macrdp_shadow_set_input_enabled(bool enabled) {
     g_input_enabled.store(enabled, std::memory_order_release);
 }
 
+bool macrdp_shadow_enumerate_displays(
+    std::vector<MacrdpDisplayInfo>& displays,
+    std::string& error) {
+    displays.clear();
+    error.clear();
+
+    std::uint32_t display_count = 0;
+    CGError result = CGGetActiveDisplayList(0, nullptr, &display_count);
+    if (result != kCGErrorSuccess) {
+        error = "Unable to query active macOS displays (CoreGraphics error "
+            + std::to_string(result) + ")";
+        return false;
+    }
+    if (display_count == 0) {
+        error = "CoreGraphics returned no active displays";
+        return false;
+    }
+
+    std::vector<CGDirectDisplayID> display_ids(display_count);
+    result = CGGetActiveDisplayList(
+        display_count,
+        display_ids.data(),
+        &display_count);
+    if (result != kCGErrorSuccess) {
+        error = "Unable to enumerate active macOS displays (CoreGraphics error "
+            + std::to_string(result) + ")";
+        return false;
+    }
+    display_ids.resize(display_count);
+
+    const auto main_display_id = CGMainDisplayID();
+    for (const auto display_id : display_ids) {
+        const auto pixel_width = CGDisplayPixelsWide(display_id);
+        const auto pixel_height = CGDisplayPixelsHigh(display_id);
+        const CGRect bounds = CGDisplayBounds(display_id);
+        if (display_id == kCGNullDirectDisplay || pixel_width == 0
+            || pixel_height == 0
+            || pixel_width > std::numeric_limits<std::uint32_t>::max()
+            || pixel_height > std::numeric_limits<std::uint32_t>::max()
+            || !std::isfinite(bounds.origin.x)
+            || !std::isfinite(bounds.origin.y)
+            || !std::isfinite(bounds.size.width)
+            || !std::isfinite(bounds.size.height)
+            || bounds.size.width <= 0.0
+            || bounds.size.height <= 0.0) {
+            continue;
+        }
+        displays.push_back({
+            display_id,
+            static_cast<std::uint32_t>(pixel_width),
+            static_cast<std::uint32_t>(pixel_height),
+            bounds.size.width,
+            bounds.size.height,
+            bounds.origin.x,
+            bounds.origin.y,
+            display_id == main_display_id,
+        });
+    }
+    if (displays.empty()) {
+        error = "CoreGraphics returned no usable active displays";
+        return false;
+    }
+    return true;
+}
+
+bool macrdp_shadow_resolve_display_id(
+    std::uint32_t requested_display_id,
+    std::uint32_t& resolved_display_id,
+    std::string& error) {
+    std::vector<MacrdpDisplayInfo> displays;
+    if (!macrdp_shadow_enumerate_displays(displays, error)) {
+        return false;
+    }
+
+    std::vector<std::uint32_t> display_ids;
+    display_ids.reserve(displays.size());
+    for (const auto& display : displays) {
+        display_ids.push_back(display.id);
+    }
+    const auto selected = macrdp::display_capture_select_id(
+        requested_display_id,
+        CGMainDisplayID(),
+        display_ids);
+    if (!selected.has_value()) {
+        error = "Requested display ID " + std::to_string(requested_display_id)
+            + " is not active";
+        return false;
+    }
+
+    resolved_display_id = *selected;
+    error.clear();
+    return true;
+}
+
 bool macrdp_shadow_preflight_capture(std::string& error) {
     macrdp::DisplayCaptureOptions options;
     options.max_width = 64;
@@ -2557,6 +2674,7 @@ bool macrdp_shadow_preflight_capture(std::string& error) {
     options.show_cursor = false;
     {
         std::lock_guard lock(g_capture_config_mutex);
+        options.display_id = g_capture_config.display_id;
         options.capture_audio = g_capture_config.audio_enabled;
     }
 

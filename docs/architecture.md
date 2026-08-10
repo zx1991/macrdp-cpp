@@ -35,6 +35,13 @@ format negotiation and data transfer under a channel lock. When clipboard
 redirection is disabled, the adapter short-circuits before it creates a channel
 context or monitor thread.
 
+At startup the server resolves the requested display ID against the active
+CoreGraphics display list. That exact ID is then shared by FreeRDP surface
+enumeration, ScreenCaptureKit filtering, permission preflight, and pointer
+mapping. Exact requests never fall back to another screen. RDP pixel
+coordinates are normalized into the selected display's global macOS point
+bounds, including negative origins and Retina pixel-to-point scaling.
+
 ## Concurrency boundaries
 
 - Screen capture is isolated from protocol callbacks. A capture failure can

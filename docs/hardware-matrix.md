@@ -144,7 +144,7 @@ checks.
 | WIN-01 | NLA success | Connect with the configured user and password. | Authentication succeeds and one desktop session opens. | `NOT RUN` | |
 | WIN-02 | NLA failure | Attempt a wrong password, then reconnect correctly. | Wrong credentials fail without affecting the later valid session. | `NOT RUN` | |
 | WIN-03 | Certificate path | Inspect the first-connect certificate warning or trusted certificate result. | The identity is expected for the configured test certificate; no silent downgrade occurs. | `NOT RUN` | |
-| WIN-04 | Initial display | Inspect the captured main display at native and windowed sizes. | The correct display is visible, oriented correctly, and not blank or corrupted. | `NOT RUN` | |
+| WIN-04 | Initial display | Use `--list-displays`, then inspect the default and each explicitly selected display at native and windowed sizes. | The requested display is visible, oriented correctly, and not blank or corrupted; pointer input remains on that display. | `NOT RUN` | |
 | WIN-05 | Resize and Retina | Resize, maximize, minimize, and restore the client on each supported scaling mode. | Content remains framed and readable; updates resume after every change. | `NOT RUN` | |
 | WIN-06 | Text keyboard | Type ASCII, shifted text, digits, punctuation, and Unicode into the safe document. | Characters arrive once and in order with the expected case. | `NOT RUN` | |
 | WIN-07 | Modifier cleanup | Exercise left/right Shift, Control, Alt, and Windows keys separately, then disconnect. | Each key releases; the post-run probe reports no held modifier. | `NOT RUN` | |

@@ -14,15 +14,15 @@ cmake --build build --parallel 8
 ctest --test-dir build --output-on-failure
 ```
 
-The local suite covers display dimensions, frame coalescing, direct
-VideoToolbox AVC420, FreeRDP AVC420 and AVC444 paths, the asynchronous encoder
-worker, input ownership and queue behavior, ledger-bounded modifier cleanup,
-signed 9-bit RDP wheel-delta
-translation, asynchronous completion and timeout cleanup semantics, injected
-capture lifecycle races, configuration permissions, password rotation, the
-complete versioned install/upgrade/rollback/uninstall state machine, and server
-argument validation. It does not require Screen Recording permission
-for the synthetic encoder and state-machine tests.
+The local suite covers display selection, bounded output dimensions, Retina
+and negative-origin input mapping, frame coalescing, direct VideoToolbox
+AVC420, FreeRDP AVC420 and AVC444 paths, the asynchronous encoder worker, input
+ownership and queue behavior, ledger-bounded modifier cleanup, signed 9-bit
+RDP wheel-delta translation, asynchronous completion and timeout cleanup
+semantics, injected capture lifecycle races, configuration permissions,
+password rotation, the complete versioned install/upgrade/rollback/uninstall
+state machine, and server argument validation. It does not require Screen
+Recording permission for the synthetic encoder and state-machine tests.
 
 The access-policy test instantiates the real macOS shadow subsystem without
 starting ScreenCaptureKit. It verifies that view-only synchronize, keyboard,
@@ -32,6 +32,13 @@ active and disabled clipboard initialization does not create a channel context.
 Server argument tests reject concurrent-client limits outside 1 through 64 and
 require explicit acknowledgement before selecting a non-NLA compatibility
 mode.
+
+`macrdp-server --list-displays` is a non-capture diagnostic that reports active
+CoreGraphics IDs, pixel and point sizes, and global origins without credentials
+or TCC prompts. The deterministic geometry test verifies exact-ID rejection,
+main-display fallback, negative display origins, and Retina pixel-to-point
+mapping. Visual correctness and hot-plug recovery still belong in the hardware
+matrix.
 
 ## Sanitizers and deterministic stress
 
