@@ -23,12 +23,17 @@ are acceptance gates rather than promised dates.
 - Add independent `--view-only` and `--no-clipboard` policies, default the
   listener to one concurrent client, and enforce a configurable 1-64 client
   limit before accepting a new shadow session.
+- Add an exact-server permission preflight, an owner-only hardware diagnostic
+  bundle, and a repeatable P0 acceptance matrix whose built-in probes do not
+  query hardware serial numbers, network addresses, credentials, or keychain
+  contents.
 
 ## P0: correctness and lifecycle
 
-- Validate the bounded start/stop paths under permission denial, display sleep,
-  session lock, and rapid reconfiguration on supported hardware.
-- Run the current `mstsc` matrix on supported macOS hardware: NLA/TLS failure,
+- Record the bounded start/stop paths under permission denial, display sleep,
+  session lock, and rapid reconfiguration in the
+  [supported-hardware matrix](hardware-matrix.md).
+- Complete the `mstsc` rows on supported macOS hardware: NLA/TLS failure,
   vertical and horizontal wheel direction, FastPath and classic input,
   clipboard, audio, resize, reconnect, and sleep/wake recovery.
 

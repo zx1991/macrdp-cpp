@@ -54,3 +54,8 @@ This project has not published a stable release yet.
   timestamp, preserving protocol setup before deliberate event-loop stalls.
 - Prevented the loopback clipboard verifier from treating the expected
   client-to-server pasteboard reflection as a second server payload mismatch.
+- Added an exact-server `--preflight` mode plus an owner-only, manifest-checked
+  macOS diagnostic bundle and a P0 hardware/Windows validation matrix. The SSH
+  path can run preflight through a temporary Aqua LaunchAgent without loading
+  credentials from stdin, files, or the environment, creating server
+  configuration, or opening a listener.

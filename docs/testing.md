@@ -45,6 +45,42 @@ resulting macOS scroll distance or direction directly. A release candidate
 therefore still needs a manual vertical and horizontal wheel check from the
 supported Windows client matrix.
 
+## Exact-server preflight and hardware evidence
+
+`macrdp-server --preflight` runs the real ScreenCaptureKit frame preflight and,
+unless `--view-only` is selected, the CoreGraphics input-access preflight. It
+does not load credentials from stdin, files, or the environment, create
+configuration or authentication files, or open a listener. Because TCC
+evaluates the process identity and graphical launch context, run the exact
+signed binary that will be used for the remaining tests.
+
+Generate an owner-only diagnostic bundle from a local graphical terminal with:
+
+```bash
+tools/collect_hardware_diagnostics.sh --server build/macrdp-server
+```
+
+For an SSH-controlled host with a logged-in Aqua session, run the same check
+through a temporary per-user LaunchAgent:
+
+```bash
+tools/collect_hardware_diagnostics.sh \
+  --server build/macrdp-server \
+  --aqua-preflight
+```
+
+The LaunchAgent has no keep-alive policy and is unloaded after the bounded
+preflight. The collector does not inject input. Its Swift probe only reads
+session, display geometry, and modifier state. Use `--server-log PATH` to add
+logs and `--skip-preflight` when only post-failure metadata is needed. Supplied
+logs are copied verbatim and can contain credentials or other sensitive data.
+Raw bundles belong in a private temporary location, not the repository.
+
+Protocol automation does not replace physical behavior checks. Record TCC
+denial, lock/sleep, display reconfiguration, real `mstsc`, wheel direction,
+Retina, audio, and post-input modifier results in the
+[supported-hardware matrix](hardware-matrix.md).
+
 ## Loopback client
 
 The normal build disables FreeRDP's client targets. Configure a separate

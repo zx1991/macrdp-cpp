@@ -102,6 +102,16 @@ Interactive sessions also require Accessibility permission.
 The server checks every permission required by the selected access policy before
 opening the RDP listener.
 
+Check the exact signed executable without credential input, configuration
+changes, or a listening socket:
+
+```bash
+./build/macrdp-server --preflight --no-audio
+```
+
+When working through SSH, use the temporary Aqua preflight and owner-only
+diagnostic bundle described in the [hardware validation matrix](docs/hardware-matrix.md).
+
 Use a placeholder account name such as `example-user` only in documentation;
 the client must enter the same name supplied to the server. Read the password
 from standard input so it is not exposed in the process list:
@@ -225,6 +235,8 @@ The standalone capture/encoder example remains available:
 - [Architecture](docs/architecture.md): runtime pipeline and ownership
   boundaries.
 - [Testing](docs/testing.md): local, loopback, and shaped-network validation.
+- [Hardware matrix](docs/hardware-matrix.md): P0 lifecycle and real Windows
+  acceptance record.
 - [Roadmap](docs/roadmap.md): prioritized work and release gates.
 - [Changelog](CHANGELOG.md): user-visible changes.
 - [Contributing](CONTRIBUTING.md): development and pull request expectations.

@@ -68,6 +68,7 @@ struct Options {
     bool audio_enabled = true;
     bool view_only = false;
     bool clipboard_enabled = true;
+    bool preflight = false;
     bool password_from_stdin = false;
     std::string password_file;
     std::string log_level = "INFO";
@@ -99,6 +100,7 @@ void print_usage(const char* program) {
     std::cout
         << "Usage: " << program << " [options]\n"
         << "\n"
+        << "  --preflight                 Check macOS capture/input access and exit\n"
         << "  --port <number>             Listen port (default: 3389)\n"
         << "  --bind-address <address>    Optional address to bind (default: all)\n"
         << "  --max-clients <number>      Concurrent client limit, 1-64 (default: 1)\n"
@@ -311,6 +313,8 @@ bool parse_options(int argc, char** argv, Options& options) {
         if (argument == "--help" || argument == "-h") {
             print_usage(argv[0]);
             return false;
+        } else if (argument == "--preflight") {
+            options.preflight = true;
         } else if (argument == "--port") {
             if (!next_value(index, argc, argv, value)
                 || !parse_port(value, options.port)) {
@@ -442,6 +446,14 @@ bool parse_options(int argc, char** argv, Options& options) {
     if (options.avc444 && options.h264_encoder == H264EncoderMode::videotoolbox) {
         std::cerr << "--h264-encoder videotoolbox cannot be used with --avc444\n";
         return false;
+    }
+
+    // Preflight deliberately avoids credential sources, generated
+    // configuration, TLS initialization, and listener setup. Only capability
+    // options such as --view-only and --no-audio affect the checks below.
+    if (options.preflight) {
+        clear_secret(options.password);
+        return true;
     }
 
     if (options.password_from_stdin) {
@@ -708,6 +720,39 @@ bool configure_server(rdpShadowServer* server, const Options& options, const std
     return true;
 }
 
+int run_preflight(const Options& options) {
+    macrdp_shadow_set_capture_options(
+        options.max_width,
+        options.max_height,
+        options.frame_rate,
+        options.audio_enabled);
+
+    std::string capture_error;
+    const bool capture_available = macrdp_shadow_preflight_capture(capture_error);
+    std::cout << "screen_capture="
+              << (capture_available ? "available" : "unavailable") << '\n';
+    if (!capture_available) {
+        std::cerr << "Screen capture preflight failed: " << capture_error << '\n';
+    }
+
+    bool input_available = true;
+    if (options.view_only) {
+        std::cout << "accessibility=not-required\n";
+    } else {
+        std::string input_error;
+        input_available = macrdp_shadow_preflight_input(input_error);
+        std::cout << "accessibility="
+                  << (input_available ? "available" : "unavailable") << '\n';
+        if (!input_available) {
+            std::cerr << "Input preflight failed: " << input_error << '\n';
+        }
+    }
+
+    const bool success = capture_available && input_available;
+    std::cout << "preflight=" << (success ? "pass" : "fail") << std::endl;
+    return success ? 0 : 1;
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -718,6 +763,10 @@ int main(int argc, char** argv) {
                              || std::string_view(argv[1]) == "-h")
             ? 0
             : 1;
+    }
+
+    if (options.preflight) {
+        return run_preflight(options);
     }
 
     std::error_code directory_error;

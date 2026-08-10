@@ -956,6 +956,7 @@ add_test(
     NAME server_help
     COMMAND macrdp-server --help
 )
+set_tests_properties(server_help PROPERTIES PASS_REGULAR_EXPRESSION "--preflight")
 
 add_test(
     NAME server_invalid_bind_address

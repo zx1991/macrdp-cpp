@@ -16,6 +16,11 @@ jobs:
       - name: Check out source
         uses: actions/checkout@v4
 
+      - name: Validate hardware diagnostic tools
+        run: |
+          bash -n tools/collect_hardware_diagnostics.sh
+          xcrun swiftc -typecheck tools/macrdp_system_probe.swift
+
       - name: Install dependencies
         run: brew install ffmpeg openssl@3
 
@@ -28,6 +33,16 @@ jobs:
 
       - name: Build
         run: cmake --build build --parallel 3
+
+      - name: Collect build diagnostics
+        run: |
+          tools/collect_hardware_diagnostics.sh \
+            --server build/macrdp-server \
+            --skip-preflight \
+            --output "$RUNNER_TEMP/macrdp-hardware-diagnostics"
+          pushd "$RUNNER_TEMP/macrdp-hardware-diagnostics"
+          shasum -a 256 -c manifest.sha256
+          popd
 
       - name: Test
         run: ctest --test-dir build --output-on-failure
