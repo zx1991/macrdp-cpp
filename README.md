@@ -9,9 +9,9 @@ ScreenCaptureKit, CoreGraphics, VideoToolbox, and a pinned FreeRDP 3.30.0
 shadow server.
 
 > **Project status: Alpha.** The server is useful for development and trusted
-> network testing, but it is not yet a production-ready or publicly
-> distributable remote desktop product. Read the [security policy](SECURITY.md)
-> and [release gates](docs/roadmap.md) before exposing a listener.
+> network testing, but it is not yet a production-ready or officially released
+> remote desktop product. Read the [security policy](SECURITY.md) and
+> [release gates](docs/roadmap.md) before exposing a listener.
 
 ## What works
 
@@ -38,12 +38,12 @@ and backpressure details.
 - Clipboard redirection is text-only. File, image, and directory transfer are
   not implemented.
 - RDPSND speaker output is supported, but microphone/AUDIN input is disabled.
-- Current Homebrew FFmpeg and OpenSSL arm64 packages require macOS 15. Older
-  targets need a separately built compatible dependency set.
-- The package target creates a relocatable, ad-hoc-signed developer payload.
-  It includes license texts and a validated CycloneDX SBOM, but the current
-  Homebrew FFmpeg build is GPL-3.0-or-later. A purpose-built codec dependency
-  set, Developer ID signing, and notarization are still release work.
+- The pinned release dependency set and current Homebrew development packages
+  target macOS 15. Older targets need a separately built compatible set.
+- The package target creates a relocatable, ad-hoc-signed developer payload,
+  not an installer. The pinned LGPL FFmpeg build, compliance metadata, and
+  corresponding-source bundle are implemented; Developer ID signing,
+  notarization, installation, upgrade, and rollback remain release work.
 - The automated loopback client verifies protocol delivery, but final input,
   Retina, reconnect, and sleep/wake behavior still needs a real Windows
   `mstsc` validation matrix on supported hardware.
@@ -54,8 +54,9 @@ The prioritized acceptance gates are tracked in [Roadmap](docs/roadmap.md).
 
 - A logged-in graphical macOS session. ScreenCaptureKit generally cannot
   capture the desktop from an SSH-only session.
-- macOS 15 and Apple Silicon for the currently documented Homebrew build.
-- Xcode Command Line Tools, CMake 3.25 or newer, Ruby, FFmpeg, and OpenSSL 3.
+- macOS 15 and Apple Silicon for the documented development and release builds.
+- Xcode Command Line Tools, CMake 3.25 or newer, Ruby, and OpenSSL 3. Homebrew
+  FFmpeg is also required for the shortest development build.
 - Screen Recording permission for capture. Accessibility permission is required
   for interactive sessions, but not when the server uses `--view-only`.
 
@@ -79,6 +80,34 @@ The first configure downloads and hash-verifies FreeRDP 3.30.0. Project
 adaptations are applied from
 `patches/freerdp-macrdp-adaptations.patch` to the generated `build/_deps`
 tree. Do not edit generated dependency sources directly.
+
+The command above is the shortest development setup and may use Homebrew's GPL
+FFmpeg build. It is not the dependency path used for official binary artifacts.
+
+### Release-equivalent FFmpeg build
+
+Build the pinned minimal FFmpeg 7.1.1 dependency, then point CMake at its
+verified prefix and provenance:
+
+```bash
+scripts/build_macos_ffmpeg.sh build/third_party/ffmpeg arm64 15.0
+
+cmake -S . -B build -G "Unix Makefiles" \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_OSX_ARCHITECTURES=arm64 \
+  -DCMAKE_OSX_DEPLOYMENT_TARGET=15.0 \
+  -DOPENSSL_ROOT_DIR="$(brew --prefix openssl@3)" \
+  -DMACRDP_FFMPEG_ROOT="$PWD/build/third_party/ffmpeg/prefix" \
+  -DMACRDP_FFMPEG_PROVENANCE="$PWD/build/third_party/ffmpeg/provenance.json"
+cmake --build build --parallel 8
+ctest --test-dir build --output-on-failure
+```
+
+This configuration builds only `libavcodec`, `libavutil`, `libswresample`, and
+`libswscale`, dynamically linked under LGPL-2.1-or-later. It enables the H.264
+VideoToolbox, AAC, and PCM paths used by macrdp and rejects GPL, version3,
+nonfree, x264, and x265 options. Homebrew FFmpeg remains supported for local
+development only.
 
 To use dependencies built for an older macOS version, configure with a matching
 `-DCMAKE_OSX_DEPLOYMENT_TARGET` and ensure every linked library supports that
@@ -150,7 +179,7 @@ Access and media controls can be appended to the server command above:
 | Allow up to four concurrent clients | `--max-clients 4` |
 | Higher AVC420 bitrate | `--bitrate 24M` |
 | Require direct macOS AVC420 | `--h264-encoder videotoolbox` |
-| Force software AVC420 | `--h264-encoder ffmpeg` |
+| Use FreeRDP's FFmpeg AVC420 path | `--h264-encoder ffmpeg` |
 | Higher chroma fidelity through FFmpeg | `--avc444` |
 | Classic incremental updates | `--no-gfx` |
 | Disable screen audio and RDPSND | `--no-audio` |
@@ -173,18 +202,22 @@ The output is `build/macrdp-dist`. The packaging script copies non-system
 dynamic libraries, rewrites load paths, rejects references that escape the
 package, and applies an ad-hoc signature. The validation target independently
 checks load paths, architectures, minimum macOS versions, signatures, unused
-FFmpeg components, and a packaged `--help` loader smoke check. FreeRDP's broad
-component discovery is narrowed to the codec, utility, scaling, and resampling
-libraries used by this server. Validation does not start a listener or require
-TCC permissions. The payload is not a notarized installer and should not be
-published as a release artifact yet.
+FFmpeg components, and a packaged `--help` loader smoke check. With the pinned
+release configuration it also creates
+`build/macrdp-ffmpeg-sources-7.1.1.tar.gz`, a self-checking corresponding-source
+bundle for the distributed FFmpeg libraries. Validation does not start a
+listener or require TCC permissions. The payload is not a notarized installer
+and should not be published as an official artifact yet.
 
-The package also contains `share/macrdp/sbom.cdx.json`, generated third-party
-notices, the exact FFmpeg build configuration, and the license files associated
-with every copied Homebrew formula. Validation recomputes hashes for every
-payload and compliance file and checks the dependency references in the SBOM.
-See [Release engineering](docs/release.md) for the current GPL implications and
-remaining release gates.
+The package contains `share/macrdp/sbom.cdx.json`, generated third-party
+notices, the exact FFmpeg build configuration and source provenance, and the
+license files associated with every copied dependency. Validation recomputes
+hashes for every payload and compliance file and checks the dependency
+references in the SBOM. A future official release must attach the matching
+macrdp project source and FFmpeg corresponding-source archive alongside the
+binary; the FFmpeg source does not need to be stored inside the application
+payload. See [Release engineering](docs/release.md) for the exact artifact set
+and remaining gates.
 
 For a long-running instance, create an owner-only one-line password file and
 install the supplied per-user LaunchAgent:
@@ -274,6 +307,7 @@ The standalone capture/encoder example remains available:
 - `tools/`: loopback client, network shaper, and smoke-test scripts.
 - `scripts/`: packaging and LaunchAgent helpers.
 - `patches/`: version-pinned FreeRDP adaptations.
+- `third_party/ffmpeg/`: pinned LGPL FFmpeg manifest, patches, and build policy.
 - `docs/`: architecture, testing, and roadmap documentation.
 
 ## Documentation
@@ -304,6 +338,8 @@ not a public issue.
 
 Project-owned code and documentation are licensed under Apache License 2.0.
 See [LICENSE](LICENSE) and [NOTICE](NOTICE). FreeRDP and bundled runtime
-dependencies retain their own upstream licenses and notices. The current
-Homebrew-derived developer package includes GPL components; see
-[Release engineering](docs/release.md) before distributing binaries.
+dependencies retain their own upstream licenses and notices. The managed
+release build dynamically links a pinned LGPL-2.1-or-later FFmpeg; Homebrew
+development builds may include GPL components and must not be substituted into
+an Apache-only official artifact. See [Release engineering](docs/release.md)
+before distributing binaries.

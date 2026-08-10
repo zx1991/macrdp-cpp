@@ -45,6 +45,12 @@ are acceptance gates rather than promised dates.
 - Bundle project, FreeRDP, and Homebrew formula license texts with generated
   third-party notices and a CycloneDX 1.6 SBOM whose payload, compliance-file,
   and dependency references are validated during packaging.
+- Add a pinned, minimal FFmpeg 7.1.1 release build that produces only the four
+  required shared libraries, reports LGPL-2.1-or-later at runtime, rejects GPL
+  and nonfree options, and verifies AVC420, AVC444, AAC, and PCM capabilities.
+- Generate and self-validate an FFmpeg corresponding-source archive containing
+  the pristine upstream source, applied patches, manifest, build driver, probe,
+  rebuild instructions, and checksums for publication beside a binary release.
 
 ## P0: correctness and lifecycle
 
@@ -71,11 +77,11 @@ validation in CI.
 
 ## P2: release engineering
 
-- Replace the remaining Homebrew-derived FFmpeg codec closure with a
-  purpose-built configuration that is version-pinned and has an explicit
-  distribution license. Keep recording its exact build options.
 - Build, sign, and notarize a Developer ID package. Define upgrade and rollback
   behavior for generated certificates, configuration, and SAM files.
+- Automate publication of the binary, tagged project source, FFmpeg
+  corresponding-source archive, checksums, SBOM, and release notes as one
+  versioned release set.
 
 P2 is complete when a clean machine can install, launch, verify, and uninstall
 a signed artifact whose minimum OS, dependencies, and licensing are explicit.

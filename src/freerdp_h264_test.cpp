@@ -77,6 +77,101 @@ void fill_region(std::vector<std::uint8_t>& frame, std::uint32_t width,
     }
 }
 
+bool verify_avc444(std::uint32_t width, std::uint32_t height,
+                   std::uint32_t stride) {
+    H264_CONTEXT* encoder = h264_context_new(TRUE);
+    if (encoder == nullptr
+        || !h264_context_set_option(encoder, H264_CONTEXT_OPTION_RATECONTROL,
+                                    H264_RATECONTROL_VBR)
+        || !h264_context_set_option(encoder, H264_CONTEXT_OPTION_BITRATE, 4'000'000)
+        || !h264_context_set_option(encoder, H264_CONTEXT_OPTION_FRAMERATE, 30)
+        || !h264_context_reset(encoder, width, height)) {
+        h264_context_free(encoder);
+        std::fprintf(stderr, "Unable to initialize FreeRDP AVC444 encoder\n");
+        return false;
+    }
+
+    const RECTANGLE_16 full_region = {
+        0,
+        0,
+        static_cast<UINT16>(width),
+        static_cast<UINT16>(height),
+    };
+    std::vector<std::uint8_t> frame(static_cast<std::size_t>(stride) * height);
+    std::uint32_t packet_count = 0;
+    bool saw_luma = false;
+    bool saw_chroma = false;
+
+    for (std::uint32_t frame_index = 0; frame_index < 8; ++frame_index) {
+        fill_frame(frame, width, height, frame_index + 20);
+        BYTE op = 0;
+        BYTE* luma = nullptr;
+        BYTE* chroma = nullptr;
+        UINT32 luma_size = 0;
+        UINT32 chroma_size = 0;
+        RDPGFX_H264_METABLOCK luma_meta{};
+        RDPGFX_H264_METABLOCK chroma_meta{};
+        const auto result = avc444_compress(
+            encoder,
+            frame.data(),
+            PIXEL_FORMAT_BGRX32,
+            stride,
+            width,
+            height,
+            1,
+            &full_region,
+            &op,
+            &luma,
+            &luma_size,
+            &chroma,
+            &chroma_size,
+            &luma_meta,
+            &chroma_meta);
+
+        if (result < 0) {
+            free_h264_metablock(&luma_meta);
+            free_h264_metablock(&chroma_meta);
+            h264_context_free(encoder);
+            std::fprintf(stderr, "FreeRDP AVC444 encoder returned an error\n");
+            return false;
+        }
+        if (result > 0) {
+            if ((luma_size > 0 && !has_annex_b_start_code(luma, luma_size))
+                || (chroma_size > 0
+                    && !has_annex_b_start_code(chroma, chroma_size))) {
+                free_h264_metablock(&luma_meta);
+                free_h264_metablock(&chroma_meta);
+                h264_context_free(encoder);
+                std::fprintf(stderr, "FreeRDP AVC444 output is not valid Annex-B data\n");
+                return false;
+            }
+            saw_luma = saw_luma || luma_size > 0;
+            saw_chroma = saw_chroma || chroma_size > 0;
+            packet_count += static_cast<std::uint32_t>(luma_size > 0)
+                + static_cast<std::uint32_t>(chroma_size > 0);
+        }
+        free_h264_metablock(&luma_meta);
+        free_h264_metablock(&chroma_meta);
+
+        if (frame_index + 1 < 8) {
+            std::this_thread::sleep_for(std::chrono::milliseconds{33});
+        }
+    }
+
+    h264_context_free(encoder);
+    if (!saw_luma || !saw_chroma || packet_count < 4) {
+        std::fprintf(stderr,
+                     "FreeRDP AVC444 stream did not produce luma/chroma packets "
+                     "(packets=%u)\n",
+                     packet_count);
+        return false;
+    }
+
+    std::printf("FreeRDP H.264 AVC444 encoder produced %u Annex-B packets\n",
+                packet_count);
+    return true;
+}
+
 } // namespace
 
 int main() {
@@ -217,5 +312,5 @@ int main() {
 
     std::printf("FreeRDP H.264 AVC420 encoder produced %u Annex-B I/P packets\n",
                 output_count);
-    return 0;
+    return verify_avc444(width, height, stride) ? 0 : 1;
 }

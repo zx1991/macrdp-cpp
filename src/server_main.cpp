@@ -113,7 +113,7 @@ void print_usage(const char* program) {
         << "  --fps <number>              Capture/encode rate, 1-60 (default: 30)\n"
         << "  --max-width <pixels>        Optional capture width limit\n"
         << "  --max-height <pixels>       Optional capture height limit\n"
-        << "  --h264-encoder <mode>       H.264 encoder: auto, videotoolbox, or ffmpeg\n"
+        << "  --h264-encoder <mode>       H.264 path: auto, direct videotoolbox, or ffmpeg\n"
         << "  --avc444                    Use AVC444 (higher CPU and color fidelity)\n"
         << "  --no-gfx                    Use incremental SurfaceBits updates instead of GFX/H.264\n"
         << "  --no-audio                  Disable screen audio capture and RDPSND output\n"

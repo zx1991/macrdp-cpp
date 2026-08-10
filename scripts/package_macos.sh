@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [[ $# -ne 5 ]]; then
-    printf 'usage: %s <macrdp-server> <output-directory> <project-source> <freerdp-source> <project-version>\n' \
+if [[ $# -lt 5 || $# -gt 6 ]]; then
+    printf 'usage: %s <macrdp-server> <output-directory> <project-source> <freerdp-source> <project-version> [ffmpeg-provenance]\n' \
         "$0" >&2
     exit 2
 fi
@@ -12,6 +12,7 @@ output=$2
 project_source=$3
 freerdp_source=$4
 project_version=$5
+ffmpeg_provenance=${6:-}
 script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
 compliance_generator="$script_dir/generate_macos_compliance.rb"
 
@@ -29,6 +30,10 @@ if [[ ! -f "$freerdp_source/LICENSE" ]]; then
 fi
 if [[ ! -f "$compliance_generator" ]]; then
     printf 'compliance generator is missing: %s\n' "$compliance_generator" >&2
+    exit 1
+fi
+if [[ -n $ffmpeg_provenance && ! -f $ffmpeg_provenance ]]; then
+    printf 'FFmpeg provenance is missing: %s\n' "$ffmpeg_provenance" >&2
     exit 1
 fi
 if ! command -v otool >/dev/null 2>&1 || ! command -v install_name_tool >/dev/null 2>&1 \
@@ -132,6 +137,16 @@ resolve_dependency() {
                     return 0
                 fi
             done < <(otool -l "$owner" | awk '$1 == "path" { print $2 }')
+
+            # Dependencies already copied into the package are authoritative.
+            # This matters when a copied library has no LC_RPATH of its own:
+            # falling through to Homebrew could resolve a same-named library
+            # from a different FFmpeg build and corrupt dependency provenance.
+            candidate="$output_dir/lib/$name"
+            if [[ -f "$candidate" ]]; then
+                printf '%s\n' "$candidate"
+                return 0
+            fi
 
             for candidate in /opt/homebrew/lib /usr/local/lib; do
                 if [[ -f "$candidate/$name" ]]; then
@@ -337,7 +352,8 @@ ruby "$compliance_generator" \
     "$dependency_origins" \
     "$project_source" \
     "$freerdp_source" \
-    "$project_version"
+    "$project_version" \
+    "$ffmpeg_provenance"
 
 printf 'Packaged macrdp-server at %s\n' "$output_dir"
 printf 'Non-system dylibs: %s\n' "$(find "$output_dir/lib" -type f | wc -l | tr -d ' ')"

@@ -1,0 +1,55 @@
+{
+  "schemaVersion": 1,
+  "name": "ffmpeg",
+  "version": "7.1.1",
+  "homepage": "https://ffmpeg.org/",
+  "licenseExpression": "LGPL-2.1-or-later",
+  "source": {
+    "url": "https://ffmpeg.org/releases/ffmpeg-7.1.1.tar.xz",
+    "sha256": "733984395e0dbbe5c046abda2dc49a5544e7e0e1e2366bba849222ae9e3a03b1"
+  },
+  "patches": [
+    {
+      "path": "patches/0001-h264-sei-link-aom-film-grain.patch",
+      "sha256": "a4cb0505afa2ca5514ea8c460a3e44bdd6b14900b5e39bb6c745ae76f56f7df0"
+    }
+  ],
+  "configureFlags": [
+    "--enable-shared",
+    "--disable-static",
+    "--disable-programs",
+    "--disable-doc",
+    "--disable-debug",
+    "--disable-network",
+    "--disable-autodetect",
+    "--disable-everything",
+    "--disable-avdevice",
+    "--disable-avfilter",
+    "--disable-avformat",
+    "--disable-postproc",
+    "--enable-avcodec",
+    "--enable-avutil",
+    "--enable-swresample",
+    "--enable-swscale",
+    "--enable-decoder=h264,aac,pcm_s16le,pcm_u8",
+    "--enable-encoder=h264_videotoolbox,aac,pcm_s16le,pcm_u8",
+    "--enable-parser=h264",
+    "--enable-hwaccel=h264_videotoolbox",
+    "--enable-videotoolbox",
+    "--enable-pthreads",
+    "--enable-neon",
+    "--disable-audiotoolbox",
+    "--disable-bzlib",
+    "--disable-iconv",
+    "--disable-lzma",
+    "--disable-securetransport",
+    "--disable-xlib",
+    "--disable-zlib"
+  ],
+  "expectedLibraries": [
+    "libavcodec",
+    "libavutil",
+    "libswresample",
+    "libswscale"
+  ]
+}

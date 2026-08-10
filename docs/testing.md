@@ -14,9 +14,10 @@ cmake --build build --parallel 8
 ctest --test-dir build --output-on-failure
 ```
 
-The local suite covers display dimensions, frame coalescing, VideoToolbox and
-FreeRDP H.264 paths, the asynchronous encoder worker, input ownership and queue
-behavior, ledger-bounded modifier cleanup, signed 9-bit RDP wheel-delta
+The local suite covers display dimensions, frame coalescing, direct
+VideoToolbox AVC420, FreeRDP AVC420 and AVC444 paths, the asynchronous encoder
+worker, input ownership and queue behavior, ledger-bounded modifier cleanup,
+signed 9-bit RDP wheel-delta
 translation, asynchronous completion and timeout cleanup semantics, injected
 capture lifecycle races, configuration permissions, password rotation, and
 server argument validation. It does not require Screen Recording permission
@@ -89,7 +90,9 @@ supported Windows client matrix.
 
 ## Developer package validation
 
-Build and validate the relocatable developer payload with:
+For release-equivalent validation, first configure the build with the managed
+FFmpeg prefix and provenance described in [Release engineering](release.md),
+then build and validate the relocatable developer payload with:
 
 ```bash
 cmake --build build --target macrdp-package-validate
@@ -101,7 +104,11 @@ newer than the documented macOS 15 baseline, resolves only system or in-package
 load paths, and has a valid ad-hoc signature. It runs the packaged executable
 with `--help` to exercise the dynamic loader without creating credentials,
 requesting TCC permissions, opening a listener, or injecting input. CI runs the
-same target.
+same target. Managed builds also verify the FFmpeg LGPL configuration, codec
+surface, four-library allowlist, source provenance, notices, SBOM, and the
+self-checking `build/macrdp-ffmpeg-sources-7.1.1.tar.gz` corresponding-source
+archive. A Homebrew-configured package remains a development artifact even if
+its structural validation passes.
 
 ## Exact-server preflight and hardware evidence
 

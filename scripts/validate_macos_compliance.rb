@@ -110,6 +110,76 @@ ffmpeg_component = components.find { |component| component["name"] == "ffmpeg" }
 if ffmpeg_component
   configuration = compliance_dir.join("ffmpeg-build-configuration.txt")
   raise "FFmpeg build configuration is missing" unless configuration.file? && configuration.size.positive?
+
+  provider = ffmpeg_component.fetch("properties", []).find do |property|
+    property["name"] == "macrdp:dependency-provider"
+  end
+  if provider&.fetch("value") == "project-build"
+    licenses = ffmpeg_component.fetch("licenses")
+    unless licenses == [{ "expression" => "LGPL-2.1-or-later" }]
+      raise "project-built FFmpeg must be LGPL-2.1-or-later"
+    end
+    forbidden_options = %w[
+      --enable-gpl
+      --enable-version3
+      --enable-libx264
+      --enable-libx265
+      --enable-nonfree
+    ]
+    forbidden_options.each do |option|
+      raise "project-built FFmpeg enables #{option}" if configuration.read.include?(option)
+    end
+
+    provenance_path = compliance_dir.join("ffmpeg-source-provenance.json")
+    raise "FFmpeg source provenance is missing" unless provenance_path.file? && provenance_path.size.positive?
+    provenance = JSON.parse(provenance_path.read)
+    raise "unexpected FFmpeg source provenance schema" unless provenance["schemaVersion"] == 1
+    raise "FFmpeg provenance version mismatch" unless provenance["version"] == ffmpeg_component["version"]
+    raise "FFmpeg provenance license mismatch" unless provenance["licenseExpression"] == "LGPL-2.1-or-later"
+    source_hash = provenance.dig("source", "sha256")
+    raise "invalid FFmpeg source provenance hash" unless source_hash&.match?(/\A[0-9a-f]{64}\z/)
+    component_hash = ffmpeg_component.fetch("properties").find do |property|
+      property["name"] == "macrdp:source-archive-sha256"
+    end
+    raise "FFmpeg component source hash mismatch" unless component_hash&.fetch("value") == source_hash
+    unless provenance.fetch("expectedLibraries").sort == %w[libavcodec libavutil libswresample libswscale]
+      raise "unexpected FFmpeg library allowlist"
+    end
+    required_flags = [
+      "--enable-shared",
+      "--disable-static",
+      "--disable-programs",
+      "--disable-network",
+      "--disable-autodetect",
+      "--disable-everything",
+      "--enable-avcodec",
+      "--enable-avutil",
+      "--enable-swresample",
+      "--enable-swscale",
+      "--enable-decoder=h264,aac,pcm_s16le,pcm_u8",
+      "--enable-encoder=h264_videotoolbox,aac,pcm_s16le,pcm_u8",
+      "--enable-parser=h264",
+      "--enable-hwaccel=h264_videotoolbox",
+      "--enable-videotoolbox"
+    ]
+    configure_flags = provenance.fetch("configureFlags")
+    missing_flags = required_flags - configure_flags
+    unless missing_flags.empty?
+      raise "project-built FFmpeg is missing required flags: #{missing_flags.join(", ")}"
+    end
+
+    occurrences = ffmpeg_component.dig("evidence", "occurrences") || []
+    stems = occurrences.map do |occurrence|
+      basename = File.basename(safe_relative_path(occurrence.fetch("location")))
+      match = basename.match(/\A(libavcodec|libavutil|libswresample|libswscale)(?:\.[0-9.]+)?\.dylib\z/)
+      raise "unexpected project-built FFmpeg payload: #{basename}" unless match
+
+      match[1]
+    end
+    unless stems.sort == %w[libavcodec libavutil libswresample libswscale]
+      raise "project-built FFmpeg payload does not match its allowlist"
+    end
+  end
 end
 
 puts "Validated compliance bundle: #{components.length - 1} third-party components, #{actual_payload.length} payload files"

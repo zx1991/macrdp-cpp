@@ -1,8 +1,8 @@
 cmake_minimum_required(VERSION 3.25)
 
-# The current Homebrew FFmpeg/OpenSSL arm64 binaries used by the package are
-# built for macOS 15. Keep the default honest; a locally built dependency set
-# can still override this cache value for older deployment targets.
+# The release dependency set and current Homebrew development dependencies are
+# built for macOS 15. Keep the default honest; a separately built compatible
+# dependency set can still override this cache value for older targets.
 set(CMAKE_OSX_DEPLOYMENT_TARGET "15.0" CACHE STRING "Minimum macOS version")
 
 project(macrdp_cpp
@@ -149,6 +149,113 @@ option(MACRDP_FREERDP_WITH_FFMPEG
     ON
 )
 
+set(MACRDP_FFMPEG_ROOT "" CACHE PATH
+    "Prefix of the purpose-built FFmpeg release dependency"
+)
+set(MACRDP_FFMPEG_PROVENANCE "" CACHE FILEPATH
+    "Generated provenance.json for MACRDP_FFMPEG_ROOT"
+)
+
+set(MACRDP_MANAGED_FFMPEG OFF)
+if(MACRDP_FREERDP_WITH_FFMPEG AND NOT MACRDP_FFMPEG_ROOT STREQUAL "")
+    file(REAL_PATH "${MACRDP_FFMPEG_ROOT}" MACRDP_FFMPEG_ROOT_REAL)
+    if(MACRDP_FFMPEG_PROVENANCE STREQUAL "")
+        get_filename_component(MACRDP_FFMPEG_BUILD_ROOT
+            "${MACRDP_FFMPEG_ROOT_REAL}" DIRECTORY)
+        set(MACRDP_FFMPEG_PROVENANCE
+            "${MACRDP_FFMPEG_BUILD_ROOT}/provenance.json" CACHE FILEPATH
+            "Generated provenance.json for MACRDP_FFMPEG_ROOT" FORCE)
+    endif()
+    if(NOT EXISTS "${MACRDP_FFMPEG_PROVENANCE}")
+        message(FATAL_ERROR
+            "MACRDP_FFMPEG_PROVENANCE is missing: ${MACRDP_FFMPEG_PROVENANCE}"
+        )
+    endif()
+
+    file(READ "${MACRDP_FFMPEG_PROVENANCE}" MACRDP_FFMPEG_PROVENANCE_JSON)
+    string(JSON MACRDP_FFMPEG_VERSION GET
+        "${MACRDP_FFMPEG_PROVENANCE_JSON}" version)
+    string(JSON MACRDP_FFMPEG_LICENSE GET
+        "${MACRDP_FFMPEG_PROVENANCE_JSON}" licenseExpression)
+    string(JSON MACRDP_FFMPEG_PROVENANCE_PREFIX GET
+        "${MACRDP_FFMPEG_PROVENANCE_JSON}" build installPrefix)
+    string(JSON MACRDP_FFMPEG_MINIMUM_MACOS GET
+        "${MACRDP_FFMPEG_PROVENANCE_JSON}" build minimumMacOS)
+    file(REAL_PATH "${MACRDP_FFMPEG_PROVENANCE_PREFIX}"
+        MACRDP_FFMPEG_PROVENANCE_PREFIX_REAL)
+    if(NOT MACRDP_FFMPEG_PROVENANCE_PREFIX_REAL STREQUAL MACRDP_FFMPEG_ROOT_REAL)
+        message(FATAL_ERROR
+            "FFmpeg provenance prefix does not match MACRDP_FFMPEG_ROOT"
+        )
+    endif()
+    if(NOT MACRDP_FFMPEG_LICENSE STREQUAL "LGPL-2.1-or-later")
+        message(FATAL_ERROR
+            "Release FFmpeg must be LGPL-2.1-or-later, got ${MACRDP_FFMPEG_LICENSE}"
+        )
+    endif()
+    if(NOT MACRDP_FFMPEG_MINIMUM_MACOS VERSION_EQUAL CMAKE_OSX_DEPLOYMENT_TARGET)
+        message(FATAL_ERROR
+            "FFmpeg targets macOS ${MACRDP_FFMPEG_MINIMUM_MACOS}, but macrdp targets ${CMAKE_OSX_DEPLOYMENT_TARGET}"
+        )
+    endif()
+
+    set(MACRDP_FFMPEG_INCLUDE_DIR "${MACRDP_FFMPEG_ROOT_REAL}/include")
+    set(MACRDP_FFMPEG_LIBRARIES "")
+    foreach(MACRDP_FFMPEG_COMPONENT IN ITEMS AVCODEC AVUTIL SWSCALE SWRESAMPLE)
+        string(TOLOWER "${MACRDP_FFMPEG_COMPONENT}" MACRDP_FFMPEG_COMPONENT_LOWER)
+        set(MACRDP_FFMPEG_LIBRARY
+            "${MACRDP_FFMPEG_ROOT_REAL}/lib/lib${MACRDP_FFMPEG_COMPONENT_LOWER}.dylib")
+        set(MACRDP_FFMPEG_PC_FILE
+            "${MACRDP_FFMPEG_ROOT_REAL}/lib/pkgconfig/lib${MACRDP_FFMPEG_COMPONENT_LOWER}.pc")
+        if(NOT EXISTS "${MACRDP_FFMPEG_LIBRARY}"
+           OR NOT EXISTS "${MACRDP_FFMPEG_PC_FILE}")
+            message(FATAL_ERROR
+                "Purpose-built FFmpeg component is missing: ${MACRDP_FFMPEG_COMPONENT_LOWER}"
+            )
+        endif()
+        file(STRINGS "${MACRDP_FFMPEG_PC_FILE}" MACRDP_FFMPEG_PC_VERSION_LINE
+            REGEX "^Version: *")
+        string(REGEX REPLACE "^Version: *" "" MACRDP_FFMPEG_COMPONENT_VERSION
+            "${MACRDP_FFMPEG_PC_VERSION_LINE}")
+        set(${MACRDP_FFMPEG_COMPONENT}_LIBRARIES
+            "${MACRDP_FFMPEG_LIBRARY}" CACHE FILEPATH
+            "The ${MACRDP_FFMPEG_COMPONENT} library" FORCE)
+        set(${MACRDP_FFMPEG_COMPONENT}_INCLUDE_DIRS
+            "${MACRDP_FFMPEG_INCLUDE_DIR}" CACHE PATH
+            "The ${MACRDP_FFMPEG_COMPONENT} include directory" FORCE)
+        set(${MACRDP_FFMPEG_COMPONENT}_VERSION
+            "${MACRDP_FFMPEG_COMPONENT_VERSION}" CACHE STRING
+            "The ${MACRDP_FFMPEG_COMPONENT} version number" FORCE)
+        list(APPEND MACRDP_FFMPEG_LIBRARIES "${MACRDP_FFMPEG_LIBRARY}")
+    endforeach()
+    foreach(MACRDP_UNUSED_FFMPEG_COMPONENT IN ITEMS
+        AVDEVICE AVFILTER AVFORMAT POSTPROCESS)
+        foreach(MACRDP_UNUSED_FFMPEG_SUFFIX IN ITEMS
+            LIBRARIES INCLUDE_DIRS DEFINITIONS VERSION)
+            unset(${MACRDP_UNUSED_FFMPEG_COMPONENT}_${MACRDP_UNUSED_FFMPEG_SUFFIX})
+            unset(${MACRDP_UNUSED_FFMPEG_COMPONENT}_${MACRDP_UNUSED_FFMPEG_SUFFIX} CACHE)
+        endforeach()
+    endforeach()
+    set(FFMPEG_LIBRARIES "${MACRDP_FFMPEG_LIBRARIES}" CACHE STRING
+        "The FFmpeg release libraries" FORCE)
+    set(FFMPEG_INCLUDE_DIRS "${MACRDP_FFMPEG_INCLUDE_DIR}" CACHE STRING
+        "The FFmpeg release include directory" FORCE)
+    set(FFMPEG_DEFINITIONS "" CACHE STRING "The FFmpeg release cflags" FORCE)
+    set(MACRDP_MANAGED_FFMPEG_CACHE ON CACHE INTERNAL
+        "Purpose-built FFmpeg populated the discovery cache" FORCE)
+    set(MACRDP_MANAGED_FFMPEG ON)
+elseif(MACRDP_MANAGED_FFMPEG_CACHE)
+    foreach(MACRDP_FFMPEG_CACHE_PREFIX IN ITEMS
+        FFMPEG AVCODEC AVDEVICE AVFILTER AVFORMAT AVUTIL POSTPROCESS SWSCALE SWRESAMPLE)
+        foreach(MACRDP_FFMPEG_CACHE_SUFFIX IN ITEMS
+            LIBRARIES INCLUDE_DIRS DEFINITIONS VERSION)
+            unset(${MACRDP_FFMPEG_CACHE_PREFIX}_${MACRDP_FFMPEG_CACHE_SUFFIX} CACHE)
+        endforeach()
+    endforeach()
+    set(MACRDP_MANAGED_FFMPEG_CACHE OFF CACHE INTERNAL
+        "Purpose-built FFmpeg populated the discovery cache" FORCE)
+endif()
+
 set(MACRDP_CODESIGN_IDENTITY "" CACHE STRING
     "macOS code-signing identity for macrdp-server (empty disables signing)"
 )
@@ -195,6 +302,8 @@ set(WITH_DSP_FFMPEG ON CACHE BOOL "Use FFmpeg audio DSP for RDPSND resampling" F
 set(WITH_MANPAGES OFF CACHE BOOL "Do not build FreeRDP manpages" FORCE)
 set(WITH_CLANG_FORMAT OFF CACHE BOOL "Do not configure clang-format" FORCE)
 set(WITH_SERVER_INTERFACE ON CACHE BOOL "Build FreeRDP server interface" FORCE)
+set(WITH_AAD OFF CACHE BOOL "Do not build unused Azure AD client support" FORCE)
+set(WITH_JSON_DISABLED ON CACHE BOOL "Build FreeRDP without optional JSON backends" FORCE)
 set(WITH_WINPR_JSON OFF CACHE BOOL "Do not build optional WinPR JSON support" FORCE)
 set(WITH_WINPR_TOOLS_CLI OFF CACHE BOOL "Do not build WinPR command-line tools" FORCE)
 set(WITH_VERBOSE_WINPR_ASSERT OFF CACHE BOOL
@@ -815,9 +924,24 @@ if(APPLE)
             "${CMAKE_CURRENT_SOURCE_DIR}"
             "${freerdp_SOURCE_DIR}"
             "${PROJECT_VERSION}"
+            "${MACRDP_FFMPEG_PROVENANCE}"
         DEPENDS macrdp-server
         USES_TERMINAL
     )
+
+    if(MACRDP_MANAGED_FFMPEG)
+        set(MACRDP_FFMPEG_SOURCE_ARCHIVE
+            "${CMAKE_CURRENT_BINARY_DIR}/macrdp-ffmpeg-sources-${MACRDP_FFMPEG_VERSION}.tar.gz")
+        add_custom_target(macrdp-ffmpeg-source-package
+            COMMAND ${CMAKE_COMMAND} -E env bash
+                "${CMAKE_CURRENT_SOURCE_DIR}/scripts/package_ffmpeg_source.sh"
+                "${MACRDP_FFMPEG_PROVENANCE}"
+                "${CMAKE_CURRENT_SOURCE_DIR}"
+                "${MACRDP_FFMPEG_SOURCE_ARCHIVE}"
+            BYPRODUCTS "${MACRDP_FFMPEG_SOURCE_ARCHIVE}"
+            USES_TERMINAL
+        )
+    endif()
 
     add_custom_target(macrdp-package-validate
         COMMAND ${CMAKE_COMMAND} -E env bash
@@ -828,6 +952,9 @@ if(APPLE)
         DEPENDS macrdp-package
         USES_TERMINAL
     )
+    if(MACRDP_MANAGED_FFMPEG)
+        add_dependencies(macrdp-package-validate macrdp-ffmpeg-source-package)
+    endif()
 endif()
 
 if(MACRDP_FREERDP_WITH_FFMPEG)
@@ -851,6 +978,26 @@ if(MACRDP_FREERDP_WITH_FFMPEG)
     target_link_libraries(macrdp-freerdp-h264-test PRIVATE
         macrdp_freerdp_shadow
     )
+
+    if(MACRDP_MANAGED_FFMPEG)
+        add_executable(macrdp-ffmpeg-build-probe
+            tools/ffmpeg_build_probe.c
+        )
+        target_compile_options(macrdp-ffmpeg-build-probe PRIVATE
+            -Wall
+            -Wextra
+            -Wpedantic
+        )
+        target_include_directories(macrdp-ffmpeg-build-probe PRIVATE
+            "${MACRDP_FFMPEG_INCLUDE_DIR}"
+        )
+        target_link_libraries(macrdp-ffmpeg-build-probe PRIVATE
+            "${AVCODEC_LIBRARIES}"
+            "${AVUTIL_LIBRARIES}"
+            "${SWRESAMPLE_LIBRARIES}"
+            "${SWSCALE_LIBRARIES}"
+        )
+    endif()
 endif()
 
 add_executable(macrdp-h264-worker-test
@@ -974,6 +1121,14 @@ if(MACRDP_FREERDP_WITH_FFMPEG)
         NAME freerdp_h264_encoder
         COMMAND macrdp-freerdp-h264-test
     )
+    if(MACRDP_MANAGED_FFMPEG)
+        add_test(
+            NAME ffmpeg_release_configuration
+            COMMAND macrdp-ffmpeg-build-probe
+                "${MACRDP_FFMPEG_VERSION}"
+                "LGPL version 2.1 or later"
+        )
+    endif()
 endif()
 
 add_test(

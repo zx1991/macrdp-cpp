@@ -10,8 +10,8 @@ require "open3"
 require "pathname"
 require "set"
 
-unless ARGV.length == 5
-  warn "usage: #{$PROGRAM_NAME} <package> <dependency-origins> <project-source> <freerdp-source> <project-version>"
+unless (5..6).cover?(ARGV.length)
+  warn "usage: #{$PROGRAM_NAME} <package> <dependency-origins> <project-source> <freerdp-source> <project-version> [ffmpeg-provenance]"
   exit 2
 end
 
@@ -20,6 +20,7 @@ origins_path = Pathname.new(ARGV[1]).realpath
 project_source = Pathname.new(ARGV[2]).realpath
 freerdp_source = Pathname.new(ARGV[3]).realpath
 project_version = ARGV[4]
+ffmpeg_provenance_path = ARGV[5].to_s.empty? ? nil : Pathname.new(ARGV[5]).realpath
 
 def relative_package_path(value)
   path = Pathname.new(value)
@@ -37,6 +38,10 @@ end
 
 def purl_escape(value)
   CGI.escape(value).gsub("+", "%20")
+end
+
+def descendant_of?(path, root)
+  path == root || path.to_s.start_with?("#{root}/")
 end
 
 def license_files(root)
@@ -75,6 +80,69 @@ def copy_licenses(component_name, source_root, licenses_root, candidates = nil)
   copied.sort
 end
 
+
+managed_ffmpeg = nil
+if ffmpeg_provenance_path
+  provenance = JSON.parse(ffmpeg_provenance_path.read)
+  raise "unexpected FFmpeg provenance schema" unless provenance["schemaVersion"] == 1
+  raise "unexpected managed dependency" unless provenance["name"] == "ffmpeg"
+  raise "managed FFmpeg version is missing" unless provenance["version"].is_a?(String) && !provenance["version"].empty?
+  unless provenance["licenseExpression"] == "LGPL-2.1-or-later"
+    raise "managed FFmpeg must be LGPL-2.1-or-later"
+  end
+
+  source = provenance.fetch("source")
+  source_sha256 = source.fetch("sha256")
+  raise "invalid FFmpeg source SHA-256" unless source_sha256.match?(/\A[0-9a-f]{64}\z/)
+  build = provenance.fetch("build")
+  install_prefix = Pathname.new(build.fetch("installPrefix")).realpath
+  source_root = Pathname.new(build.fetch("sourceRoot")).realpath
+  source_archive = Pathname.new(build.fetch("sourceArchive")).realpath
+  configuration_file = Pathname.new(build.fetch("configurationFile")).realpath
+  raise "FFmpeg source archive SHA-256 mismatch" unless sha256(source_archive) == source_sha256
+  raise "FFmpeg build configuration is empty" unless configuration_file.file? && configuration_file.size.positive?
+
+  forbidden_flags = %w[
+    --enable-gpl
+    --enable-version3
+    --enable-libx264
+    --enable-libx265
+    --enable-nonfree
+  ]
+  configure_flags = provenance.fetch("configureFlags")
+  raise "FFmpeg configure flags are missing" unless configure_flags.is_a?(Array) && !configure_flags.empty?
+  forbidden_flags.each do |flag|
+    raise "managed FFmpeg enables forbidden option #{flag}" if configure_flags.include?(flag)
+  end
+  expected_libraries = provenance.fetch("expectedLibraries")
+  unless expected_libraries.sort == %w[libavcodec libavutil libswresample libswscale]
+    raise "managed FFmpeg library allowlist is unexpected"
+  end
+
+  license_paths = build.fetch("licenseFiles").map { |path| Pathname.new(path).realpath }
+  license_paths.each do |path|
+    raise "FFmpeg license file escapes its source tree: #{path}" unless descendant_of?(path, source_root)
+  end
+  provenance.fetch("patches", []).each do |entry|
+    relative = relative_package_path(entry.fetch("path"))
+    patch_path = project_source.join("third_party", "ffmpeg", relative)
+    expected_hash = entry.fetch("sha256")
+    raise "invalid FFmpeg patch SHA-256: #{relative}" unless expected_hash.match?(/\A[0-9a-f]{64}\z/)
+    raise "FFmpeg patch is missing: #{relative}" unless patch_path.file?
+    raise "FFmpeg patch SHA-256 mismatch: #{relative}" unless sha256(patch_path) == expected_hash
+  end
+
+  managed_ffmpeg = {
+    provenance: provenance,
+    install_prefix: install_prefix,
+    source_root: source_root,
+    source_archive: source_archive,
+    configuration_file: configuration_file,
+    license_paths: license_paths,
+    expected_libraries: expected_libraries
+  }
+end
+
 records = origins_path.readlines(chomp: true).reject(&:empty?).map.with_index(1) do |line, line_number|
   fields = line.split("\t", -1)
   raise "invalid dependency origin row #{line_number}" unless fields.length == 3
@@ -86,17 +154,35 @@ records = origins_path.readlines(chomp: true).reject(&:empty?).map.with_index(1)
     raise "recorded dependency is missing from package: #{packaged_path}"
   end
 
-  match = source_path.to_s.match(%r{\A(.*/Cellar)/([^/]+)/([^/]+)/})
-  raise "dependency is not traceable to a Homebrew Cellar: #{source_path}" unless match
+  if managed_ffmpeg && descendant_of?(source_path, managed_ffmpeg.fetch(:install_prefix))
+    basename = source_path.basename.to_s
+    allowed = managed_ffmpeg.fetch(:expected_libraries).any? do |library|
+      basename.match?(/\A#{Regexp.escape(library)}(?:\.[0-9.]+)?\.dylib\z/)
+    end
+    raise "unexpected managed FFmpeg library: #{basename}" unless allowed
 
-  {
-    packaged_path: packaged_path,
-    owner_path: owner_path,
-    source_path: source_path,
-    formula_name: match[2],
-    formula_version: match[3],
-    formula_root: Pathname.new(match[1]).join(match[2], match[3]).realpath
-  }
+    {
+      packaged_path: packaged_path,
+      owner_path: owner_path,
+      source_path: source_path,
+      provider: :project,
+      component_key: ["project", "ffmpeg", managed_ffmpeg.dig(:provenance, "version")]
+    }
+  else
+    match = source_path.to_s.match(%r{\A(.*/Cellar)/([^/]+)/([^/]+)/})
+    raise "dependency has no recognized provenance: #{source_path}" unless match
+
+    {
+      packaged_path: packaged_path,
+      owner_path: owner_path,
+      source_path: source_path,
+      provider: :homebrew,
+      component_key: ["homebrew", match[2], match[3]],
+      formula_name: match[2],
+      formula_version: match[3],
+      formula_root: Pathname.new(match[1]).join(match[2], match[3]).realpath
+    }
+  end
 end
 raise "dependency origin manifest is empty" if records.empty?
 
@@ -106,14 +192,18 @@ origins_by_file.each do |packaged_path, file_records|
   raise "package file has multiple dependency origins: #{packaged_path}" if origins.length != 1
 end
 
-formula_groups = records.group_by { |record| [record[:formula_name], record[:formula_version]] }
+formula_groups = records.select { |record| record[:provider] == :homebrew }
+                        .group_by { |record| [record[:formula_name], record[:formula_version]] }
 formula_names = formula_groups.keys.map(&:first).uniq.sort
-brew_stdout, brew_stderr, brew_status = Open3.capture3("brew", "info", "--json=v2", *formula_names)
-unless brew_status.success?
-  raise "unable to query Homebrew metadata: #{brew_stderr.strip}"
-end
-brew_formulae = JSON.parse(brew_stdout).fetch("formulae").to_h do |formula|
-  [formula.fetch("name"), formula]
+brew_formulae = {}
+unless formula_names.empty?
+  brew_stdout, brew_stderr, brew_status = Open3.capture3("brew", "info", "--json=v2", *formula_names)
+  unless brew_status.success?
+    raise "unable to query Homebrew metadata: #{brew_stderr.strip}"
+  end
+  brew_formulae = JSON.parse(brew_stdout).fetch("formulae").to_h do |formula|
+    [formula.fetch("name"), formula]
+  end
 end
 
 compliance_dir = package_dir.join("share", "macrdp")
@@ -141,9 +231,36 @@ formula_groups.each do |(formula_name, _formula_version), group_records|
     licenses_root
   )
 end
+if managed_ffmpeg
+  license_sets["ffmpeg"] = copy_licenses(
+    "ffmpeg",
+    managed_ffmpeg.fetch(:source_root),
+    licenses_root,
+    managed_ffmpeg.fetch(:license_paths)
+  )
+end
 
 ffmpeg_configuration = compliance_dir.join("ffmpeg-build-configuration.txt")
-if (ffmpeg_group = formula_groups.find { |(name, _version), _records| name == "ffmpeg" })
+ffmpeg_source_provenance = compliance_dir.join("ffmpeg-source-provenance.json")
+if managed_ffmpeg
+  FileUtils.cp(managed_ffmpeg.fetch(:configuration_file), ffmpeg_configuration)
+  provenance = managed_ffmpeg.fetch(:provenance)
+  public_provenance = {
+    "schemaVersion" => provenance.fetch("schemaVersion"),
+    "name" => provenance.fetch("name"),
+    "version" => provenance.fetch("version"),
+    "homepage" => provenance.fetch("homepage"),
+    "licenseExpression" => provenance.fetch("licenseExpression"),
+    "source" => provenance.fetch("source"),
+    "patches" => provenance.fetch("patches", []),
+    "configureFlags" => provenance.fetch("configureFlags"),
+    "expectedLibraries" => provenance.fetch("expectedLibraries"),
+    "build" => provenance.fetch("build").slice(
+      "architecture", "minimumMacOS", "compiler"
+    )
+  }
+  File.write(ffmpeg_source_provenance, JSON.pretty_generate(public_provenance) + "\n")
+elsif (ffmpeg_group = formula_groups.find { |(name, _version), _records| name == "ffmpeg" })
   ffmpeg_binary = ffmpeg_group.last.first.fetch(:formula_root).join("bin", "ffmpeg")
   stdout, stderr, status = Open3.capture3(ffmpeg_binary.to_s, "-hide_banner", "-buildconf")
   raise "unable to record FFmpeg build configuration: #{stderr.strip}" unless status.success?
@@ -166,6 +283,23 @@ notice_lines = [
   "- License files: #{license_sets.fetch("FreeRDP").map { |path| path.relative_path_from(package_dir) }.join(", ")}",
   ""
 ]
+if managed_ffmpeg
+  provenance = managed_ffmpeg.fetch(:provenance)
+  managed_files = records.select { |record| record[:provider] == :project }
+                         .map { |record| record[:packaged_path] }.uniq.sort
+  notice_lines.concat([
+    "## FFmpeg #{provenance.fetch("version")}",
+    "",
+    "- License: #{provenance.fetch("licenseExpression")}",
+    "- Homepage: #{provenance.fetch("homepage")}",
+    "- Linkage: dynamically linked",
+    "- Source: #{provenance.dig("source", "url")}",
+    "- Source SHA-256: #{provenance.dig("source", "sha256")}",
+    "- Packaged files: #{managed_files.join(", ")}",
+    "- License files: #{license_sets.fetch("ffmpeg").map { |path| path.relative_path_from(package_dir) }.join(", ")}",
+    ""
+  ])
+end
 formula_groups.keys.sort.each do |formula_name, formula_version|
   metadata = brew_formulae.fetch(formula_name) do
     raise "Homebrew metadata is missing formula #{formula_name}"
@@ -274,9 +408,47 @@ formula_components = formula_groups.keys.sort.map do |formula_name, formula_vers
   }
 end
 
+managed_ffmpeg_ref = nil
+managed_ffmpeg_component = nil
+if managed_ffmpeg
+  provenance = managed_ffmpeg.fetch(:provenance)
+  managed_ffmpeg_ref = "pkg:generic/ffmpeg@#{purl_escape(provenance.fetch("version"))}"
+  packaged_files = records.select { |record| record[:provider] == :project }
+                          .map { |record| record[:packaged_path] }.uniq.sort
+  managed_compliance = license_sets.fetch("ffmpeg") +
+                       [ffmpeg_configuration, ffmpeg_source_provenance]
+  managed_ffmpeg_component = {
+    "type" => "library",
+    "bom-ref" => managed_ffmpeg_ref,
+    "group" => "FFmpeg",
+    "name" => "ffmpeg",
+    "version" => provenance.fetch("version"),
+    "purl" => managed_ffmpeg_ref,
+    "licenses" => [{ "expression" => provenance.fetch("licenseExpression") }],
+    "externalReferences" => [
+      { "type" => "website", "url" => provenance.fetch("homepage") },
+      { "type" => "distribution", "url" => provenance.dig("source", "url") }
+    ],
+    "evidence" => { "occurrences" => packaged_files.map { |path| { "location" => path } } },
+    "properties" => [
+      { "name" => "macrdp:dependency-provider", "value" => "project-build" },
+      { "name" => "macrdp:linkage", "value" => "dynamic" },
+      { "name" => "macrdp:source-archive-sha256", "value" => provenance.dig("source", "sha256") },
+      { "name" => "macrdp:license-directory", "value" => "share/macrdp/licenses/ffmpeg" }
+    ] + packaged_files.map do |path|
+      { "name" => "macrdp:packaged-file-sha256", "value" => "#{path}=#{sha256(package_dir.join(path))}" }
+    end + compliance_properties(managed_compliance, package_dir)
+  }
+end
+
 file_refs = origins_by_file.to_h do |packaged_path, file_records|
   record = file_records.first
-  [packaged_path, formula_refs.fetch([record[:formula_name], record[:formula_version]])]
+  ref = if record[:provider] == :project
+          managed_ffmpeg_ref
+        else
+          formula_refs.fetch([record[:formula_name], record[:formula_version]])
+        end
+  [packaged_path, ref]
 end
 dependency_map = Hash.new { |hash, key| hash[key] = Set.new }
 dependency_map[root_ref] << freerdp_ref
@@ -285,7 +457,8 @@ records.each do |record|
   dependency_ref = file_refs.fetch(record[:packaged_path])
   dependency_map[owner_ref] << dependency_ref unless owner_ref == dependency_ref
 end
-all_refs = [root_ref, freerdp_ref] + formula_components.map { |component| component.fetch("bom-ref") }
+all_components = [freerdp_component] + formula_components + [managed_ffmpeg_component].compact
+all_refs = [root_ref] + all_components.map { |component| component.fetch("bom-ref") }
 dependencies = all_refs.sort.map do |ref|
   { "ref" => ref, "dependsOn" => dependency_map[ref].to_a.sort }
 end
@@ -301,9 +474,9 @@ sbom = {
     },
     "component" => root_component
   },
-  "components" => [freerdp_component] + formula_components,
+  "components" => all_components,
   "dependencies" => dependencies
 }
 File.write(compliance_dir.join("sbom.cdx.json"), JSON.pretty_generate(sbom) + "\n")
 
-puts "Generated compliance bundle: #{formula_components.length + 1} third-party components"
+puts "Generated compliance bundle: #{all_components.length} third-party components"

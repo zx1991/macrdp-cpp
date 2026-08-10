@@ -84,3 +84,17 @@ This project has not published a stable release yet.
 - Added generated third-party notices, formula license texts, the exact FFmpeg
   build configuration, and a CycloneDX 1.6 SBOM with validated hashes and
   dependency references to the developer package.
+- Added a hash-pinned minimal FFmpeg 7.1.1 build for release-equivalent macOS
+  packages. It dynamically links only `libavcodec`, `libavutil`,
+  `libswresample`, and `libswscale`, reports LGPL-2.1-or-later at runtime, and
+  rejects GPL, version3, nonfree, x264, and x265 configurations.
+- Added deterministic release probes for AVC420, AVC444, VideoToolbox H.264,
+  H.264 decoding, AAC, PCM, scaling, and resampling, plus managed dependency
+  provenance in the generated notices and CycloneDX SBOM.
+- Added a verified FFmpeg corresponding-source archive containing the pristine
+  upstream source, checked-in patch, manifest, build driver, capability probe,
+  rebuild instructions, and file checksums for publication with future binary
+  releases.
+- Disabled unused FreeRDP Azure AD and optional JSON backends so clean release
+  builds cannot acquire an opportunistic cJSON runtime dependency from the
+  host environment.

@@ -22,8 +22,13 @@ jobs:
           bash -n tools/run_hardware_lifecycle.sh
           xcrun swiftc -typecheck tools/macrdp_system_probe.swift
 
-      - name: Install dependencies
-        run: brew install ffmpeg openssl@3
+      - name: Install release dependencies
+        run: brew install openssl@3
+
+      - name: Build pinned LGPL FFmpeg
+        run: |
+          MACRDP_FFMPEG_JOBS=3 \
+            scripts/build_macos_ffmpeg.sh build/third_party/ffmpeg arm64 15.0
 
       - name: Configure
         run: |
@@ -32,7 +37,9 @@ jobs:
             -DCMAKE_OSX_ARCHITECTURES=arm64 \
             -DCMAKE_OSX_DEPLOYMENT_TARGET=15.0 \
             -DOPENSSL_ROOT_DIR="$(brew --prefix openssl@3)" \
-            -DCMAKE_PREFIX_PATH="$(brew --prefix ffmpeg);$(brew --prefix openssl@3)"
+            -DCMAKE_PREFIX_PATH="$(brew --prefix openssl@3)" \
+            -DMACRDP_FFMPEG_ROOT="$GITHUB_WORKSPACE/build/third_party/ffmpeg/prefix" \
+            -DMACRDP_FFMPEG_PROVENANCE="$GITHUB_WORKSPACE/build/third_party/ffmpeg/provenance.json"
 
       - name: Build
         run: cmake --build build --parallel 3
@@ -64,7 +71,7 @@ jobs:
       - name: Check out source
         uses: actions/checkout@v4
 
-      - name: Install dependencies
+      - name: Install development dependencies
         run: brew install ffmpeg openssl@3
 
       - name: Configure sanitizers
