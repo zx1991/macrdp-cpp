@@ -8,7 +8,9 @@ The patches are kept in this repository so changes to the upstream boundary are
 reviewable without committing a vendor tree. They add the small hooks needed by
 the macOS shadow subsystem: frame snapshots, bounded output/message handling,
 H.264 integration, audio message coalescing, diagnostics, and the atomic client
-session boundary used during disconnect and reconnect.
+session boundary used during disconnect and reconnect. The final capability
+policy patch also keeps RDPGFX 8.1 and 10.x H.264 flag semantics separate so a
+modern client cannot lose AVC420 during capability confirmation.
 
 Do not edit `build/_deps/freerdp-src` directly. When the FreeRDP version
 changes, review every hunk against the new upstream source, update the archive

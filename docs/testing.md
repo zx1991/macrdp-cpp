@@ -17,7 +17,8 @@ ctest --test-dir build --output-on-failure
 The local suite covers display selection, bounded output dimensions, Retina
 and negative-origin input mapping, generation-aware frame coalescing, direct
 VideoToolbox AVC420, FreeRDP AVC420 and AVC444 paths, the asynchronous encoder
-worker, input ownership and queue behavior, ledger-bounded modifier cleanup,
+worker, version-aware RDPGFX 8.1/10.x capability interpretation, input
+ownership and queue behavior, ledger-bounded modifier cleanup,
 signed 9-bit RDP wheel-delta translation, bounded clipboard response
 correlation and reconnect isolation, asynchronous completion and timeout
 cleanup semantics, injected capture lifecycle races, audio display-generation
@@ -46,6 +47,13 @@ disconnect notification, RDPSND and clipboard shutdown gates, and confirms
 that late keyboard, Unicode, synchronize, and pointer callbacks cannot mutate
 or recreate input ownership. Reusing the same stack address in successive
 cycles also covers allocator address reuse without carrying old client state.
+
+The RDPGFX capability test is a pure protocol-state test. It verifies that
+version 8.0 rejects H.264, version 8.1 requires `AVC420_ENABLED`, every supported
+10.x capability version enables AVC420 and AVC444 unless `AVC_DISABLED` is set,
+the documented 10.6 errata value follows the same rule, and unknown versions
+fail closed. It does not create an encoder, channel, listener, or capture
+session.
 
 The clipboard transfer test uses only portable fixed-capacity state and never
 reads or writes `NSPasteboard`. It covers FIFO response correlation, failed-send
@@ -83,8 +91,8 @@ UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1 \
 
 The macOS CI job disables LeakSanitizer because Apple frameworks and FreeRDP
 retain process-lifetime global state; ASan heap, stack, bounds, and lifetime
-checks remain enabled. It then repeats only the deterministic concurrency and
-lifecycle tests:
+checks remain enabled. It then repeats only the deterministic capability,
+concurrency, and lifecycle tests:
 
 ```bash
 ASAN_OPTIONS=abort_on_error=1:detect_leaks=0:halt_on_error=1 \

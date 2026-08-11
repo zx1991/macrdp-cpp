@@ -18,7 +18,7 @@ shadow server.
 | Area | Current implementation |
 | --- | --- |
 | Display | Exact selection of one active display with generation-tagged mode-change recovery and newest-frame coalescing |
-| Video | GFX/AVC420 through direct VideoToolbox, FFmpeg fallback, optional AVC444, or classic SurfaceBits |
+| Video | Version-aware GFX/AVC420 through direct VideoToolbox, FFmpeg fallback, optional AVC444, or classic SurfaceBits |
 | Input | Serialized keyboard, Unicode, pointer, button, drag, and wheel injection through a private CoreGraphics event source |
 | Clipboard | Bidirectional `CF_UNICODETEXT` and `CF_TEXT` through `NSPasteboard`, with per-connection request correlation |
 | Audio | Generation-isolated screen audio and negotiation-gated RDPSND output; AAC or PCM depends on client formats |
@@ -29,6 +29,14 @@ shadow server.
 The runtime separates capture, audio, input injection, per-client encoding, and
 FreeRDP transport work. See [Architecture](docs/architecture.md) for ownership
 and backpressure details.
+
+RDPGFX codec support is negotiated per client. Version 8.1 clients enable
+AVC420 with `AVC420_ENABLED`, while 10.x clients enable AVC420 and AVC444 by
+omitting `AVC_DISABLED`; unknown versions do not enable either codec. Codec
+capabilities are not a bandwidth measurement, so `--bitrate` and `--fps`
+remain explicit server settings. Slow transports are handled by bounded output
+queues, deferred writes, and newest-frame coalescing rather than speculative
+rate changes.
 
 ## Current limits
 
@@ -80,9 +88,9 @@ ctest --test-dir build --output-on-failure
 ```
 
 The first configure downloads and hash-verifies FreeRDP 3.30.0. Project
-adaptations are applied from
-`patches/freerdp-macrdp-adaptations.patch` to the generated `build/_deps`
-tree. Do not edit generated dependency sources directly.
+adaptations are applied in a hash-stamped order from the checked-in files under
+`patches/` to the generated `build/_deps` tree. Do not edit generated
+dependency sources directly.
 
 The command above is the shortest development setup and may use Homebrew's GPL
 FFmpeg build. It is not the dependency path used for official binary artifacts.
@@ -345,8 +353,8 @@ ctest --test-dir build --output-on-failure
 
 CI also builds the full static dependency graph with AddressSanitizer and
 UndefinedBehaviorSanitizer, runs the deterministic suite, and repeats the
-concurrency and lifecycle state-machine tests 50 times. This job does not open
-an RDP listener, capture the display, or inject input. See
+capability, concurrency, and lifecycle state-machine tests 50 times. This job
+does not open an RDP listener, capture the display, or inject input. See
 [Testing](docs/testing.md) for the equivalent isolated build and runtime
 options.
 

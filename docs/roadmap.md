@@ -81,6 +81,11 @@ are acceptance gates rather than promised dates.
   after every successful connect even when the socket is already closed, and
   prevents late input callbacks from recreating old ownership. A 100-cycle
   deterministic reconnect test covers input, clipboard, and RDPSND together.
+- Make RDPGFX H.264 capability handling version-aware. Version 8.1 uses
+  `AVC420_ENABLED`, 10.x uses `AVC_DISABLED`, the 10.6 errata value is covered,
+  and unknown versions fail closed. Codec negotiation remains per client while
+  bitrate and capture rate stay explicit until transport measurements justify
+  a stable control loop.
 
 ## P0: correctness and lifecycle
 
@@ -124,8 +129,6 @@ a signed artifact whose minimum OS, dependencies, and licensing are explicit.
 - Add richer clipboard formats only after text transfer remains reliable under
   reconnect and shaped-link tests.
 - Evaluate microphone/AUDIN separately from speaker/RDPSND output.
-- Decide whether a supported client should receive adaptive defaults based on
-  negotiated capabilities or measured transport behavior.
 
 ## P4: performance
 

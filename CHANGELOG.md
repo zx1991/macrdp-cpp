@@ -12,6 +12,9 @@ This project has not published a stable release yet.
   stress profiles.
 - Explicit H.264 encoder selection for VideoToolbox, FFmpeg, and AVC444
   loopback comparisons.
+- Corrected RDPGFX H.264 negotiation so 8.1 and 10.x capability flags are
+  interpreted by version, preserving AVC420 for modern clients, covering the
+  10.6 errata value, and failing closed for unknown versions.
 - Serialized macOS pasteboard access and expanded shaped-link reconnect,
   resize, and clipboard-change validation.
 - Added a capability-gated clipboard monitor, bounded FIFO correlation for

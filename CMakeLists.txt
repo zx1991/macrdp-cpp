@@ -440,6 +440,8 @@ set(MACRDP_FREERDP_OUTPUT_DIAGNOSTICS_PATCH
     "${CMAKE_CURRENT_SOURCE_DIR}/patches/freerdp-output-diagnostics.patch")
 set(MACRDP_FREERDP_CLIENT_SESSION_LIFECYCLE_PATCH
     "${CMAKE_CURRENT_SOURCE_DIR}/patches/freerdp-client-session-lifecycle.patch")
+set(MACRDP_FREERDP_RDPGFX_CAPABILITY_PATCH
+    "${CMAKE_CURRENT_SOURCE_DIR}/patches/freerdp-rdpgfx-capability-policy.patch")
 file(SHA256 "${MACRDP_FREERDP_PATCH}" MACRDP_FREERDP_PATCH_HASH)
 file(SHA256 "${MACRDP_FREERDP_SURFACE_OUTPUT_PRIORITY_PATCH}"
     MACRDP_FREERDP_SURFACE_OUTPUT_PRIORITY_PATCH_HASH)
@@ -449,8 +451,10 @@ file(SHA256 "${MACRDP_FREERDP_OUTPUT_DIAGNOSTICS_PATCH}"
     MACRDP_OUTPUT_DIAGNOSTICS_PATCH_HASH)
 file(SHA256 "${MACRDP_FREERDP_CLIENT_SESSION_LIFECYCLE_PATCH}"
     MACRDP_CLIENT_SESSION_LIFECYCLE_PATCH_HASH)
+file(SHA256 "${MACRDP_FREERDP_RDPGFX_CAPABILITY_PATCH}"
+    MACRDP_RDPGFX_CAPABILITY_PATCH_HASH)
 string(SHA256 MACRDP_FREERDP_PATCH_HASH
-    "${MACRDP_FREERDP_PATCH_HASH}:${MACRDP_FREERDP_SURFACE_OUTPUT_PRIORITY_PATCH_HASH}:${MACRDP_FREERDP_AUDIO_QUEUE_BOUND_PATCH_HASH}:${MACRDP_OUTPUT_DIAGNOSTICS_PATCH_HASH}:${MACRDP_CLIENT_SESSION_LIFECYCLE_PATCH_HASH}")
+    "${MACRDP_FREERDP_PATCH_HASH}:${MACRDP_FREERDP_SURFACE_OUTPUT_PRIORITY_PATCH_HASH}:${MACRDP_FREERDP_AUDIO_QUEUE_BOUND_PATCH_HASH}:${MACRDP_OUTPUT_DIAGNOSTICS_PATCH_HASH}:${MACRDP_CLIENT_SESSION_LIFECYCLE_PATCH_HASH}:${MACRDP_RDPGFX_CAPABILITY_PATCH_HASH}")
 set(MACRDP_FREERDP_PATCH_STAMP
     "${CMAKE_CURRENT_BINARY_DIR}/macrdp-freerdp-patch.sha256")
 set(MACRDP_FREERDP_SOURCE_HINT
@@ -558,6 +562,7 @@ foreach(MACRDP_REQUIRED_PATCH_FILE IN ITEMS
     "${MACRDP_FREERDP_AUDIO_QUEUE_BOUND_PATCH}"
     "${MACRDP_FREERDP_OUTPUT_DIAGNOSTICS_PATCH}"
     "${MACRDP_FREERDP_CLIENT_SESSION_LIFECYCLE_PATCH}"
+    "${MACRDP_FREERDP_RDPGFX_CAPABILITY_PATCH}"
     "${MACRDP_FREERDP_SHADOW_HEADER}"
     "${MACRDP_FREERDP_SHADOW_CLIENT}"
     "${MACRDP_FREERDP_SHADOW_ENCODER_SOURCE}"
@@ -935,6 +940,66 @@ if(MACRDP_CLIENT_SESSION_HEADER_OFFSET EQUAL -1
         "FreeRDP client session lifecycle patch is partial or missing")
 endif()
 
+file(READ "${MACRDP_FREERDP_SHADOW_CLIENT}" MACRDP_SHADOW_CLIENT_CONTENT)
+string(FIND "${MACRDP_SHADOW_CLIENT_CONTENT}"
+    "#include <macrdp/rdpgfx_capabilities.h>"
+    MACRDP_RDPGFX_CAPABILITY_INCLUDE_OFFSET)
+string(FIND "${MACRDP_SHADOW_CLIENT_CONTENT}"
+    "MACRDP_RDPGFX_CAPABILITY_POLICY"
+    MACRDP_RDPGFX_CAPABILITY_POLICY_OFFSET)
+string(FIND "${MACRDP_SHADOW_CLIENT_CONTENT}"
+    "macrdp_rdpgfx_caps_support_avc444"
+    MACRDP_RDPGFX_AVC444_HELPER_OFFSET)
+string(FIND "${MACRDP_SHADOW_CLIENT_CONTENT}"
+    "macrdp_rdpgfx_caps_support_avc420"
+    MACRDP_RDPGFX_AVC420_HELPER_OFFSET)
+if(MACRDP_RDPGFX_CAPABILITY_INCLUDE_OFFSET EQUAL -1
+   AND MACRDP_RDPGFX_CAPABILITY_POLICY_OFFSET EQUAL -1
+   AND MACRDP_RDPGFX_AVC444_HELPER_OFFSET EQUAL -1
+   AND MACRDP_RDPGFX_AVC420_HELPER_OFFSET EQUAL -1)
+    find_program(MACRDP_PATCH_EXECUTABLE patch)
+    if(NOT MACRDP_PATCH_EXECUTABLE)
+        message(FATAL_ERROR
+            "The 'patch' utility is required for the FreeRDP RDPGFX capability policy")
+    endif()
+
+    execute_process(
+        COMMAND "${MACRDP_PATCH_EXECUTABLE}" -N -t -F 0 -p1
+            -i "${MACRDP_FREERDP_RDPGFX_CAPABILITY_PATCH}"
+        WORKING_DIRECTORY "${freerdp_SOURCE_DIR}"
+        RESULT_VARIABLE MACRDP_RDPGFX_CAPABILITY_PATCH_RESULT
+        OUTPUT_VARIABLE MACRDP_RDPGFX_CAPABILITY_PATCH_OUTPUT
+        ERROR_VARIABLE MACRDP_RDPGFX_CAPABILITY_PATCH_ERROR
+    )
+    if(NOT MACRDP_RDPGFX_CAPABILITY_PATCH_RESULT EQUAL 0)
+        message(FATAL_ERROR
+            "Unable to apply the FreeRDP RDPGFX capability policy patch.\n"
+            "stdout: ${MACRDP_RDPGFX_CAPABILITY_PATCH_OUTPUT}\n"
+            "stderr: ${MACRDP_RDPGFX_CAPABILITY_PATCH_ERROR}")
+    endif()
+
+    file(READ "${MACRDP_FREERDP_SHADOW_CLIENT}" MACRDP_SHADOW_CLIENT_CONTENT)
+    string(FIND "${MACRDP_SHADOW_CLIENT_CONTENT}"
+        "#include <macrdp/rdpgfx_capabilities.h>"
+        MACRDP_RDPGFX_CAPABILITY_INCLUDE_OFFSET)
+    string(FIND "${MACRDP_SHADOW_CLIENT_CONTENT}"
+        "MACRDP_RDPGFX_CAPABILITY_POLICY"
+        MACRDP_RDPGFX_CAPABILITY_POLICY_OFFSET)
+    string(FIND "${MACRDP_SHADOW_CLIENT_CONTENT}"
+        "macrdp_rdpgfx_caps_support_avc444"
+        MACRDP_RDPGFX_AVC444_HELPER_OFFSET)
+    string(FIND "${MACRDP_SHADOW_CLIENT_CONTENT}"
+        "macrdp_rdpgfx_caps_support_avc420"
+        MACRDP_RDPGFX_AVC420_HELPER_OFFSET)
+endif()
+if(MACRDP_RDPGFX_CAPABILITY_INCLUDE_OFFSET EQUAL -1
+   OR MACRDP_RDPGFX_CAPABILITY_POLICY_OFFSET EQUAL -1
+   OR MACRDP_RDPGFX_AVC444_HELPER_OFFSET EQUAL -1
+   OR MACRDP_RDPGFX_AVC420_HELPER_OFFSET EQUAL -1)
+    message(FATAL_ERROR
+        "FreeRDP RDPGFX capability policy patch is partial or missing")
+endif()
+
 file(WRITE "${MACRDP_FREERDP_PATCH_STAMP}" "${MACRDP_FREERDP_PATCH_HASH}\n")
 
 foreach(MACRDP_FREERDP_CODEC_TARGET IN ITEMS freerdp-codecs freerdp)
@@ -944,6 +1009,26 @@ foreach(MACRDP_FREERDP_CODEC_TARGET IN ITEMS freerdp-codecs freerdp)
         )
     endif()
 endforeach()
+
+add_library(macrdp_rdpgfx_capabilities STATIC
+    src/rdpgfx_capabilities.c
+)
+
+target_include_directories(macrdp_rdpgfx_capabilities
+    PUBLIC
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+    PRIVATE
+        ${freerdp_SOURCE_DIR}/include
+        ${freerdp_SOURCE_DIR}/winpr/include
+        ${freerdp_BINARY_DIR}/include
+        ${freerdp_BINARY_DIR}/winpr/include
+)
+
+target_compile_options(macrdp_rdpgfx_capabilities PRIVATE
+    -Wall
+    -Wextra
+    -Wpedantic
+)
 
 set(MACRDP_FREERDP_SHADOW_SOURCES
     ${freerdp_SOURCE_DIR}/server/shadow/shadow_client.c
@@ -994,6 +1079,7 @@ target_compile_options(macrdp_freerdp_shadow PRIVATE
 target_link_libraries(macrdp_freerdp_shadow
     PRIVATE
         macrdp_macos
+        macrdp_rdpgfx_capabilities
         ${APP_KIT_FRAMEWORK}
         freerdp-server
         freerdp
@@ -1241,6 +1327,10 @@ add_executable(macrdp-client-session-lifecycle-test
     src/client_session_lifecycle_test.cpp
 )
 
+add_executable(macrdp-rdpgfx-capabilities-test
+    src/rdpgfx_capabilities_test.cpp
+)
+
 target_compile_options(macrdp-access-policy-test PRIVATE
     -Wall
     -Wextra
@@ -1251,6 +1341,23 @@ target_compile_options(macrdp-client-session-lifecycle-test PRIVATE
     -Wall
     -Wextra
     -Wpedantic
+)
+
+target_compile_options(macrdp-rdpgfx-capabilities-test PRIVATE
+    -Wall
+    -Wextra
+    -Wpedantic
+)
+
+target_include_directories(macrdp-rdpgfx-capabilities-test PRIVATE
+    ${freerdp_SOURCE_DIR}/include
+    ${freerdp_SOURCE_DIR}/winpr/include
+    ${freerdp_BINARY_DIR}/include
+    ${freerdp_BINARY_DIR}/winpr/include
+)
+
+target_link_libraries(macrdp-rdpgfx-capabilities-test PRIVATE
+    macrdp_rdpgfx_capabilities
 )
 
 target_include_directories(macrdp-access-policy-test PRIVATE
@@ -1420,6 +1527,11 @@ add_test(
 add_test(
     NAME client_session_lifecycle
     COMMAND macrdp-client-session-lifecycle-test
+)
+
+add_test(
+    NAME rdpgfx_capabilities
+    COMMAND macrdp-rdpgfx-capabilities-test
 )
 
 add_test(
@@ -1618,6 +1730,7 @@ set_tests_properties(
     display_topology
     h264_worker
     input_ownership
+    rdpgfx_capabilities
     PROPERTIES
         LABELS deterministic-stress
         TIMEOUT 30

@@ -28,6 +28,15 @@ FreeRDP client callback -> per-client input queue -> macOS input worker
                                       CoreGraphics event injection
 ```
 
+RDPGFX capability interpretation is version-aware and per client. Version 8.1
+uses `AVC420_ENABLED`; versions 10 through 10.7 use the inverse
+`AVC_DISABLED` flag for both AVC420 and AVC444 availability. Unknown versions
+are treated as unsupported. The negotiated result chooses only a codec path;
+it does not change the server-wide capture rate or H.264 bitrate because codec
+support is not evidence of current transport capacity. Bounded output queues,
+deferred H.264 completion, and frame coalescing respond to a slow transport
+without creating an unverified bitrate-control loop.
+
 Audio and clipboard have separate service paths. Audio capture/pacing runs in
 its own loop and publishes bounded PCM chunks to the FreeRDP shadow clients.
 Captured blocks carry the display generation that produced them; a topology

@@ -97,7 +97,7 @@ jobs:
       - name: Run deterministic suite
         run: ctest --test-dir build --output-on-failure
 
-      - name: Stress lifecycle state machines
+      - name: Stress deterministic state machines
         run: |
           ctest --test-dir build \
             --output-on-failure \
