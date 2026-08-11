@@ -48,9 +48,11 @@ format, and clears that atomic negotiation state before channel teardown.
 The clipboard monitor observes `NSPasteboard` after the client capability
 exchange, while channel callbacks perform format negotiation and data transfer
 under a per-connection operation lock. Ordered remote data responses consume a
-bounded FIFO of formats that were actually requested. When clipboard
-redirection is disabled, the adapter short-circuits before it creates a channel
-context or monitor thread.
+bounded FIFO of formats that were actually requested. A remote response that
+matches the current macOS text is acknowledged without rewriting the
+pasteboard, preventing duplicate clipboard announcements from creating a
+synchronization loop. When clipboard redirection is disabled, the adapter
+short-circuits before it creates a channel context or monitor thread.
 
 At startup the server resolves the requested display ID against a CoreGraphics
 topology snapshot. A generation-tagged geometry for that exact ID supplies the

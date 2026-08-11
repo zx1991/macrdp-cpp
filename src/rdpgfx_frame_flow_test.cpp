@@ -38,7 +38,8 @@ int main() {
                 "an acknowledged H.264 frame kept the initial window closed") && ok;
     ok = expect(stats.acknowledged_frames == 1 && stats.average_ack_latency_ms == 150,
                 "the first frame acknowledgement metrics are incorrect") && ok;
-    ok = expect(stats.average_frame_bytes == 8000 && stats.sent_fps_milli == 6666
+    ok = expect(stats.encoded_bytes == 8000 && stats.average_frame_bytes == 8000
+                    && stats.sent_fps_milli == 6666
                     && stats.effective_bitrate_bps == 426666,
                 "the initial frame rate or bitrate metrics are incorrect") && ok;
 
@@ -79,7 +80,8 @@ int main() {
                 "the slow frame reservation failed") && ok;
     macrdp_rdpgfx_frame_flow_sent(&flow, 27, 8000, 11010);
     macrdp_rdpgfx_frame_flow_acknowledge(&flow, 27, 0, 11410);
-    ok = expect(flow.window_size == 1 && flow.window_demotions == 1,
+    ok = expect(flow.window_size == 1 && flow.window_demotions == 1
+                    && flow.demotions_ack_latency == 1,
                 "a slow acknowledgement did not demote the frame window") && ok;
 
     macrdp_rdpgfx_frame_flow_release(&flow, 99);
@@ -114,7 +116,8 @@ int main() {
                 "the transport-pressure test window did not promote") && ok;
     macrdp_rdpgfx_frame_flow_observe_output(
         &pressure_flow, TRUE, 0, 16000000, 23000);
-    ok = expect(pressure_flow.window_size == 1 && pressure_flow.window_demotions == 1,
+    ok = expect(pressure_flow.window_size == 1 && pressure_flow.window_demotions == 1
+                    && pressure_flow.demotions_output_blocked == 1,
                 "blocked transport did not demote the frame window") && ok;
 
     macrdp_rdpgfx_frame_flow_observe_output(
@@ -132,8 +135,49 @@ int main() {
                 "the queue-pressure test window did not promote") && ok;
     macrdp_rdpgfx_frame_flow_observe_output(
         &pressure_flow, FALSE, 1000000, 16000000, 29000);
-    ok = expect(pressure_flow.window_size == 1 && pressure_flow.window_demotions == 2,
+    ok = expect(pressure_flow.window_size == 1 && pressure_flow.window_demotions == 2
+                    && pressure_flow.demotions_queue_pressure == 1,
                 "transport queue pressure did not demote the frame window") && ok;
+
+    macrdp_rdpgfx_frame_flow queue_depth_flow{};
+    macrdp_rdpgfx_frame_flow_init(&queue_depth_flow);
+    for (UINT32 frame_id = 1; frame_id <= 12; frame_id++) {
+        const UINT64 sent_at = 30000 + frame_id * 200;
+        ok = expect(macrdp_rdpgfx_frame_flow_reserve(
+                        &queue_depth_flow, frame_id, sent_at) == TRUE,
+                    "a decoder-queue test reservation failed") && ok;
+        macrdp_rdpgfx_frame_flow_sent(&queue_depth_flow, frame_id, 8000, sent_at);
+        macrdp_rdpgfx_frame_flow_acknowledge(
+            &queue_depth_flow, frame_id, 0, sent_at + 150);
+    }
+    ok = expect(macrdp_rdpgfx_frame_flow_reserve(
+                    &queue_depth_flow, 13, 33000) == TRUE,
+                "the decoder-queue demotion frame reservation failed") && ok;
+    macrdp_rdpgfx_frame_flow_sent(&queue_depth_flow, 13, 8000, 33010);
+    macrdp_rdpgfx_frame_flow_acknowledge(&queue_depth_flow, 13, 2, 33160);
+    ok = expect(queue_depth_flow.window_size == 1
+                    && queue_depth_flow.demotions_queue_depth == 1,
+                "decoder queue pressure did not record its demotion reason") && ok;
+
+    macrdp_rdpgfx_frame_flow stall_flow{};
+    macrdp_rdpgfx_frame_flow_init(&stall_flow);
+    for (UINT32 frame_id = 1; frame_id <= 12; frame_id++) {
+        const UINT64 sent_at = 34000 + frame_id * 200;
+        ok = expect(macrdp_rdpgfx_frame_flow_reserve(
+                        &stall_flow, frame_id, sent_at) == TRUE,
+                    "an ACK-stall test reservation failed") && ok;
+        macrdp_rdpgfx_frame_flow_sent(&stall_flow, frame_id, 8000, sent_at);
+        macrdp_rdpgfx_frame_flow_acknowledge(
+            &stall_flow, frame_id, 0, sent_at + 150);
+    }
+    ok = expect(macrdp_rdpgfx_frame_flow_reserve(&stall_flow, 13, 37000) == TRUE,
+                "the ACK-stall demotion frame reservation failed") && ok;
+    macrdp_rdpgfx_frame_flow_sent(&stall_flow, 13, 8000, 37010);
+    macrdp_rdpgfx_frame_flow_observe_output(
+        &stall_flow, FALSE, 0, 16000000, 37760);
+    ok = expect(stall_flow.window_size == 1 && stall_flow.ack_stalls == 1
+                    && stall_flow.demotions_ack_stall == 1,
+                "an ACK stall did not record its demotion reason") && ok;
 
     macrdp_rdpgfx_frame_flow wrap_flow{};
     macrdp_rdpgfx_frame_flow_init(&wrap_flow);

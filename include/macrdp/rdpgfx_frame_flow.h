@@ -36,6 +36,11 @@ typedef struct
 	UINT64 window_promotions;
 	UINT64 window_demotions;
 	UINT64 ack_stalls;
+	UINT64 demotions_ack_latency;
+	UINT64 demotions_queue_depth;
+	UINT64 demotions_output_blocked;
+	UINT64 demotions_queue_pressure;
+	UINT64 demotions_ack_stall;
 } macrdp_rdpgfx_frame_flow;
 
 typedef struct
@@ -51,12 +56,18 @@ typedef struct
 	UINT64 average_ack_latency_ms;
 	UINT64 max_ack_latency_ms;
 	UINT64 oldest_outstanding_ms;
+	UINT64 encoded_bytes;
 	UINT64 average_frame_bytes;
 	UINT64 sent_fps_milli;
 	UINT64 effective_bitrate_bps;
 	UINT64 window_promotions;
 	UINT64 window_demotions;
 	UINT64 ack_stalls;
+	UINT64 demotions_ack_latency;
+	UINT64 demotions_queue_depth;
+	UINT64 demotions_output_blocked;
+	UINT64 demotions_queue_pressure;
+	UINT64 demotions_ack_stall;
 } macrdp_rdpgfx_frame_flow_stats;
 
 void macrdp_rdpgfx_frame_flow_init(macrdp_rdpgfx_frame_flow* flow);

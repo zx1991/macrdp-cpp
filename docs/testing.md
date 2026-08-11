@@ -313,10 +313,14 @@ audio queue state, output-blocked intervals, drain attempts, and recovery.
 `Output pipeline final` repeats the counters when a client disconnects, so
 short sessions still leave a usable summary. A normal disconnect while
 draining is logged as transport closure, not as a server-internal drain
-failure. `H.264 frame flow` reports the current adaptive window, reserved and
-unacknowledged frames, ACK latency, effective sent FPS and bitrate, average
-encoded bytes per frame, promotions, demotions, and ACK stalls. Its `final`
-line makes the same aggregate available for short sessions.
+failure. `H.264 frame flow` reports the current adaptive window, output
+suppression, reserved and unacknowledged frames, ACK latency, average encoded
+bytes per frame, promotions, demotions, ACK stalls, and per-cause demotion
+counters. `recent_fps` and `recent_bitrate_kbps` cover the latest diagnostic
+interval and are the values to use for current responsiveness. The
+`session_fps` and `session_bitrate_kbps` values cover the whole connection and
+therefore fall during a long client-minimized or suppressed-output interval.
+Its `final` line retains the session-wide aggregate for short sessions.
 
 Run the direct profile with:
 

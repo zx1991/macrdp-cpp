@@ -18,14 +18,17 @@ This project has not published a stable release yet.
 - Made default AVC420 presentation client-consistent by using one full-desktop
   RDPGFX rectangle and a bounded adaptive acknowledgement window. It promotes
   from one to at most two frames only after stable ACKs, returns to one under
-  decoder or transport pressure, and reports ACK latency, effective FPS, and
-  bitrate while input and control traffic remain active.
+  decoder or transport pressure, and reports ACK latency, recent and
+  session-wide FPS/bitrate, output suppression, and the exact reason for each
+  demotion while input and control traffic remain active.
 - Serialized macOS pasteboard access and expanded shaped-link reconnect,
   resize, and clipboard-change validation.
 - Added a capability-gated clipboard monitor, bounded FIFO correlation for
   remote data responses, and a disconnect barrier that rejects unsolicited,
   failed, malformed, and stopped-connection clipboard data before pasteboard
   mutation.
+- Stopped repeated client clipboard announcements from rewriting identical
+  text into the macOS pasteboard and feeding clipboard synchronization loops.
 - Added explicit `--reconnect` and `--no-reconnect` controls for running the
   long-budget Wi-Fi and bad-link reconnect profiles.
 - Added raw keyboard-path diagnostics, queue-delay metrics, and loopback

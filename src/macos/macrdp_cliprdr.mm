@@ -357,15 +357,21 @@ UINT client_format_data_response(
         response->requestedFormatData,
         response->common.dataLen,
         *format_id);
-    WLog_INFO(TAG,
-              "Received client clipboard data: format=%" PRIu32 " bytes=%" PRIu32,
-              *format_id,
-              response->common.dataLen);
-    if (!text.has_value() || !write_pasteboard(*text)) {
+    if (!text.has_value()) {
         return ERROR_INVALID_DATA;
     }
 
-    const auto snapshot = read_pasteboard();
+    auto snapshot = read_pasteboard();
+    if (!snapshot.text.has_value() || *snapshot.text != *text) {
+        if (!write_pasteboard(*text)) {
+            return ERROR_INVALID_DATA;
+        }
+        snapshot = read_pasteboard();
+        WLog_INFO(TAG,
+                  "Applied client clipboard data: format=%" PRIu32 " bytes=%" PRIu32,
+                  *format_id,
+                  response->common.dataLen);
+    }
     state->last_change_count = snapshot.change_count;
     state->last_published_text = *text;
     return CHANNEL_RC_OK;

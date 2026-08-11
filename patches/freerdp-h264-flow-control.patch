@@ -242,6 +242,16 @@ diff --git a/server/shadow/shadow_client.c b/server/shadow/shadow_client.c
  
  	peer->Capabilities = shadow_client_capabilities;
  	peer->PostConnect = shadow_client_post_connect;
+@@ -3214,6 +3319,9 @@
+ 	ULONGLONG outputBlockedSince = 0;
+ 	ULONGLONG outputLastDiagnostics = 0;
+ 	ULONGLONG outputLastQueueDiagnostics = 0;
++	ULONGLONG outputLastFlowDiagnostics = 0;
++	UINT64 outputLastFlowSentFrames = 0;
++	UINT64 outputLastFlowEncodedBytes = 0;
+ 
+ 	update = peer->context->update;
+ 	WINPR_ASSERT(update);
 @@ -3374,7 +3479,18 @@
  		const BOOL updatePending =
  			WaitForSingleObject(UpdateEvent, 0) == WAIT_OBJECT_0 &&
@@ -293,16 +303,28 @@ diff --git a/server/shadow/shadow_client.c b/server/shadow/shadow_client.c
  		if ((UINT64)outputQueueDepth > client->macrdpOutputQueueMaxDepth)
  			client->macrdpOutputQueueMaxDepth = (UINT64)outputQueueDepth;
  		if ((UINT64)outputQueueCapacity > client->macrdpOutputQueueMaxCapacity)
-@@ -3476,6 +3596,8 @@
+@@ -3476,6 +3599,20 @@
  		if (outputLastQueueDiagnostics == 0 ||
  		    outputNow - outputLastQueueDiagnostics >= 5000)
  		{
 +			macrdp_rdpgfx_frame_flow_stats flowStats = WINPR_C_ARRAY_INIT;
 +			macrdp_rdpgfx_frame_flow_get_stats(&h264FrameFlow, outputNow, &flowStats);
++			UINT64 recentFpsMilli = flowStats.sent_fps_milli;
++			UINT64 recentBitrateBps = flowStats.effective_bitrate_bps;
++			if (outputLastFlowDiagnostics > 0 && outputNow > outputLastFlowDiagnostics)
++			{
++				const UINT64 intervalMs = outputNow - outputLastFlowDiagnostics;
++				const UINT64 intervalFrames =
++					flowStats.sent_frames - outputLastFlowSentFrames;
++				const UINT64 intervalBytes =
++					flowStats.encoded_bytes - outputLastFlowEncodedBytes;
++				recentFpsMilli = intervalFrames * 1000000U / intervalMs;
++				recentBitrateBps = intervalBytes * 8000U / intervalMs;
++			}
  			const UINT64 currentBlockedMs = outputBlocked && outputBlockedSince != 0
  				? (UINT64)(outputNow - outputBlockedSince)
  				: 0;
-@@ -3513,6 +3635,38 @@
+@@ -3513,6 +3650,59 @@
  			          outputBlockedMaxMs,
  			          outputBlockedEvents,
  			          outputDrainAttempts);
@@ -310,16 +332,26 @@ diff --git a/server/shadow/shadow_client.c b/server/shadow/shadow_client.c
 +			{
 +				WLog_INFO(TAG,
 +				          "H.264 frame flow: window=%" PRIu32
++				          " suppressed=%u"
 +				          " active=%" PRIu32 " reserved=%" PRIu32
 +				          " outstanding=%" PRIu32 " sent=%" PRIu64
 +				          " acked=%" PRIu64 " ack_samples=%" PRIu64
 +				          " ack_last=%" PRIu64 "ms ack_avg=%" PRIu64
 +				          "ms ack_max=%" PRIu64 "ms outstanding_ms=%" PRIu64
-+				          " sent_fps=%" PRIu64 ".%03" PRIu64
-+				          " bitrate_kbps=%" PRIu64 " frame_bytes_avg=%" PRIu64
++				          " recent_fps=%" PRIu64 ".%03" PRIu64
++				          " recent_bitrate_kbps=%" PRIu64
++				          " session_fps=%" PRIu64 ".%03" PRIu64
++				          " session_bitrate_kbps=%" PRIu64
++				          " frame_bytes_avg=%" PRIu64
 +				          " promotions=%" PRIu64 " demotions=%" PRIu64
-+				          " stalls=%" PRIu64,
++				          " stalls=%" PRIu64
++				          " demotion_ack=%" PRIu64
++				          " demotion_queue=%" PRIu64
++				          " demotion_blocked=%" PRIu64
++				          " demotion_pressure=%" PRIu64
++				          " demotion_stall=%" PRIu64,
 +				          flowStats.window_size,
++				          (unsigned)client->suppressOutput,
 +				          flowStats.active_frames,
 +				          flowStats.reserved_frames,
 +				          flowStats.outstanding_frames,
@@ -330,15 +362,26 @@ diff --git a/server/shadow/shadow_client.c b/server/shadow/shadow_client.c
 +				          flowStats.average_ack_latency_ms,
 +				          flowStats.max_ack_latency_ms,
 +				          flowStats.oldest_outstanding_ms,
++				          recentFpsMilli / 1000,
++				          recentFpsMilli % 1000,
++				          recentBitrateBps / 1000,
 +				          flowStats.sent_fps_milli / 1000,
 +				          flowStats.sent_fps_milli % 1000,
 +				          flowStats.effective_bitrate_bps / 1000,
 +				          flowStats.average_frame_bytes,
 +				          flowStats.window_promotions,
 +				          flowStats.window_demotions,
-+				          flowStats.ack_stalls);
++				          flowStats.ack_stalls,
++				          flowStats.demotions_ack_latency,
++				          flowStats.demotions_queue_depth,
++				          flowStats.demotions_output_blocked,
++				          flowStats.demotions_queue_pressure,
++				          flowStats.demotions_ack_stall);
 +			}
  			outputLastQueueDiagnostics = outputNow;
++			outputLastFlowDiagnostics = outputNow;
++			outputLastFlowSentFrames = flowStats.sent_frames;
++			outputLastFlowEncodedBytes = flowStats.encoded_bytes;
  		}
  
 @@ -3750,6 +3904,8 @@
@@ -350,7 +393,7 @@ diff --git a/server/shadow/shadow_client.c b/server/shadow/shadow_client.c
  		const UINT64 currentBlockedMs = outputBlocked && outputBlockedSince != 0
  			? (UINT64)(outputNow - outputBlockedSince)
  			: 0;
-@@ -3777,6 +3933,30 @@
+@@ -3777,6 +3969,43 @@
  		          outputBlockedMaxMs,
  		          outputBlockedEvents,
  		          outputDrainAttempts);
@@ -358,13 +401,21 @@ diff --git a/server/shadow/shadow_client.c b/server/shadow/shadow_client.c
 +		{
 +			WLog_INFO(TAG,
 +			          "H.264 frame flow final: window=%" PRIu32
-+			          " active=%" PRIu32 " sent=%" PRIu64 " acked=%" PRIu64
++			          " suppressed=%u active=%" PRIu32
++			          " sent=%" PRIu64 " acked=%" PRIu64
 +			          " ack_avg=%" PRIu64 "ms ack_max=%" PRIu64
-+			          "ms sent_fps=%" PRIu64 ".%03" PRIu64
-+			          " bitrate_kbps=%" PRIu64 " frame_bytes_avg=%" PRIu64
++			          "ms session_fps=%" PRIu64 ".%03" PRIu64
++			          " session_bitrate_kbps=%" PRIu64
++			          " frame_bytes_avg=%" PRIu64
 +			          " promotions=%" PRIu64 " demotions=%" PRIu64
-+			          " stalls=%" PRIu64,
++			          " stalls=%" PRIu64
++			          " demotion_ack=%" PRIu64
++			          " demotion_queue=%" PRIu64
++			          " demotion_blocked=%" PRIu64
++			          " demotion_pressure=%" PRIu64
++			          " demotion_stall=%" PRIu64,
 +			          flowStats.window_size,
++			          (unsigned)client->suppressOutput,
 +			          flowStats.active_frames,
 +			          flowStats.sent_frames,
 +			          flowStats.acknowledged_frames,
@@ -376,7 +427,12 @@ diff --git a/server/shadow/shadow_client.c b/server/shadow/shadow_client.c
 +			          flowStats.average_frame_bytes,
 +			          flowStats.window_promotions,
 +			          flowStats.window_demotions,
-+			          flowStats.ack_stalls);
++			          flowStats.ack_stalls,
++			          flowStats.demotions_ack_latency,
++			          flowStats.demotions_queue_depth,
++			          flowStats.demotions_output_blocked,
++			          flowStats.demotions_queue_pressure,
++			          flowStats.demotions_ack_stall);
 +		}
  	}
  	WINPR_ASSERT(peer->Disconnect);

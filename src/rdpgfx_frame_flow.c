@@ -30,7 +30,7 @@ static UINT32 macrdp_rdpgfx_active_frames(const macrdp_rdpgfx_frame_flow* flow)
 	return count;
 }
 
-static void macrdp_rdpgfx_demote(macrdp_rdpgfx_frame_flow* flow)
+static void macrdp_rdpgfx_demote(macrdp_rdpgfx_frame_flow* flow, UINT64* reason)
 {
 	if (!flow)
 		return;
@@ -39,6 +39,8 @@ static void macrdp_rdpgfx_demote(macrdp_rdpgfx_frame_flow* flow)
 	{
 		flow->window_size = 1;
 		flow->window_demotions++;
+		if (reason)
+			(*reason)++;
 	}
 }
 
@@ -164,11 +166,14 @@ void macrdp_rdpgfx_frame_flow_acknowledge(macrdp_rdpgfx_frame_flow* flow,
 		if (latency_ms > flow->max_ack_latency_ms)
 			flow->max_ack_latency_ms = latency_ms;
 
-		if (latency_ms >= MACRDP_RDPGFX_DEMOTION_ACK_MS ||
-		    (queue_depth != QUEUE_DEPTH_UNAVAILABLE &&
-		     queue_depth != SUSPEND_FRAME_ACKNOWLEDGEMENT && queue_depth >= 2))
+		if (latency_ms >= MACRDP_RDPGFX_DEMOTION_ACK_MS)
 		{
-			macrdp_rdpgfx_demote(flow);
+			macrdp_rdpgfx_demote(flow, &flow->demotions_ack_latency);
+		}
+		else if (queue_depth != QUEUE_DEPTH_UNAVAILABLE &&
+		         queue_depth != SUSPEND_FRAME_ACKNOWLEDGEMENT && queue_depth >= 2)
+		{
+			macrdp_rdpgfx_demote(flow, &flow->demotions_queue_depth);
 		}
 		else if (!flow->output_pressure &&
 		         latency_ms <= MACRDP_RDPGFX_PROMOTION_ACK_MAX_MS)
@@ -206,8 +211,10 @@ void macrdp_rdpgfx_frame_flow_observe_output(macrdp_rdpgfx_frame_flow* flow,
 	if (!flow)
 		return;
 	flow->output_pressure = output_blocked || queue_pressure;
-	if (flow->output_pressure)
-		macrdp_rdpgfx_demote(flow);
+	if (output_blocked)
+		macrdp_rdpgfx_demote(flow, &flow->demotions_output_blocked);
+	else if (queue_pressure)
+		macrdp_rdpgfx_demote(flow, &flow->demotions_queue_pressure);
 
 	for (index = 0; index < MACRDP_RDPGFX_H264_MAX_WINDOW; index++)
 	{
@@ -229,7 +236,7 @@ void macrdp_rdpgfx_frame_flow_observe_output(macrdp_rdpgfx_frame_flow* flow,
 			flow->ack_stalls++;
 			flow->stall_active = TRUE;
 		}
-		macrdp_rdpgfx_demote(flow);
+		macrdp_rdpgfx_demote(flow, &flow->demotions_ack_stall);
 	}
 }
 
@@ -267,6 +274,12 @@ void macrdp_rdpgfx_frame_flow_get_stats(const macrdp_rdpgfx_frame_flow* flow,
 	stats->window_promotions = flow->window_promotions;
 	stats->window_demotions = flow->window_demotions;
 	stats->ack_stalls = flow->ack_stalls;
+	stats->demotions_ack_latency = flow->demotions_ack_latency;
+	stats->demotions_queue_depth = flow->demotions_queue_depth;
+	stats->demotions_output_blocked = flow->demotions_output_blocked;
+	stats->demotions_queue_pressure = flow->demotions_queue_pressure;
+	stats->demotions_ack_stall = flow->demotions_ack_stall;
+	stats->encoded_bytes = flow->encoded_bytes;
 	if (flow->acknowledged_samples > 0)
 		stats->average_ack_latency_ms =
 			flow->total_ack_latency_ms / flow->acknowledged_samples;
