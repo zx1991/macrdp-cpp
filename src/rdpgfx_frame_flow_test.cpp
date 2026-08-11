@@ -152,27 +152,41 @@ int main() {
     }
     ok = expect(macrdp_rdpgfx_frame_flow_reserve(
                     &queue_depth_flow, 13, 33000) == TRUE,
-                "the decoder-queue demotion frame reservation failed") && ok;
+                "the small client-queue frame reservation failed") && ok;
     macrdp_rdpgfx_frame_flow_sent(&queue_depth_flow, 13, 8000, 33010);
-    macrdp_rdpgfx_frame_flow_acknowledge(&queue_depth_flow, 13, 16384, 33160);
+    macrdp_rdpgfx_frame_flow_acknowledge(&queue_depth_flow, 13, 12000, 33160);
     macrdp_rdpgfx_frame_flow_get_stats(&queue_depth_flow, 33160, &stats);
+    ok = expect(queue_depth_flow.window_size == 2
+                    && queue_depth_flow.demotions_queue_depth == 0
+                    && stats.last_client_queue_bytes == 12000
+                    && stats.max_client_queue_bytes == 12000
+                    && stats.client_queue_reports == 1,
+                "a sub-threshold client queue report caused a demotion") && ok;
+
+    ok = expect(macrdp_rdpgfx_frame_flow_reserve(
+                    &queue_depth_flow, 14, 33200) == TRUE,
+                "the client-queue demotion frame reservation failed") && ok;
+    macrdp_rdpgfx_frame_flow_sent(&queue_depth_flow, 14, 8000, 33210);
+    macrdp_rdpgfx_frame_flow_acknowledge(&queue_depth_flow, 14, 16384, 33360);
+    macrdp_rdpgfx_frame_flow_get_stats(&queue_depth_flow, 33360, &stats);
     ok = expect(queue_depth_flow.window_size == 1
                     && queue_depth_flow.demotions_queue_depth == 1
                     && stats.last_client_queue_bytes == 16384
                     && stats.max_client_queue_bytes == 16384
-                    && stats.client_queue_reports == 1,
+                    && stats.client_queue_demotion_threshold_bytes == 16384
+                    && stats.client_queue_reports == 2,
                 "client buffered-byte pressure was not measured or attributed") && ok;
 
     ok = expect(macrdp_rdpgfx_frame_flow_reserve(
-                    &queue_depth_flow, 14, 33200) == TRUE,
+                    &queue_depth_flow, 15, 33400) == TRUE,
                 "the unavailable client-queue frame reservation failed") && ok;
-    macrdp_rdpgfx_frame_flow_sent(&queue_depth_flow, 14, 8000, 33210);
+    macrdp_rdpgfx_frame_flow_sent(&queue_depth_flow, 15, 8000, 33410);
     macrdp_rdpgfx_frame_flow_acknowledge(
-        &queue_depth_flow, 14, QUEUE_DEPTH_UNAVAILABLE, 33360);
-    macrdp_rdpgfx_frame_flow_get_stats(&queue_depth_flow, 33360, &stats);
+        &queue_depth_flow, 15, QUEUE_DEPTH_UNAVAILABLE, 33560);
+    macrdp_rdpgfx_frame_flow_get_stats(&queue_depth_flow, 33560, &stats);
     ok = expect(stats.last_client_queue_bytes == QUEUE_DEPTH_UNAVAILABLE
                     && stats.max_client_queue_bytes == 16384
-                    && stats.client_queue_reports == 1,
+                    && stats.client_queue_reports == 2,
                 "an unavailable queue report retained a stale current byte count") && ok;
 
     macrdp_rdpgfx_frame_flow stall_flow{};

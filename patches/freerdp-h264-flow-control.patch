@@ -324,7 +324,7 @@ diff --git a/server/shadow/shadow_client.c b/server/shadow/shadow_client.c
  			const UINT64 currentBlockedMs = outputBlocked && outputBlockedSince != 0
  				? (UINT64)(outputNow - outputBlockedSince)
  				: 0;
-@@ -3513,6 +3650,65 @@
+@@ -3513,6 +3650,67 @@
  			          outputBlockedMaxMs,
  			          outputBlockedEvents,
  			          outputDrainAttempts);
@@ -340,6 +340,7 @@ diff --git a/server/shadow/shadow_client.c b/server/shadow/shadow_client.c
 +				          "ms ack_max=%" PRIu64 "ms outstanding_ms=%" PRIu64
 +				          " client_queue_last=%" PRIu32 "B"
 +				          " client_queue_max=%" PRIu32 "B"
++				          " client_queue_threshold=%" PRIu32 "B"
 +				          " client_queue_reports=%" PRIu64
 +				          " recent_fps=%" PRIu64 ".%03" PRIu64
 +				          " recent_bitrate_kbps=%" PRIu64
@@ -367,6 +368,7 @@ diff --git a/server/shadow/shadow_client.c b/server/shadow/shadow_client.c
 +				          flowStats.oldest_outstanding_ms,
 +				          flowStats.last_client_queue_bytes,
 +				          flowStats.max_client_queue_bytes,
++				          flowStats.client_queue_demotion_threshold_bytes,
 +				          flowStats.client_queue_reports,
 +				          recentFpsMilli / 1000,
 +				          recentFpsMilli % 1000,
@@ -390,7 +392,7 @@ diff --git a/server/shadow/shadow_client.c b/server/shadow/shadow_client.c
 +			outputLastFlowEncodedBytes = flowStats.encoded_bytes;
  		}
  
-@@ -3750,6 +3910,8 @@
+@@ -3750,6 +3912,8 @@
  	if (client)
  	{
  		const ULONGLONG outputNow = GetTickCount64();
@@ -399,7 +401,7 @@ diff --git a/server/shadow/shadow_client.c b/server/shadow/shadow_client.c
  		const UINT64 currentBlockedMs = outputBlocked && outputBlockedSince != 0
  			? (UINT64)(outputNow - outputBlockedSince)
  			: 0;
-@@ -3777,6 +3975,49 @@
+@@ -3777,6 +3977,51 @@
  		          outputBlockedMaxMs,
  		          outputBlockedEvents,
  		          outputDrainAttempts);
@@ -412,6 +414,7 @@ diff --git a/server/shadow/shadow_client.c b/server/shadow/shadow_client.c
 +			          " ack_avg=%" PRIu64 "ms ack_max=%" PRIu64
 +			          "ms client_queue_last=%" PRIu32 "B"
 +			          " client_queue_max=%" PRIu32 "B"
++			          " client_queue_threshold=%" PRIu32 "B"
 +			          " client_queue_reports=%" PRIu64
 +			          " session_fps=%" PRIu64 ".%03" PRIu64
 +			          " session_bitrate_kbps=%" PRIu64
@@ -432,6 +435,7 @@ diff --git a/server/shadow/shadow_client.c b/server/shadow/shadow_client.c
 +			          flowStats.max_ack_latency_ms,
 +			          flowStats.last_client_queue_bytes,
 +			          flowStats.max_client_queue_bytes,
++			          flowStats.client_queue_demotion_threshold_bytes,
 +			          flowStats.client_queue_reports,
 +			          flowStats.sent_fps_milli / 1000,
 +			          flowStats.sent_fps_milli % 1000,

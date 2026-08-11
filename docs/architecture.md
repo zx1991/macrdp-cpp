@@ -115,7 +115,9 @@ removed, capture waits for the same ID to return instead of switching screens.
   no slower than 250 ms promote the bound to two. Slow ACKs, client-reported
   buffered graphics bytes, transport blockage, queue pressure, or an ACK stall
   demote it to one. RDPGFX `queueDepth` is measured in unprocessed bytes, not
-  frames; diagnostics retain its latest and maximum reported values.
+  frames; diagnostics retain its latest, maximum, and current demotion threshold.
+  The threshold tracks two average encoded frames and is clamped to 16-64 KiB,
+  so a transient partial-frame buffer does not collapse a healthy two-frame window.
   While the window is closed, new capture updates are consumed into the newest
   desktop and marked for retry instead of being encoded. Reservations are made
   before asynchronous encoding, and submissions that produce no packet release
@@ -128,7 +130,8 @@ removed, capture waits for the same ID to return instead of switching screens.
   may mutate `NSPasteboard`. Disconnect marks that transfer state inactive,
   wakes and joins the monitor, then lets FreeRDP stop and join its receive
   thread before the context is released. A reconnect starts with an empty
-  request queue and independent publication state.
+  request queue and independent publication state. Static virtual channels
+  advertise 1600-byte chunks, matching FreeRDP's bounded channel PDU tracker.
 - RDPSND publication is per client and begins only after format selection
   succeeds. The negotiation flag is reset before the RDPSND worker stops, so a
   reconnect starts inactive and broadcast dispatch cannot dereference a

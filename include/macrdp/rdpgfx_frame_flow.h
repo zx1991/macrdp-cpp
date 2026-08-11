@@ -60,6 +60,7 @@ typedef struct
 	UINT64 max_ack_latency_ms;
 	UINT32 last_client_queue_bytes;
 	UINT32 max_client_queue_bytes;
+	UINT32 client_queue_demotion_threshold_bytes;
 	UINT64 client_queue_reports;
 	UINT64 oldest_outstanding_ms;
 	UINT64 encoded_bytes;

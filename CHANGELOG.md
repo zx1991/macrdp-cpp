@@ -22,7 +22,8 @@ This project has not published a stable release yet.
   session-wide FPS/bitrate, output suppression, and the exact reason for each
   demotion while input and control traffic remain active. Client RDPGFX queue
   pressure is measured and reported in its protocol-defined unit of buffered
-  graphics bytes rather than frames.
+  graphics bytes rather than frames. Queue demotion ignores sub-frame noise and
+  follows a bounded two-frame byte threshold.
 - Serialized macOS pasteboard access and expanded shaped-link reconnect,
   resize, and clipboard-change validation.
 - Added a capability-gated clipboard monitor, bounded FIFO correlation for
@@ -31,6 +32,8 @@ This project has not published a stable release yet.
   mutation.
 - Stopped repeated client clipboard announcements from rewriting identical
   text into the macOS pasteboard and feeding clipboard synchronization loops.
+- Capped negotiated static virtual-channel chunks at 1600 bytes so FreeRDP's
+  bounded PDU tracker accepts Windows clipboard traffic.
 - Added explicit `--reconnect` and `--no-reconnect` controls for running the
   long-budget Wi-Fi and bad-link reconnect profiles.
 - Added raw keyboard-path diagnostics, queue-delay metrics, and loopback

@@ -6,6 +6,7 @@
 #include <winpr/ntlm.h>
 #include <winpr/ssl.h>
 #include <winpr/synch.h>
+#include <winpr/wtsapi.h>
 
 #include "macrdp/cliprdr_adapter.h"
 #include "macrdp/config_permissions.hpp"
@@ -711,6 +712,8 @@ bool configure_server(rdpShadowServer* server, const Options& options, const std
     // negotiation and transport paths are implemented here.
     if (!set_security(server->settings, options.security)
         || !freerdp_settings_set_uint32(server->settings, FreeRDP_ColorDepth, 32)
+        || !freerdp_settings_set_uint32(
+               server->settings, FreeRDP_VCChunkSize, CHANNEL_CHUNK_LENGTH)
         || !freerdp_settings_set_bool(server->settings, FreeRDP_NSCodec, TRUE)
         || !freerdp_settings_set_bool(server->settings, FreeRDP_RemoteFxCodec, TRUE)
         || !freerdp_settings_set_bool(server->settings, FreeRDP_RemoteFxImageCodec, TRUE)
