@@ -109,10 +109,10 @@ removed, capture waits for the same ID to return instead of switching screens.
   can retain stale pixels outside a dirty region. Default AVC420 also presents
   each packet with one full-desktop RDPGFX rectangle; combining a full-frame
   inter-coded packet with partial presentation metadata can otherwise leave
-  stale rectangles on `mstsc`. The direct VideoToolbox path begins with three
-  IDR frames, limiting startup reference recovery to the next encoded frame
-  without sustaining keyframe-sized traffic. AVC444 retains its codec-produced
-  metadata.
+  stale rectangles on `mstsc`. The direct VideoToolbox path uses Baseline
+  profile and CAVLC entropy coding so mstsc receives a conservative inter-frame
+  stream after the initial IDR. The encoder requests one reference frame where
+  the hardware exposes that control. AVC444 retains its codec-produced metadata.
   For negotiated H.264, the scheduler begins with one reserved or sent frame
   beyond the client's latest RDPGFX `FrameAcknowledge`. Twelve consecutive ACKs
   no slower than 250 ms promote the bound to two. Slow ACKs, client-reported

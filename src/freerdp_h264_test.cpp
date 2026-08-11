@@ -12,7 +12,7 @@
 
 namespace {
 
-constexpr std::uint32_t kStartupIdrFrameCount = 3;
+constexpr std::uint8_t kH264BaselineProfileIdc = 66;
 
 bool has_annex_b_start_code(const std::uint8_t* data, std::size_t size) {
     if (data == nullptr || size < 4) {
@@ -49,6 +49,33 @@ bool has_nal_type(const std::uint8_t* data, std::size_t size, std::uint8_t type)
         }
 
         if (start < size && (data[start] & 0x1F) == type) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool has_sps_profile(
+    const std::uint8_t* data,
+    std::size_t size,
+    std::uint8_t profile_idc) {
+    if (data == nullptr || size < 6) {
+        return false;
+    }
+
+    for (std::size_t index = 0; index + 5 < size; ++index) {
+        std::size_t start = 0;
+        if (data[index] == 0 && data[index + 1] == 0 && data[index + 2] == 1) {
+            start = index + 3;
+        } else if (index + 4 < size && data[index] == 0 && data[index + 1] == 0
+                   && data[index + 2] == 0 && data[index + 3] == 1) {
+            start = index + 4;
+        } else {
+            continue;
+        }
+
+        if (start + 1 < size && (data[start] & 0x1F) == 7
+            && data[start + 1] == profile_idc) {
             return true;
         }
     }
@@ -257,7 +284,7 @@ int main() {
     }};
     std::vector<std::uint8_t> frame(static_cast<std::size_t>(stride) * height);
     std::vector<std::uint8_t> decoded(static_cast<std::size_t>(stride) * height);
-    bool saw_post_startup_inter_frame = false;
+    bool saw_immediate_inter_frame = false;
     std::uint32_t output_count = 0;
     std::uint32_t first_output_frame = 8;
 
@@ -319,13 +346,30 @@ int main() {
         }
 
         const bool is_idr = has_nal_type(encoded, encoded_size, 5);
-        if (output_count <= kStartupIdrFrameCount && !is_idr) {
+        if (output_count == 1 && !is_idr) {
             free_h264_metablock(&meta);
             h264_context_free(encoder);
             h264_context_free(decoder);
             std::fprintf(stderr,
-                         "FreeRDP H.264 startup packet %u was not an IDR frame\n",
+                         "FreeRDP H.264 first packet %u was not an IDR frame\n",
                          output_count);
+            return 1;
+        }
+        if (output_count == 1
+            && !has_sps_profile(encoded, encoded_size, kH264BaselineProfileIdc)) {
+            free_h264_metablock(&meta);
+            h264_context_free(encoder);
+            h264_context_free(decoder);
+            std::fprintf(stderr,
+                         "FreeRDP H.264 first packet was not Baseline profile\n");
+            return 1;
+        }
+        if (output_count == 2 && !has_nal_type(encoded, encoded_size, 1)) {
+            free_h264_metablock(&meta);
+            h264_context_free(encoder);
+            h264_context_free(decoder);
+            std::fprintf(stderr,
+                         "FreeRDP H.264 second packet was not an inter frame\n");
             return 1;
         }
 
@@ -353,9 +397,8 @@ int main() {
             return 1;
         }
 
-        if (output_count > kStartupIdrFrameCount) {
-            saw_post_startup_inter_frame = saw_post_startup_inter_frame
-                || has_nal_type(encoded, encoded_size, 1);
+        if (output_count == 2) {
+            saw_immediate_inter_frame = true;
         }
         free_h264_metablock(&meta);
 
@@ -368,7 +411,7 @@ int main() {
 
     h264_context_free(encoder);
     h264_context_free(decoder);
-    if (!saw_post_startup_inter_frame || output_count < 4 || first_output_frame > 1) {
+    if (!saw_immediate_inter_frame || output_count < 4 || first_output_frame > 1) {
         std::fprintf(stderr,
                      "FreeRDP H.264 stream did not produce startup I/P frames "
                      "(packets=%u first=%u)\n",

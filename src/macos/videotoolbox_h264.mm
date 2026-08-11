@@ -22,7 +22,6 @@
 namespace {
 
 constexpr std::uint8_t kAnnexBStartCode[] = {0x00, 0x00, 0x00, 0x01};
-constexpr std::uint64_t kStartupKeyFrameCount = 3;
 std::atomic_bool g_encoder_enabled{true};
 
 std::string status_description(OSStatus status, const char* operation) {
@@ -410,10 +409,32 @@ extern "C" macrdp_vt_h264_encoder* macrdp_vt_h264_encoder_new(
         encoder->session,
         kVTCompressionPropertyKey_MaxFrameDelayCount,
         0);
-    (void)VTSessionSetProperty(
+    // mstsc's RDPGFX decoder is less tolerant of VideoToolbox's Main/CABAC
+    // inter-frame stream than general-purpose H.264 decoders. Keep the direct
+    // path on the conservative AVC420 subset used for low-latency RDP.
+    const bool compatible_inter_frames =
+        VTSessionSetProperty(
+            encoder->session,
+            kVTCompressionPropertyKey_ProfileLevel,
+            kVTProfileLevel_H264_Baseline_AutoLevel) == noErr
+        && VTSessionSetProperty(
+               encoder->session,
+               kVTCompressionPropertyKey_H264EntropyMode,
+               kVTH264EntropyMode_CAVLC) == noErr;
+    if (!compatible_inter_frames) {
+        VTCompressionSessionInvalidate(encoder->session);
+        CFRelease(encoder->session);
+        encoder->session = nullptr;
+        delete encoder;
+        return nullptr;
+    }
+    // Apple Silicon currently emits one reference frame but reports the
+    // explicit limit as unsupported. Request it where available without
+    // disabling an otherwise compatible hardware encoder.
+    (void)set_number_property(
         encoder->session,
-        kVTCompressionPropertyKey_ProfileLevel,
-        kVTProfileLevel_H264_Main_AutoLevel);
+        kVTCompressionPropertyKey_ReferenceBufferCount,
+        1);
     (void)set_number_property(
         encoder->session,
         kVTCompressionPropertyKey_ExpectedFrameRate,
@@ -492,8 +513,7 @@ extern "C" int macrdp_vt_h264_encoder_encode(
     }
 
     CFDictionaryRef frame_properties = nullptr;
-    if (frame_index < kStartupKeyFrameCount
-        || frame_index % encoder->key_frame_interval == 0) {
+    if (frame_index == 0 || frame_index % encoder->key_frame_interval == 0) {
         frame_properties = force_key_frame_properties();
     }
     std::uint64_t callback_count = 0;
