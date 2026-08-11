@@ -6,6 +6,8 @@ This project has not published a stable release yet.
 
 - Experimental macOS RDP shadow server with NLA authentication.
 - ScreenCaptureKit display capture and VideoToolbox AVC420 encoding.
+- Repeated the first three direct VideoToolbox AVC420 frames as self-contained
+  IDRs so a decoder that misses its initial reference can recover immediately.
 - CoreGraphics keyboard and mouse injection with per-client input ownership.
 - Text clipboard redirection and RDPSND audio output.
 - Local unit tests, FreeRDP loopback validation, and deterministic network

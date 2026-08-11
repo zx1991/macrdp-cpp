@@ -182,9 +182,9 @@ index 049696a..2482e6b 100644
 +		/* MACRDP_VIDEOTOOLBOX_BRIDGE_COMPRESS */
 +		*ppDstData = nullptr;
 +		*pDstSize = 0;
-+		const uint64_t frameIndex = sys->videoFrame->pts > 0
-+		                                 ? (uint64_t)(sys->videoFrame->pts - 1)
-+		                                 : 0;
++		/* Pass the current zero-based PTS to the direct encoder, then advance
++		 * it for the next submission. */
++		const uint64_t frameIndex = (uint64_t)sys->videoFrame->pts;
 +		sys->videoFrame->pts++;
 +		const int directStatus = macrdp_vt_h264_encoder_encode(
 +			sys->macrdpVideoToolboxEncoder, pSrcYuv[0], pSrcYuv[1], pSrcYuv[2],

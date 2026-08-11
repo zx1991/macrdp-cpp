@@ -12,6 +12,8 @@
 
 namespace {
 
+constexpr std::uint32_t kStartupIdrFrameCount = 3;
+
 bool has_annex_b_start_code(const std::uint8_t* data, std::size_t size) {
     if (data == nullptr || size < 4) {
         return false;
@@ -255,8 +257,7 @@ int main() {
     }};
     std::vector<std::uint8_t> frame(static_cast<std::size_t>(stride) * height);
     std::vector<std::uint8_t> decoded(static_cast<std::size_t>(stride) * height);
-    bool saw_idr = false;
-    bool saw_inter_frame = false;
+    bool saw_post_startup_inter_frame = false;
     std::uint32_t output_count = 0;
     std::uint32_t first_output_frame = 8;
 
@@ -317,6 +318,17 @@ int main() {
             return 1;
         }
 
+        const bool is_idr = has_nal_type(encoded, encoded_size, 5);
+        if (output_count <= kStartupIdrFrameCount && !is_idr) {
+            free_h264_metablock(&meta);
+            h264_context_free(encoder);
+            h264_context_free(decoder);
+            std::fprintf(stderr,
+                         "FreeRDP H.264 startup packet %u was not an IDR frame\n",
+                         output_count);
+            return 1;
+        }
+
         if (avc420_decompress(
                 decoder,
                 encoded,
@@ -341,8 +353,10 @@ int main() {
             return 1;
         }
 
-        saw_idr = saw_idr || has_nal_type(encoded, encoded_size, 5);
-        saw_inter_frame = saw_inter_frame || has_nal_type(encoded, encoded_size, 1);
+        if (output_count > kStartupIdrFrameCount) {
+            saw_post_startup_inter_frame = saw_post_startup_inter_frame
+                || has_nal_type(encoded, encoded_size, 1);
+        }
         free_h264_metablock(&meta);
 
         // Match the server's 30 FPS pacing so asynchronous hardware output
@@ -354,7 +368,7 @@ int main() {
 
     h264_context_free(encoder);
     h264_context_free(decoder);
-    if (!saw_idr || !saw_inter_frame || output_count < 4 || first_output_frame > 1) {
+    if (!saw_post_startup_inter_frame || output_count < 4 || first_output_frame > 1) {
         std::fprintf(stderr,
                      "FreeRDP H.264 stream did not produce startup I/P frames "
                      "(packets=%u first=%u)\n",

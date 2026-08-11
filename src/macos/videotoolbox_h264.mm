@@ -22,6 +22,7 @@
 namespace {
 
 constexpr std::uint8_t kAnnexBStartCode[] = {0x00, 0x00, 0x00, 0x01};
+constexpr std::uint64_t kStartupKeyFrameCount = 3;
 std::atomic_bool g_encoder_enabled{true};
 
 std::string status_description(OSStatus status, const char* operation) {
@@ -491,7 +492,8 @@ extern "C" int macrdp_vt_h264_encoder_encode(
     }
 
     CFDictionaryRef frame_properties = nullptr;
-    if (frame_index == 0 || frame_index % encoder->key_frame_interval == 0) {
+    if (frame_index < kStartupKeyFrameCount
+        || frame_index % encoder->key_frame_interval == 0) {
         frame_properties = force_key_frame_properties();
     }
     std::uint64_t callback_count = 0;
