@@ -442,6 +442,8 @@ set(MACRDP_FREERDP_CLIENT_SESSION_LIFECYCLE_PATCH
     "${CMAKE_CURRENT_SOURCE_DIR}/patches/freerdp-client-session-lifecycle.patch")
 set(MACRDP_FREERDP_RDPGFX_CAPABILITY_PATCH
     "${CMAKE_CURRENT_SOURCE_DIR}/patches/freerdp-rdpgfx-capability-policy.patch")
+set(MACRDP_FREERDP_H264_FLOW_CONTROL_PATCH
+    "${CMAKE_CURRENT_SOURCE_DIR}/patches/freerdp-h264-flow-control.patch")
 file(SHA256 "${MACRDP_FREERDP_PATCH}" MACRDP_FREERDP_PATCH_HASH)
 file(SHA256 "${MACRDP_FREERDP_SURFACE_OUTPUT_PRIORITY_PATCH}"
     MACRDP_FREERDP_SURFACE_OUTPUT_PRIORITY_PATCH_HASH)
@@ -453,8 +455,10 @@ file(SHA256 "${MACRDP_FREERDP_CLIENT_SESSION_LIFECYCLE_PATCH}"
     MACRDP_CLIENT_SESSION_LIFECYCLE_PATCH_HASH)
 file(SHA256 "${MACRDP_FREERDP_RDPGFX_CAPABILITY_PATCH}"
     MACRDP_RDPGFX_CAPABILITY_PATCH_HASH)
+file(SHA256 "${MACRDP_FREERDP_H264_FLOW_CONTROL_PATCH}"
+    MACRDP_H264_FLOW_CONTROL_PATCH_HASH)
 string(SHA256 MACRDP_FREERDP_PATCH_HASH
-    "${MACRDP_FREERDP_PATCH_HASH}:${MACRDP_FREERDP_SURFACE_OUTPUT_PRIORITY_PATCH_HASH}:${MACRDP_FREERDP_AUDIO_QUEUE_BOUND_PATCH_HASH}:${MACRDP_OUTPUT_DIAGNOSTICS_PATCH_HASH}:${MACRDP_CLIENT_SESSION_LIFECYCLE_PATCH_HASH}:${MACRDP_RDPGFX_CAPABILITY_PATCH_HASH}")
+    "${MACRDP_FREERDP_PATCH_HASH}:${MACRDP_FREERDP_SURFACE_OUTPUT_PRIORITY_PATCH_HASH}:${MACRDP_FREERDP_AUDIO_QUEUE_BOUND_PATCH_HASH}:${MACRDP_OUTPUT_DIAGNOSTICS_PATCH_HASH}:${MACRDP_CLIENT_SESSION_LIFECYCLE_PATCH_HASH}:${MACRDP_RDPGFX_CAPABILITY_PATCH_HASH}:${MACRDP_H264_FLOW_CONTROL_PATCH_HASH}")
 set(MACRDP_FREERDP_PATCH_STAMP
     "${CMAKE_CURRENT_BINARY_DIR}/macrdp-freerdp-patch.sha256")
 set(MACRDP_FREERDP_SOURCE_HINT
@@ -563,6 +567,7 @@ foreach(MACRDP_REQUIRED_PATCH_FILE IN ITEMS
     "${MACRDP_FREERDP_OUTPUT_DIAGNOSTICS_PATCH}"
     "${MACRDP_FREERDP_CLIENT_SESSION_LIFECYCLE_PATCH}"
     "${MACRDP_FREERDP_RDPGFX_CAPABILITY_PATCH}"
+    "${MACRDP_FREERDP_H264_FLOW_CONTROL_PATCH}"
     "${MACRDP_FREERDP_SHADOW_HEADER}"
     "${MACRDP_FREERDP_SHADOW_CLIENT}"
     "${MACRDP_FREERDP_SHADOW_ENCODER_SOURCE}"
@@ -1000,6 +1005,42 @@ if(MACRDP_RDPGFX_CAPABILITY_INCLUDE_OFFSET EQUAL -1
         "FreeRDP RDPGFX capability policy patch is partial or missing")
 endif()
 
+file(READ "${MACRDP_FREERDP_SHADOW_CLIENT}" MACRDP_SHADOW_CLIENT_CONTENT)
+string(FIND "${MACRDP_SHADOW_CLIENT_CONTENT}"
+    "MACRDP_RDPGFX_H264_FRAME_WINDOW"
+    MACRDP_H264_FLOW_CONTROL_OFFSET)
+if(MACRDP_H264_FLOW_CONTROL_OFFSET EQUAL -1)
+    find_program(MACRDP_PATCH_EXECUTABLE patch)
+    if(NOT MACRDP_PATCH_EXECUTABLE)
+        message(FATAL_ERROR
+            "The 'patch' utility is required for FreeRDP H.264 frame flow control")
+    endif()
+
+    execute_process(
+        COMMAND "${MACRDP_PATCH_EXECUTABLE}" -N -t -F 0 -p1
+            -i "${MACRDP_FREERDP_H264_FLOW_CONTROL_PATCH}"
+        WORKING_DIRECTORY "${freerdp_SOURCE_DIR}"
+        RESULT_VARIABLE MACRDP_H264_FLOW_CONTROL_PATCH_RESULT
+        OUTPUT_VARIABLE MACRDP_H264_FLOW_CONTROL_PATCH_OUTPUT
+        ERROR_VARIABLE MACRDP_H264_FLOW_CONTROL_PATCH_ERROR
+    )
+    if(NOT MACRDP_H264_FLOW_CONTROL_PATCH_RESULT EQUAL 0)
+        message(FATAL_ERROR
+            "Unable to apply the FreeRDP H.264 frame flow-control patch.\n"
+            "stdout: ${MACRDP_H264_FLOW_CONTROL_PATCH_OUTPUT}\n"
+            "stderr: ${MACRDP_H264_FLOW_CONTROL_PATCH_ERROR}")
+    endif()
+
+    file(READ "${MACRDP_FREERDP_SHADOW_CLIENT}" MACRDP_SHADOW_CLIENT_CONTENT)
+    string(FIND "${MACRDP_SHADOW_CLIENT_CONTENT}"
+        "MACRDP_RDPGFX_H264_FRAME_WINDOW"
+        MACRDP_H264_FLOW_CONTROL_OFFSET)
+endif()
+if(MACRDP_H264_FLOW_CONTROL_OFFSET EQUAL -1)
+    message(FATAL_ERROR
+        "FreeRDP H.264 frame flow-control patch is missing")
+endif()
+
 file(WRITE "${MACRDP_FREERDP_PATCH_STAMP}" "${MACRDP_FREERDP_PATCH_HASH}\n")
 
 foreach(MACRDP_FREERDP_CODEC_TARGET IN ITEMS freerdp-codecs freerdp)
@@ -1014,6 +1055,10 @@ add_library(macrdp_rdpgfx_capabilities STATIC
     src/rdpgfx_capabilities.c
 )
 
+add_library(macrdp_rdpgfx_frame_flow STATIC
+    src/rdpgfx_frame_flow.c
+)
+
 target_include_directories(macrdp_rdpgfx_capabilities
     PUBLIC
         ${CMAKE_CURRENT_SOURCE_DIR}/include
@@ -1025,6 +1070,22 @@ target_include_directories(macrdp_rdpgfx_capabilities
 )
 
 target_compile_options(macrdp_rdpgfx_capabilities PRIVATE
+    -Wall
+    -Wextra
+    -Wpedantic
+)
+
+target_include_directories(macrdp_rdpgfx_frame_flow
+    PUBLIC
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+    PRIVATE
+        ${freerdp_SOURCE_DIR}/include
+        ${freerdp_SOURCE_DIR}/winpr/include
+        ${freerdp_BINARY_DIR}/include
+        ${freerdp_BINARY_DIR}/winpr/include
+)
+
+target_compile_options(macrdp_rdpgfx_frame_flow PRIVATE
     -Wall
     -Wextra
     -Wpedantic
@@ -1055,6 +1116,10 @@ add_library(macrdp_freerdp_shadow STATIC ${MACRDP_FREERDP_SHADOW_SOURCES})
 target_sources(macrdp_freerdp_shadow PRIVATE
     src/macos/rdp_h264_worker.cpp
     src/macos/macrdp_cliprdr.mm
+)
+
+target_link_libraries(macrdp_freerdp_shadow PRIVATE
+    macrdp_rdpgfx_frame_flow
 )
 
 target_include_directories(macrdp_freerdp_shadow
@@ -1331,6 +1396,10 @@ add_executable(macrdp-rdpgfx-capabilities-test
     src/rdpgfx_capabilities_test.cpp
 )
 
+add_executable(macrdp-rdpgfx-frame-flow-test
+    src/rdpgfx_frame_flow_test.cpp
+)
+
 target_compile_options(macrdp-access-policy-test PRIVATE
     -Wall
     -Wextra
@@ -1349,7 +1418,20 @@ target_compile_options(macrdp-rdpgfx-capabilities-test PRIVATE
     -Wpedantic
 )
 
+target_compile_options(macrdp-rdpgfx-frame-flow-test PRIVATE
+    -Wall
+    -Wextra
+    -Wpedantic
+)
+
 target_include_directories(macrdp-rdpgfx-capabilities-test PRIVATE
+    ${freerdp_SOURCE_DIR}/include
+    ${freerdp_SOURCE_DIR}/winpr/include
+    ${freerdp_BINARY_DIR}/include
+    ${freerdp_BINARY_DIR}/winpr/include
+)
+
+target_include_directories(macrdp-rdpgfx-frame-flow-test PRIVATE
     ${freerdp_SOURCE_DIR}/include
     ${freerdp_SOURCE_DIR}/winpr/include
     ${freerdp_BINARY_DIR}/include
@@ -1358,6 +1440,10 @@ target_include_directories(macrdp-rdpgfx-capabilities-test PRIVATE
 
 target_link_libraries(macrdp-rdpgfx-capabilities-test PRIVATE
     macrdp_rdpgfx_capabilities
+)
+
+target_link_libraries(macrdp-rdpgfx-frame-flow-test PRIVATE
+    macrdp_rdpgfx_frame_flow
 )
 
 target_include_directories(macrdp-access-policy-test PRIVATE
@@ -1457,6 +1543,11 @@ add_test(
     NAME h264_encoder
     COMMAND macrdp-cpp-encoder-test
         ${CMAKE_CURRENT_BINARY_DIR}/encoder-test.h264
+)
+
+add_test(
+    NAME rdpgfx_frame_flow
+    COMMAND macrdp-rdpgfx-frame-flow-test
 )
 
 add_test(

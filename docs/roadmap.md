@@ -86,6 +86,11 @@ are acceptance gates rather than promised dates.
   and unknown versions fail closed. Codec negotiation remains per client while
   bitrate and capture rate stay explicit until transport measurements justify
   a stable control loop.
+- Make default AVC420 presentation and scheduling client-consistent. Each
+  packet now uses one full-desktop RDPGFX rectangle, at most one H.264 frame is
+  outstanding beyond the client's latest frame acknowledgement, and capture
+  updates coalesce while that frame is pending without blocking input or
+  control traffic. No-output encoder submissions close their frame IDs locally.
 
 ## P0: correctness and lifecycle
 
@@ -98,6 +103,9 @@ are acceptance gates rather than promised dates.
 - Complete the `mstsc` rows on supported macOS hardware: NLA/TLS failure,
   vertical and horizontal wheel direction, FastPath and classic input,
   clipboard, audio, resize, reconnect, and sleep/wake recovery.
+- Confirm the full-frame AVC420 presentation and one-frame acknowledgement
+  window remove stale rectangular regions under the same Windows network
+  conditions that previously reproduced them.
 
 P0 is complete when the server cannot hang during ordinary start, stop, or
 reconfigure failures, the Apple callback races have deterministic coverage,
@@ -141,6 +149,10 @@ a signed artifact whose minimum OS, dependencies, and licensing are explicit.
   bounded subset belongs in regular CI.
 - Tune capture, encoder, and output scheduling from recorded pipeline metrics;
   retain input-first behavior and bounded queues as invariants.
+- After Windows correctness is established, evaluate RDPGFX acknowledgement
+  latency and decoder queue depth as inputs to bounded FPS/bitrate adaptation.
+  Any larger in-flight frame window must retain explicit refresh/keyframe
+  recovery and pass the persistent-desktop regression.
 - Evaluate partial-frame H.264 conversion only with an implementation that
   keeps both encoder reference buffers coherent and passes the persistent-canvas
   multi-frame regression test; full-frame conversion remains the correctness

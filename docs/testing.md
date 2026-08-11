@@ -17,8 +17,9 @@ ctest --test-dir build --output-on-failure
 The local suite covers display selection, bounded output dimensions, Retina
 and negative-origin input mapping, generation-aware frame coalescing, direct
 VideoToolbox AVC420, FreeRDP AVC420 and AVC444 paths, the asynchronous encoder
-worker, version-aware RDPGFX 8.1/10.x capability interpretation, input
-ownership and queue behavior, ledger-bounded modifier cleanup,
+worker, full-desktop AVC420 presentation metadata, the one-frame RDPGFX H.264
+acknowledgement window, version-aware RDPGFX 8.1/10.x capability interpretation,
+input ownership and queue behavior, ledger-bounded modifier cleanup,
 signed 9-bit RDP wheel-delta translation, bounded clipboard response
 correlation and reconnect isolation, asynchronous completion and timeout
 cleanup semantics, injected capture lifecycle races, audio display-generation
@@ -32,6 +33,14 @@ The AVC420 codec test keeps a persistent decoded desktop while changing two
 separated regions over successive frames, then checks both changed and unchanged
 pixels. This catches stale full-frame H.264 references hidden by valid packets
 and otherwise plausible dirty-rectangle metadata.
+
+The H.264 worker test initializes the real direct VideoToolbox path, changes
+only one region on its second frame, and requires each resulting AVC420 packet
+to carry exactly one full-desktop presentation rectangle. The separate RDPGFX
+flow test covers an empty window, one outstanding frame, client acknowledgement,
+explicit acknowledgement suspension, and frame-ID wrap. Neither test starts a
+listener, capture session, or Windows client; final `mstsc` presentation remains
+part of the hardware matrix.
 
 The access-policy test instantiates the real macOS shadow subsystem without
 starting ScreenCaptureKit. It verifies that view-only synchronize, keyboard,
@@ -294,7 +303,9 @@ rejects any Keypad Clear injection from its Pause and synchronization probes.
 The `H.264
 pipeline` diagnostic reports encoder time, coalesced frames, and
 `output_deferred`, the number of completed encodes held until the transport
-became writable. The regular `Output pipeline` diagnostic reports the current
+became writable. For H.264, deferred and coalesced video-update counters also
+include capture updates consumed while the preceding RDPGFX frame awaits client
+acknowledgement. The regular `Output pipeline` diagnostic reports the current
 and maximum FreeRDP message-queue depth and capacity, the current and maximum
 bytes in the non-blocking transport queue, deferred/coalesced video updates,
 audio queue state, output-blocked intervals, drain attempts, and recovery.

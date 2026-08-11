@@ -103,9 +103,17 @@ removed, capture waits for the same ID to return instead of switching screens.
   and keeps completed H.264 output pending until the transport is writable, so
   video backpressure does not delay input or clipboard control traffic.
   AVC420 and AVC444 always convert the complete assembled desktop into the
-  encoder's YUV reference frame. FreeRDP still emits RDPGFX metadata only for
-  changed tiles, but partial YUV conversion is unsafe because alternating
-  reference buffers can retain stale pixels outside the dirty region.
+  encoder's YUV reference frame because alternating partial reference buffers
+  can retain stale pixels outside a dirty region. Default AVC420 also presents
+  each packet with one full-desktop RDPGFX rectangle; combining a full-frame
+  inter-coded packet with partial presentation metadata can otherwise leave
+  stale rectangles on `mstsc`. AVC444 retains its codec-produced metadata.
+  For negotiated H.264, the scheduler permits only one frame ID beyond the
+  client's latest RDPGFX `FrameAcknowledge`. While that window is closed, new
+  capture updates are consumed into the newest desktop and marked for retry
+  instead of being encoded. A submission that produces no packet closes its
+  frame ID locally, so the window cannot deadlock. Clients that explicitly
+  suspend frame acknowledgements retain the protocol's ungated behavior.
 - Clipboard publication does not begin until FreeRDP receives client
   capabilities. Monitor publications and channel callbacks are serialized per
   connection, and only a response correlated with an outstanding text request
@@ -152,9 +160,12 @@ without turning a normal client disconnect into an internal-error diagnostic.
 
 The exact backpressure behavior is part of the protocol adaptation patch. The
 patch adds bounded message budgets, a non-blocking output queue, and input-first
-event scheduling to the generated FreeRDP tree. It is kept as a source patch
-rather than a fork so the upstream version and the local adaptation remain
-reviewable.
+event scheduling to the generated FreeRDP tree. The H.264 acknowledgement
+window follows the same consumer-feedback principle as RustDesk's bounded video
+delivery and recovery design, but is implemented independently with RDPGFX
+frame acknowledgements; no RustDesk code is reused. The adaptations are kept as
+source patches rather than a fork so the upstream version and local changes
+remain reviewable.
 
 ## C++ and Objective-C++
 

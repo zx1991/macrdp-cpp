@@ -59,6 +59,35 @@ void free_stream(RDPGFX_AVC420_BITMAP_STREAM& stream) {
     stream.length = 0;
 }
 
+bool use_full_frame_metadata(RDPGFX_H264_METABLOCK& meta, UINT32 width, UINT32 height) {
+    if (width == 0 || height == 0
+        || width > std::numeric_limits<UINT16>::max()
+        || height > std::numeric_limits<UINT16>::max()
+        || meta.numRegionRects == 0
+        || meta.regionRects == nullptr
+        || meta.quantQualityVals == nullptr) {
+        return false;
+    }
+
+    auto* region = static_cast<RECTANGLE_16*>(std::calloc(1, sizeof(RECTANGLE_16)));
+    auto* quality = static_cast<RDPGFX_H264_QUANT_QUALITY*>(
+        std::calloc(1, sizeof(RDPGFX_H264_QUANT_QUALITY)));
+    if (region == nullptr || quality == nullptr) {
+        std::free(region);
+        std::free(quality);
+        return false;
+    }
+
+    region->right = static_cast<UINT16>(width);
+    region->bottom = static_cast<UINT16>(height);
+    *quality = meta.quantQualityVals[0];
+    free_h264_metablock(&meta);
+    meta.numRegionRects = 1;
+    meta.regionRects = region;
+    meta.quantQualityVals = quality;
+    return true;
+}
+
 } // namespace
 
 struct macrdp_h264_worker {
@@ -194,12 +223,14 @@ struct macrdp_h264_worker {
                 if (status < 0) {
                     encoded.failed = TRUE;
                 } else if (status > 0) {
-                    encoded.hasData = TRUE;
                     encoded.avc420.length = packet_size;
                     output_bytes = packet_size;
-                    if (!copy_packet(packet, packet_size, &encoded.avc420.data)) {
+                    if (!use_full_frame_metadata(
+                            encoded.avc420.meta, current.width, current.height)
+                        || !copy_packet(packet, packet_size, &encoded.avc420.data)) {
                         encoded.failed = TRUE;
-                        encoded.hasData = FALSE;
+                    } else {
+                        encoded.hasData = TRUE;
                     }
                 }
             } else if (current.codec_id == RDPGFX_CODECID_AVC444

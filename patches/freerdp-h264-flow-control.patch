@@ -1,0 +1,64 @@
+diff --git a/server/shadow/shadow_client.c b/server/shadow/shadow_client.c
+index 0adce9e..3b8bf4a 100644
+--- a/server/shadow/shadow_client.c
++++ b/server/shadow/shadow_client.c
+@@ -37,6 +37,7 @@
+ #include "shadow.h"
+ #include "rdp.h"
+ #include <macrdp/rdpgfx_capabilities.h>
++#include <macrdp/rdpgfx_frame_flow.h>
+ #include <macrdp/rdp_h264_worker.h>
+ 
+ #define TAG CLIENT_TAG("shadow")
+@@ -2181,6 +2182,9 @@ static BOOL shadow_client_send_h264_completion(rdpShadowClient* client, BOOL out
+     retryFormat = pending->retryFormat;
+     retryRegion = pending->retryRegion;
+ 
++    if (takeStatus == 0)
++        shadow_client_common_frame_acknowledge(client, pending->start.frameId);
++
+     if (takeStatus > 0)
+     {
+         pending->command.codecId = encoded.codecId;
+@@ -3374,25 +3378,36 @@ static DWORD WINAPI shadow_client_thread(LPVOID arg)
+ 		const BOOL updatePending =
+ 			WaitForSingleObject(UpdateEvent, 0) == WAIT_OBJECT_0 &&
+ 			shadow_multiclient_subscriber_pending(UpdateSubscriber);
+-		const BOOL retryDeferred = frameDeferred && !outputBlocked;
++		const BOOL h264Negotiated =
++			freerdp_settings_get_bool(settings, FreeRDP_GfxH264) ||
++			freerdp_settings_get_bool(settings, FreeRDP_GfxAVC444) ||
++			freerdp_settings_get_bool(settings, FreeRDP_GfxAVC444v2);
++		const BOOL h264WindowFull =
++			client->macrdpH264Worker && gfxstatus.gfxOpened && h264Negotiated &&
++			macrdp_rdpgfx_h264_window_full(client->encoder->frameId,
++			                                     client->encoder->lastAckframeId,
++			                                     client->encoder->queueDepth);
++		/* MACRDP_RDPGFX_H264_FRAME_WINDOW */
++		const BOOL retryDeferred = frameDeferred && !outputBlocked && !h264WindowFull;
+ 
+ 		if (updatePending || retryDeferred)
+ 		{
+ 			/* The UpdateEvent means to start sending current frame. It is
+ 			 * triggered from subsystem implementation and it should ensure
+ 			 * that the screen and primary surface meta data (width, height,
+ 			 * scanline, invalid region, etc) is not changed until it is reset
+ 			 * (at shadow_multiclient_consume). As best practice, subsystem
+ 			 * implementation should invoke shadow_subsystem_frame_update which
+ 			 * triggers the event and then wait for completion */
+-			if (outputBlocked && updatePending)
++			if ((outputBlocked || h264WindowFull) && updatePending)
+ 			{
+ 				/* MACRDP_SKIP_BLOCKED_FRAME */
+ 				/* Preserve the dirty region without doing another expensive encode
+-				 * while the non-blocking transport is backed up. Input is still
+-				 * processed above, and a writable pass retries the coalesced frame. */
++				 * while the transport is backed up or an H.264 frame is awaiting
++				 * presentation acknowledgement. Input is still processed above, and
++				 * an available pass retries the coalesced frame. */
+ 				if (!shadow_client_no_surface_update(client, &gfxstatus, UpdateSubscriber))
+ 				{
+-					WLog_ERR(TAG, "Failed to defer surface update while output is blocked");
++					WLog_ERR(TAG, "Failed to defer surface update while video is gated");
+ 					break;
+ 				}

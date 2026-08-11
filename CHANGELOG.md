@@ -15,6 +15,9 @@ This project has not published a stable release yet.
 - Corrected RDPGFX H.264 negotiation so 8.1 and 10.x capability flags are
   interpreted by version, preserving AVC420 for modern clients, covering the
   10.6 errata value, and failing closed for unknown versions.
+- Made default AVC420 presentation client-consistent by using one full-desktop
+  RDPGFX rectangle and allowing only one unacknowledged H.264 frame per client;
+  newer capture updates coalesce while input and control traffic remain active.
 - Serialized macOS pasteboard access and expanded shaped-link reconnect,
   resize, and clipboard-change validation.
 - Added a capability-gated clipboard monitor, bounded FIFO correlation for

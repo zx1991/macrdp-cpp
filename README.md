@@ -18,7 +18,7 @@ shadow server.
 | Area | Current implementation |
 | --- | --- |
 | Display | Exact selection of one active display with generation-tagged mode-change recovery and newest-frame coalescing |
-| Video | Version-aware GFX/AVC420 through direct VideoToolbox, FFmpeg fallback, optional AVC444, or classic SurfaceBits; H.264 uses reference-safe full-frame input |
+| Video | Version-aware GFX/AVC420 through direct VideoToolbox, FFmpeg fallback, optional AVC444, or classic SurfaceBits; default AVC420 uses reference-safe full-frame input and presentation |
 | Input | Serialized keyboard, Unicode, pointer, button, drag, and wheel injection through a private CoreGraphics event source |
 | Clipboard | Bidirectional `CF_UNICODETEXT` and `CF_TEXT` through `NSPasteboard`, with per-connection request correlation |
 | Audio | Generation-isolated screen audio and negotiation-gated RDPSND output; AAC or PCM depends on client formats |
@@ -36,7 +36,11 @@ omitting `AVC_DISABLED`; unknown versions do not enable either codec. Codec
 capabilities are not a bandwidth measurement, so `--bitrate` and `--fps`
 remain explicit server settings. Slow transports are handled by bounded output
 queues, deferred writes, and newest-frame coalescing rather than speculative
-rate changes.
+rate changes. H.264 RDPGFX sessions allow only one frame beyond the client's
+last presentation acknowledgement. Capture updates continue to be consumed and
+coalesced while that frame is outstanding, without delaying input or control
+channels. This prevents dependent AVC420 frames and partial presentation state
+from outrunning a slow Windows decoder.
 
 ## Current limits
 
