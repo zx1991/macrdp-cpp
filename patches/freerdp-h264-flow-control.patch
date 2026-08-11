@@ -1,5 +1,15 @@
+diff --git a/include/freerdp/server/shadow.h b/include/freerdp/server/shadow.h
+--- a/include/freerdp/server/shadow.h
++++ b/include/freerdp/server/shadow.h
+@@ -132,6 +132,7 @@
+ 		UINT64 macrdpH264OutputDeferredFrames;
+ 		BOOL macrdpH264CompletionDeferred;
+ 		UINT64 macrdpH264LastDiagnostics;
++		void* macrdpH264FrameFlow;
+ 		/* MACRDP_CLIENT_FRAME_SNAPSHOT */
+ 		/* MACRDP_AUDIO_QUEUE_BOUND */
+ 		LONG macrdpAudioMessageQueued;
 diff --git a/server/shadow/shadow_client.c b/server/shadow/shadow_client.c
-index 0adce9e..3b8bf4a 100644
 --- a/server/shadow/shadow_client.c
 +++ b/server/shadow/shadow_client.c
 @@ -37,6 +37,7 @@
@@ -10,17 +20,229 @@ index 0adce9e..3b8bf4a 100644
  #include <macrdp/rdp_h264_worker.h>
  
  #define TAG CLIENT_TAG("shadow")
-@@ -2181,6 +2182,9 @@ static BOOL shadow_client_send_h264_completion(rdpShadowClient* client, BOOL out
+@@ -112,6 +113,26 @@
+ }
+ /* MACRDP_CONTROL_OUTPUT_PRIORITY */
+ 
++static UINT64 shadow_client_h264_payload_bytes(const RDPGFX_SURFACE_COMMAND* command)
++{
++	if (!command || !command->extra)
++		return 0;
++	if (command->codecId == RDPGFX_CODECID_AVC420)
++	{
++		const RDPGFX_AVC420_BITMAP_STREAM* avc420 =
++			(const RDPGFX_AVC420_BITMAP_STREAM*)command->extra;
++		return avc420->length;
++	}
++	if (command->codecId == RDPGFX_CODECID_AVC444 ||
++	    command->codecId == RDPGFX_CODECID_AVC444v2)
++	{
++		const RDPGFX_AVC444_BITMAP_STREAM* avc444 =
++			(const RDPGFX_AVC444_BITMAP_STREAM*)command->extra;
++		return (UINT64)avc444->bitstream[0].length + avc444->bitstream[1].length;
++	}
++	return 0;
++}
++
+ static UINT shadow_client_send_surface_frame(
+     rdpShadowClient* client,
+     RDPGFX_SURFACE_COMMAND* command,
+@@ -125,6 +146,16 @@
+     IFCALLRET(client->rdpgfx->SurfaceFrameCommand, error, client->rdpgfx, command, start, end);
+     if (transport)
+         transport_set_output_priority(transport, FALSE);
++    if (error == CHANNEL_RC_OK && client->macrdpH264FrameFlow)
++    {
++        const UINT64 payloadBytes = shadow_client_h264_payload_bytes(command);
++        if (payloadBytes > 0)
++        {
++            macrdp_rdpgfx_frame_flow_sent(
++                (macrdp_rdpgfx_frame_flow*)client->macrdpH264FrameFlow,
++                start->frameId, payloadBytes, GetTickCount64());
++        }
++    }
+     return error;
+ }
+ /* MACRDP_SURFACE_OUTPUT_PRIORITY */
+@@ -962,14 +993,30 @@
+ 	 */
+ 	WINPR_ASSERT(client);
+ 	WINPR_ASSERT(client->encoder);
+-	client->encoder->lastAckframeId = frameId;
++	if (macrdp_rdpgfx_frame_id_should_advance(client->encoder->lastAckframeId, frameId))
++		client->encoder->lastAckframeId = frameId;
++	/* MACRDP_RDPGFX_MONOTONIC_FRAME_ACK */
++}
++
++static inline void shadow_client_record_frame_acknowledge(rdpShadowClient* client,
++                                                          UINT32 frameId,
++                                                          UINT32 queueDepth)
++{
++	WINPR_ASSERT(client);
++	if (client->macrdpH264FrameFlow)
++	{
++		macrdp_rdpgfx_frame_flow_acknowledge(
++			(macrdp_rdpgfx_frame_flow*)client->macrdpH264FrameFlow,
++			frameId, queueDepth, GetTickCount64());
++	}
++	shadow_client_common_frame_acknowledge(client, frameId);
+ }
+ 
+ WINPR_ATTR_NODISCARD
+ static BOOL shadow_client_surface_frame_acknowledge(rdpContext* context, UINT32 frameId)
+ {
+ 	rdpShadowClient* client = (rdpShadowClient*)context;
+-	shadow_client_common_frame_acknowledge(client, frameId);
++	shadow_client_record_frame_acknowledge(client, frameId, QUEUE_DEPTH_UNAVAILABLE);
+ 	/*
+ 	 * Reset queueDepth for legacy none RDPGFX acknowledge
+ 	 */
+@@ -990,7 +1037,8 @@
+ 	WINPR_ASSERT(frameAcknowledge);
+ 
+ 	client = (rdpShadowClient*)context->custom;
+-	shadow_client_common_frame_acknowledge(client, frameAcknowledge->frameId);
++	shadow_client_record_frame_acknowledge(client, frameAcknowledge->frameId,
++	                                       frameAcknowledge->queueDepth);
+ 
+ 	WINPR_ASSERT(client);
+ 	WINPR_ASSERT(client->encoder);
+@@ -1489,6 +1537,7 @@
+         client->macrdpH264DeferredFrames++;
+         shadow_client_h264_defer(pending, pSrcData, nSrcStep, SrcFormat, nWidth, nHeight,
+                                  encodeRegion);
++        shadow_client_common_frame_acknowledge(client, cmdstart->frameId);
+         return TRUE;
+     }
+ 
+@@ -1520,6 +1569,14 @@
+     pending->command = *cmd;
+     pending->start = *cmdstart;
+     pending->end = *cmdend;
++	if (client->macrdpH264FrameFlow &&
++	    !macrdp_rdpgfx_frame_flow_reserve(
++		    (macrdp_rdpgfx_frame_flow*)client->macrdpH264FrameFlow,
++		    cmdstart->frameId, GetTickCount64()))
++	{
++		free(pending);
++		return FALSE;
++	}
+ 
+     submitStatus = macrdp_h264_worker_submit(
+         (macrdp_h264_worker*)client->macrdpH264Worker, pSrcData, frameSize, nSrcStep, nWidth,
+@@ -1532,12 +1589,22 @@
+             client->macrdpH264DeferredFrames++;
+             shadow_client_h264_defer(active, pSrcData, nSrcStep, SrcFormat, nWidth, nHeight,
+                                      encodeRegion);
++			macrdp_rdpgfx_frame_flow_release(
++				(macrdp_rdpgfx_frame_flow*)client->macrdpH264FrameFlow,
++				cmdstart->frameId);
++			shadow_client_common_frame_acknowledge(client, cmdstart->frameId);
+             free(pending);
+             return TRUE;
+         }
+     }
+     if (submitStatus < 1)
+     {
++		if (client->macrdpH264FrameFlow)
++		{
++			macrdp_rdpgfx_frame_flow_release(
++				(macrdp_rdpgfx_frame_flow*)client->macrdpH264FrameFlow,
++				cmdstart->frameId);
++		}
+         free(pending);
+         return FALSE;
+     }
+@@ -1549,6 +1616,7 @@
+ static BOOL shadow_client_h264_wait_idle(rdpShadowClient* client)
+ {
+     macrdp_h264_encoded_frame encoded = { 0 };
++	MACRDP_H264_PENDING* pending = nullptr;
+     BOOL waitStatus = TRUE;
+     int takeStatus = 0;
+ 
+@@ -1560,7 +1628,18 @@
+     takeStatus = macrdp_h264_worker_take(
+         (macrdp_h264_worker*)client->macrdpH264Worker, &encoded);
+     macrdp_h264_encoded_frame_free(&encoded);
+-    free(client->macrdpH264Pending);
++	pending = (MACRDP_H264_PENDING*)client->macrdpH264Pending;
++	if (pending)
++	{
++		if (client->macrdpH264FrameFlow)
++		{
++			macrdp_rdpgfx_frame_flow_release(
++				(macrdp_rdpgfx_frame_flow*)client->macrdpH264FrameFlow,
++				pending->start.frameId);
++		}
++		shadow_client_common_frame_acknowledge(client, pending->start.frameId);
++	}
++    free(pending);
+     client->macrdpH264Pending = nullptr;
+     client->macrdpH264CompletionDeferred = FALSE;
+     return waitStatus && takeStatus >= 0;
+@@ -2162,6 +2241,12 @@
+     {
+         WLog_ERR(TAG, "H.264 worker failed to encode a frame");
+         macrdp_h264_encoded_frame_free(&encoded);
++		if (pending && client->macrdpH264FrameFlow)
++		{
++			macrdp_rdpgfx_frame_flow_release(
++				(macrdp_rdpgfx_frame_flow*)client->macrdpH264FrameFlow,
++				pending->start.frameId);
++		}
+         free(pending);
+         client->macrdpH264Pending = nullptr;
+         return FALSE;
+@@ -2180,6 +2265,17 @@
+     retryHeight = pending->retryHeight;
      retryFormat = pending->retryFormat;
      retryRegion = pending->retryRegion;
- 
-+    if (takeStatus == 0)
-+        shadow_client_common_frame_acknowledge(client, pending->start.frameId);
 +
++    if (takeStatus == 0)
++    {
++		if (client->macrdpH264FrameFlow)
++		{
++			macrdp_rdpgfx_frame_flow_release(
++				(macrdp_rdpgfx_frame_flow*)client->macrdpH264FrameFlow,
++				pending->start.frameId);
++		}
++        shadow_client_common_frame_acknowledge(client, pending->start.frameId);
++    }
+ 
      if (takeStatus > 0)
      {
-         pending->command.codecId = encoded.codecId;
-@@ -3374,25 +3378,36 @@ static DWORD WINAPI shadow_client_thread(LPVOID arg)
+@@ -2202,6 +2298,12 @@
+ 
+     macrdp_h264_encoded_frame_free(&encoded);
+     client->macrdpH264Pending = nullptr;
++	if (error && client->macrdpH264FrameFlow)
++    {
++		macrdp_rdpgfx_frame_flow_release(
++			(macrdp_rdpgfx_frame_flow*)client->macrdpH264FrameFlow,
++			pending->start.frameId);
++	}
+     free(pending);
+     if (error)
+     {
+@@ -3175,6 +3277,7 @@
+ 	/* This should only be visited in client thread */
+ 	SHADOW_GFX_STATUS gfxstatus = WINPR_C_ARRAY_INIT;
+ 	rdpUpdate* update = nullptr;
++	macrdp_rdpgfx_frame_flow h264FrameFlow = WINPR_C_ARRAY_INIT;
+ 
+ 	WINPR_ASSERT(client);
+ 
+@@ -3191,6 +3294,8 @@
+ 
+ 	settings = peer->context->settings;
+ 	WINPR_ASSERT(settings);
++	macrdp_rdpgfx_frame_flow_init(&h264FrameFlow);
++	client->macrdpH264FrameFlow = &h264FrameFlow;
+ 
+ 	peer->Capabilities = shadow_client_capabilities;
+ 	peer->PostConnect = shadow_client_post_connect;
+@@ -3374,7 +3479,18 @@
  		const BOOL updatePending =
  			WaitForSingleObject(UpdateEvent, 0) == WAIT_OBJECT_0 &&
  			shadow_multiclient_subscriber_pending(UpdateSubscriber);
@@ -31,18 +253,16 @@ index 0adce9e..3b8bf4a 100644
 +			freerdp_settings_get_bool(settings, FreeRDP_GfxAVC444v2);
 +		const BOOL h264WindowFull =
 +			client->macrdpH264Worker && gfxstatus.gfxOpened && h264Negotiated &&
-+			macrdp_rdpgfx_h264_window_full(client->encoder->frameId,
-+			                                     client->encoder->lastAckframeId,
-+			                                     client->encoder->queueDepth);
++			(macrdp_rdpgfx_h264_window_full(&h264FrameFlow,
++			                                      client->encoder->queueDepth) ||
++			 (((MACRDP_H264_PENDING*)client->macrdpH264Pending) &&
++			  ((MACRDP_H264_PENDING*)client->macrdpH264Pending)->retry));
 +		/* MACRDP_RDPGFX_H264_FRAME_WINDOW */
 +		const BOOL retryDeferred = frameDeferred && !outputBlocked && !h264WindowFull;
  
  		if (updatePending || retryDeferred)
  		{
- 			/* The UpdateEvent means to start sending current frame. It is
- 			 * triggered from subsystem implementation and it should ensure
- 			 * that the screen and primary surface meta data (width, height,
- 			 * scanline, invalid region, etc) is not changed until it is reset
+@@ -3385,15 +3501,16 @@
  			 * (at shadow_multiclient_consume). As best practice, subsystem
  			 * implementation should invoke shadow_subsystem_frame_update which
  			 * triggers the event and then wait for completion */
@@ -62,3 +282,102 @@ index 0adce9e..3b8bf4a 100644
 +					WLog_ERR(TAG, "Failed to defer surface update while video is gated");
  					break;
  				}
+ 				if (client->activated && !client->suppressOutput)
+@@ -3467,6 +3584,9 @@
+ 			? transport_get_write_queue_size(outputTransport)
+ 			: 0;
+ 		const size_t transportQueueLimit = transport_get_write_queue_limit();
++		macrdp_rdpgfx_frame_flow_observe_output(
++			&h264FrameFlow, outputBlocked, transportQueueBytes,
++			transportQueueLimit, outputNow);
+ 		if ((UINT64)outputQueueDepth > client->macrdpOutputQueueMaxDepth)
+ 			client->macrdpOutputQueueMaxDepth = (UINT64)outputQueueDepth;
+ 		if ((UINT64)outputQueueCapacity > client->macrdpOutputQueueMaxCapacity)
+@@ -3476,6 +3596,8 @@
+ 		if (outputLastQueueDiagnostics == 0 ||
+ 		    outputNow - outputLastQueueDiagnostics >= 5000)
+ 		{
++			macrdp_rdpgfx_frame_flow_stats flowStats = WINPR_C_ARRAY_INIT;
++			macrdp_rdpgfx_frame_flow_get_stats(&h264FrameFlow, outputNow, &flowStats);
+ 			const UINT64 currentBlockedMs = outputBlocked && outputBlockedSince != 0
+ 				? (UINT64)(outputNow - outputBlockedSince)
+ 				: 0;
+@@ -3513,6 +3635,38 @@
+ 			          outputBlockedMaxMs,
+ 			          outputBlockedEvents,
+ 			          outputDrainAttempts);
++			if (flowStats.sent_frames > 0)
++			{
++				WLog_INFO(TAG,
++				          "H.264 frame flow: window=%" PRIu32
++				          " active=%" PRIu32 " reserved=%" PRIu32
++				          " outstanding=%" PRIu32 " sent=%" PRIu64
++				          " acked=%" PRIu64 " ack_samples=%" PRIu64
++				          " ack_last=%" PRIu64 "ms ack_avg=%" PRIu64
++				          "ms ack_max=%" PRIu64 "ms outstanding_ms=%" PRIu64
++				          " sent_fps=%" PRIu64 ".%03" PRIu64
++				          " bitrate_kbps=%" PRIu64 " frame_bytes_avg=%" PRIu64
++				          " promotions=%" PRIu64 " demotions=%" PRIu64
++				          " stalls=%" PRIu64,
++				          flowStats.window_size,
++				          flowStats.active_frames,
++				          flowStats.reserved_frames,
++				          flowStats.outstanding_frames,
++				          flowStats.sent_frames,
++				          flowStats.acknowledged_frames,
++				          flowStats.acknowledged_samples,
++				          flowStats.last_ack_latency_ms,
++				          flowStats.average_ack_latency_ms,
++				          flowStats.max_ack_latency_ms,
++				          flowStats.oldest_outstanding_ms,
++				          flowStats.sent_fps_milli / 1000,
++				          flowStats.sent_fps_milli % 1000,
++				          flowStats.effective_bitrate_bps / 1000,
++				          flowStats.average_frame_bytes,
++				          flowStats.window_promotions,
++				          flowStats.window_demotions,
++				          flowStats.ack_stalls);
++			}
+ 			outputLastQueueDiagnostics = outputNow;
+ 		}
+ 
+@@ -3750,6 +3904,8 @@
+ 	if (client)
+ 	{
+ 		const ULONGLONG outputNow = GetTickCount64();
++		macrdp_rdpgfx_frame_flow_stats flowStats = WINPR_C_ARRAY_INIT;
++		macrdp_rdpgfx_frame_flow_get_stats(&h264FrameFlow, outputNow, &flowStats);
+ 		const UINT64 currentBlockedMs = outputBlocked && outputBlockedSince != 0
+ 			? (UINT64)(outputNow - outputBlockedSince)
+ 			: 0;
+@@ -3777,6 +3933,30 @@
+ 		          outputBlockedMaxMs,
+ 		          outputBlockedEvents,
+ 		          outputDrainAttempts);
++		if (flowStats.sent_frames > 0)
++		{
++			WLog_INFO(TAG,
++			          "H.264 frame flow final: window=%" PRIu32
++			          " active=%" PRIu32 " sent=%" PRIu64 " acked=%" PRIu64
++			          " ack_avg=%" PRIu64 "ms ack_max=%" PRIu64
++			          "ms sent_fps=%" PRIu64 ".%03" PRIu64
++			          " bitrate_kbps=%" PRIu64 " frame_bytes_avg=%" PRIu64
++			          " promotions=%" PRIu64 " demotions=%" PRIu64
++			          " stalls=%" PRIu64,
++			          flowStats.window_size,
++			          flowStats.active_frames,
++			          flowStats.sent_frames,
++			          flowStats.acknowledged_frames,
++			          flowStats.average_ack_latency_ms,
++			          flowStats.max_ack_latency_ms,
++			          flowStats.sent_fps_milli / 1000,
++			          flowStats.sent_fps_milli % 1000,
++			          flowStats.effective_bitrate_bps / 1000,
++			          flowStats.average_frame_bytes,
++			          flowStats.window_promotions,
++			          flowStats.window_demotions,
++			          flowStats.ack_stalls);
++		}
+ 	}
+ 	WINPR_ASSERT(peer->Disconnect);
+ 	peer->Disconnect(peer);

@@ -16,8 +16,10 @@ This project has not published a stable release yet.
   interpreted by version, preserving AVC420 for modern clients, covering the
   10.6 errata value, and failing closed for unknown versions.
 - Made default AVC420 presentation client-consistent by using one full-desktop
-  RDPGFX rectangle and allowing only one unacknowledged H.264 frame per client;
-  newer capture updates coalesce while input and control traffic remain active.
+  RDPGFX rectangle and a bounded adaptive acknowledgement window. It promotes
+  from one to at most two frames only after stable ACKs, returns to one under
+  decoder or transport pressure, and reports ACK latency, effective FPS, and
+  bitrate while input and control traffic remain active.
 - Serialized macOS pasteboard access and expanded shaped-link reconnect,
   resize, and clipboard-change validation.
 - Added a capability-gated clipboard monitor, bounded FIFO correlation for

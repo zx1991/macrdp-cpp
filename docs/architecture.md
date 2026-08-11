@@ -108,12 +108,16 @@ removed, capture waits for the same ID to return instead of switching screens.
   each packet with one full-desktop RDPGFX rectangle; combining a full-frame
   inter-coded packet with partial presentation metadata can otherwise leave
   stale rectangles on `mstsc`. AVC444 retains its codec-produced metadata.
-  For negotiated H.264, the scheduler permits only one frame ID beyond the
-  client's latest RDPGFX `FrameAcknowledge`. While that window is closed, new
-  capture updates are consumed into the newest desktop and marked for retry
-  instead of being encoded. A submission that produces no packet closes its
-  frame ID locally, so the window cannot deadlock. Clients that explicitly
-  suspend frame acknowledgements retain the protocol's ungated behavior.
+  For negotiated H.264, the scheduler begins with one reserved or sent frame
+  beyond the client's latest RDPGFX `FrameAcknowledge`. Twelve consecutive ACKs
+  no slower than 250 ms promote the bound to two. Slow ACKs, reported decoder
+  depth, transport blockage, queue pressure, or an ACK stall demote it to one.
+  While the window is closed, new capture updates are consumed into the newest
+  desktop and marked for retry instead of being encoded. Reservations are made
+  before asynchronous encoding, and submissions that produce no packet release
+  only their own reservation. Late ACKs cannot move the acknowledged frame ID
+  backwards. Clients that explicitly suspend frame acknowledgements retain the
+  protocol's ungated behavior.
 - Clipboard publication does not begin until FreeRDP receives client
   capabilities. Monitor publications and channel callbacks are serialized per
   connection, and only a response correlated with an outstanding text request

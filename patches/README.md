@@ -12,11 +12,14 @@ session boundary used during disconnect and reconnect. The capability policy
 patch keeps RDPGFX 8.1 and 10.x H.264 flag semantics separate so a modern client
 cannot lose AVC420 during capability confirmation. AVC420 and AVC444 convert a
 complete desktop frame for every H.264 submission because the codec uses
-full-frame inter-frame references. The final H.264 flow-control patch limits a
-negotiated H.264 session to one unacknowledged RDPGFX frame, coalesces newer
-capture updates while it waits, and locally closes frame IDs for encoder
-submissions with no packet. Default AVC420 packets use one full-desktop
-presentation rectangle; AVC444 keeps its codec-produced metadata.
+full-frame inter-frame references. The final H.264 flow-control patch starts
+each negotiated H.264 session with one unacknowledged RDPGFX frame, promotes to
+a hard maximum of two after stable ACKs, and returns to one under decoder or
+transport pressure. It reserves asynchronous submissions before encoding,
+coalesces capture updates while the window is full, releases no-packet
+reservations locally, and records ACK latency and effective output metrics.
+Default AVC420 packets use one full-desktop presentation rectangle; AVC444
+keeps its codec-produced metadata.
 
 Do not edit `build/_deps/freerdp-src` directly. When the FreeRDP version
 changes, review every hunk against the new upstream source, update the archive

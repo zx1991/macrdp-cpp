@@ -17,8 +17,8 @@ ctest --test-dir build --output-on-failure
 The local suite covers display selection, bounded output dimensions, Retina
 and negative-origin input mapping, generation-aware frame coalescing, direct
 VideoToolbox AVC420, FreeRDP AVC420 and AVC444 paths, the asynchronous encoder
-worker, full-desktop AVC420 presentation metadata, the one-frame RDPGFX H.264
-acknowledgement window, version-aware RDPGFX 8.1/10.x capability interpretation,
+worker, full-desktop AVC420 presentation metadata, the bounded adaptive RDPGFX
+H.264 acknowledgement window, version-aware RDPGFX 8.1/10.x capability interpretation,
 input ownership and queue behavior, ledger-bounded modifier cleanup,
 signed 9-bit RDP wheel-delta translation, bounded clipboard response
 correlation and reconnect isolation, asynchronous completion and timeout
@@ -37,10 +37,11 @@ and otherwise plausible dirty-rectangle metadata.
 The H.264 worker test initializes the real direct VideoToolbox path, changes
 only one region on its second frame, and requires each resulting AVC420 packet
 to carry exactly one full-desktop presentation rectangle. The separate RDPGFX
-flow test covers an empty window, one outstanding frame, client acknowledgement,
-explicit acknowledgement suspension, and frame-ID wrap. Neither test starts a
-listener, capture session, or Windows client; final `mstsc` presentation remains
-part of the hardware matrix.
+flow test covers reservations, cumulative acknowledgements, promotion from one
+to two frames, slow-ACK and output-pressure demotion, empty encoder output,
+stalls, explicit acknowledgement suspension, metrics, and frame-ID wrap.
+Neither test starts a listener, capture session, or Windows client; final
+`mstsc` presentation remains part of the hardware matrix.
 
 The access-policy test instantiates the real macOS shadow subsystem without
 starting ScreenCaptureKit. It verifies that view-only synchronize, keyboard,
@@ -312,7 +313,10 @@ audio queue state, output-blocked intervals, drain attempts, and recovery.
 `Output pipeline final` repeats the counters when a client disconnects, so
 short sessions still leave a usable summary. A normal disconnect while
 draining is logged as transport closure, not as a server-internal drain
-failure.
+failure. `H.264 frame flow` reports the current adaptive window, reserved and
+unacknowledged frames, ACK latency, effective sent FPS and bitrate, average
+encoded bytes per frame, promotions, demotions, and ACK stalls. Its `final`
+line makes the same aggregate available for short sessions.
 
 Run the direct profile with:
 
@@ -538,7 +542,7 @@ run nondeterministic.
 For a performance report, include the profile, requested size, `frames`,
 `first_frame_ms`, `avg_interval_ms`, `max_interval_ms`, GFX codec counters,
 input failure counters, audio callback counters, and the server's `Frame
-pipeline`, `H.264 pipeline`, `Output pipeline`, and `Slow client frame handling`
-lines. A subjective report such as
+pipeline`, `H.264 pipeline`, `H.264 frame flow`, `Output pipeline`, and `Slow
+client frame handling` lines. A subjective report such as
 "the screen is slow" is not enough to distinguish capture, encoding, network,
 client decode, and output backpressure.

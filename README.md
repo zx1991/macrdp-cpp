@@ -36,11 +36,14 @@ omitting `AVC_DISABLED`; unknown versions do not enable either codec. Codec
 capabilities are not a bandwidth measurement, so `--bitrate` and `--fps`
 remain explicit server settings. Slow transports are handled by bounded output
 queues, deferred writes, and newest-frame coalescing rather than speculative
-rate changes. H.264 RDPGFX sessions allow only one frame beyond the client's
-last presentation acknowledgement. Capture updates continue to be consumed and
-coalesced while that frame is outstanding, without delaying input or control
-channels. This prevents dependent AVC420 frames and partial presentation state
-from outrunning a slow Windows decoder.
+rate changes. H.264 RDPGFX sessions start with one unacknowledged frame and
+promote to a maximum of two only after 12 stable acknowledgements at 250 ms or
+less. An ACK at 400 ms or more, decoder queue depth of two or more, blocked
+transport, a transport queue above one-sixteenth of its limit, or a 750 ms ACK
+stall immediately returns the window to one. Capture updates continue to be
+consumed and coalesced while the window is full, without delaying input or
+control channels. This keeps dependent AVC420 frames bounded while allowing a
+healthy Windows decoder to overlap one network acknowledgement cycle.
 
 ## Current limits
 
