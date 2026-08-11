@@ -21,8 +21,8 @@ worker, input ownership and queue behavior, ledger-bounded modifier cleanup,
 signed 9-bit RDP wheel-delta translation, bounded clipboard response
 correlation and reconnect isolation, asynchronous completion and timeout
 cleanup semantics, injected capture lifecycle races, audio display-generation
-and RDPSND negotiation gates, configuration
-permissions, password rotation, the complete versioned
+and RDPSND negotiation gates, 100-cycle cross-module client reconnects,
+configuration permissions, password rotation, the complete versioned
 install/upgrade/rollback/uninstall state machine, and server argument
 validation. It does not require Screen Recording permission for the synthetic
 encoder and state-machine tests.
@@ -37,6 +37,15 @@ succeeded and returns inactive after teardown state is cleared.
 Server argument tests reject concurrent-client limits outside 1 through 64 and
 require explicit acknowledgement before selecting a non-NLA compatibility
 mode.
+
+The client-session lifecycle test instantiates the real macOS shadow subsystem
+without starting its workers, listener, ScreenCaptureKit, `NSPasteboard`, or
+CoreGraphics injection. Across 100 fresh clients, it moves the atomic FreeRDP
+session through active, stopping, and stopped states; verifies idempotent
+disconnect notification, RDPSND and clipboard shutdown gates, and confirms
+that late keyboard, Unicode, synchronize, and pointer callbacks cannot mutate
+or recreate input ownership. Reusing the same stack address in successive
+cycles also covers allocator address reuse without carrying old client state.
 
 The clipboard transfer test uses only portable fixed-capacity state and never
 reads or writes `NSPasteboard`. It covers FIFO response correlation, failed-send

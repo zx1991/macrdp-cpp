@@ -107,12 +107,16 @@ bool test_rdpsnd_negotiation_gate() {
 
     bool ok = expect(!shadow_client_rdpsnd_is_active(&client),
                      "unnegotiated RDPSND client was treated as active");
+    ok = expect(macrdp_shadow_client_session_start(&client),
+                "RDPSND test session did not start") && ok;
     client.macrdpRdpsndActivated = TRUE;
     ok = expect(shadow_client_rdpsnd_is_active(&client),
                 "negotiated RDPSND client was not treated as active") && ok;
-    client.macrdpRdpsndActivated = FALSE;
+    ok = expect(macrdp_shadow_client_session_begin_stop(&client),
+                "RDPSND test session did not begin stopping") && ok;
     ok = expect(!shadow_client_rdpsnd_is_active(&client),
-                "disconnected RDPSND client retained active state") && ok;
+                "stopping RDPSND client retained active state") && ok;
+    macrdp_shadow_client_session_finish_stop(&client);
     return ok;
 }
 

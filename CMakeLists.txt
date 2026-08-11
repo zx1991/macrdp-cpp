@@ -438,6 +438,8 @@ set(MACRDP_FREERDP_AUDIO_QUEUE_BOUND_PATCH
     "${CMAKE_CURRENT_SOURCE_DIR}/patches/freerdp-audio-queue-bound.patch")
 set(MACRDP_FREERDP_OUTPUT_DIAGNOSTICS_PATCH
     "${CMAKE_CURRENT_SOURCE_DIR}/patches/freerdp-output-diagnostics.patch")
+set(MACRDP_FREERDP_CLIENT_SESSION_LIFECYCLE_PATCH
+    "${CMAKE_CURRENT_SOURCE_DIR}/patches/freerdp-client-session-lifecycle.patch")
 file(SHA256 "${MACRDP_FREERDP_PATCH}" MACRDP_FREERDP_PATCH_HASH)
 file(SHA256 "${MACRDP_FREERDP_SURFACE_OUTPUT_PRIORITY_PATCH}"
     MACRDP_FREERDP_SURFACE_OUTPUT_PRIORITY_PATCH_HASH)
@@ -445,8 +447,10 @@ file(SHA256 "${MACRDP_FREERDP_AUDIO_QUEUE_BOUND_PATCH}"
     MACRDP_FREERDP_AUDIO_QUEUE_BOUND_PATCH_HASH)
 file(SHA256 "${MACRDP_FREERDP_OUTPUT_DIAGNOSTICS_PATCH}"
     MACRDP_OUTPUT_DIAGNOSTICS_PATCH_HASH)
+file(SHA256 "${MACRDP_FREERDP_CLIENT_SESSION_LIFECYCLE_PATCH}"
+    MACRDP_CLIENT_SESSION_LIFECYCLE_PATCH_HASH)
 string(SHA256 MACRDP_FREERDP_PATCH_HASH
-    "${MACRDP_FREERDP_PATCH_HASH}:${MACRDP_FREERDP_SURFACE_OUTPUT_PRIORITY_PATCH_HASH}:${MACRDP_FREERDP_AUDIO_QUEUE_BOUND_PATCH_HASH}:${MACRDP_OUTPUT_DIAGNOSTICS_PATCH_HASH}")
+    "${MACRDP_FREERDP_PATCH_HASH}:${MACRDP_FREERDP_SURFACE_OUTPUT_PRIORITY_PATCH_HASH}:${MACRDP_FREERDP_AUDIO_QUEUE_BOUND_PATCH_HASH}:${MACRDP_OUTPUT_DIAGNOSTICS_PATCH_HASH}:${MACRDP_CLIENT_SESSION_LIFECYCLE_PATCH_HASH}")
 set(MACRDP_FREERDP_PATCH_STAMP
     "${CMAKE_CURRENT_BINARY_DIR}/macrdp-freerdp-patch.sha256")
 set(MACRDP_FREERDP_SOURCE_HINT
@@ -553,6 +557,7 @@ foreach(MACRDP_REQUIRED_PATCH_FILE IN ITEMS
     "${MACRDP_FREERDP_SURFACE_OUTPUT_PRIORITY_PATCH}"
     "${MACRDP_FREERDP_AUDIO_QUEUE_BOUND_PATCH}"
     "${MACRDP_FREERDP_OUTPUT_DIAGNOSTICS_PATCH}"
+    "${MACRDP_FREERDP_CLIENT_SESSION_LIFECYCLE_PATCH}"
     "${MACRDP_FREERDP_SHADOW_HEADER}"
     "${MACRDP_FREERDP_SHADOW_CLIENT}"
     "${MACRDP_FREERDP_SHADOW_ENCODER_SOURCE}"
@@ -880,6 +885,56 @@ if(MACRDP_OUTPUT_DIAGNOSTICS_HEADER_OFFSET EQUAL -1
         "FreeRDP output diagnostics patch did not apply completely")
 endif()
 
+file(READ "${MACRDP_FREERDP_SHADOW_HEADER}" MACRDP_SHADOW_HEADER_CONTENT)
+file(READ "${MACRDP_FREERDP_SHADOW_CLIENT}" MACRDP_SHADOW_CLIENT_CONTENT)
+file(READ "${MACRDP_FREERDP_SHADOW_RDPSND_SOURCE}" MACRDP_SHADOW_RDPSND_CONTENT)
+string(FIND "${MACRDP_SHADOW_HEADER_CONTENT}" "MACRDP_CLIENT_SESSION_STATE"
+    MACRDP_CLIENT_SESSION_HEADER_OFFSET)
+string(FIND "${MACRDP_SHADOW_CLIENT_CONTENT}" "MACRDP_CLIENT_SESSION_LIFECYCLE"
+    MACRDP_CLIENT_SESSION_SOURCE_OFFSET)
+string(FIND "${MACRDP_SHADOW_RDPSND_CONTENT}" "MACRDP_RDPSND_SESSION_GATE"
+    MACRDP_CLIENT_SESSION_RDPSND_OFFSET)
+if(MACRDP_CLIENT_SESSION_HEADER_OFFSET EQUAL -1
+   AND MACRDP_CLIENT_SESSION_SOURCE_OFFSET EQUAL -1
+   AND MACRDP_CLIENT_SESSION_RDPSND_OFFSET EQUAL -1)
+    find_program(MACRDP_PATCH_EXECUTABLE patch)
+    if(NOT MACRDP_PATCH_EXECUTABLE)
+        message(FATAL_ERROR
+            "The 'patch' utility is required for the FreeRDP client session lifecycle")
+    endif()
+
+    execute_process(
+        COMMAND "${MACRDP_PATCH_EXECUTABLE}" -N -t -F 0 -p1
+            -i "${MACRDP_FREERDP_CLIENT_SESSION_LIFECYCLE_PATCH}"
+        WORKING_DIRECTORY "${freerdp_SOURCE_DIR}"
+        RESULT_VARIABLE MACRDP_CLIENT_SESSION_PATCH_RESULT
+        OUTPUT_VARIABLE MACRDP_CLIENT_SESSION_PATCH_OUTPUT
+        ERROR_VARIABLE MACRDP_CLIENT_SESSION_PATCH_ERROR
+    )
+    if(NOT MACRDP_CLIENT_SESSION_PATCH_RESULT EQUAL 0)
+        message(FATAL_ERROR
+            "Unable to apply the FreeRDP client session lifecycle patch.\n"
+            "stdout: ${MACRDP_CLIENT_SESSION_PATCH_OUTPUT}\n"
+            "stderr: ${MACRDP_CLIENT_SESSION_PATCH_ERROR}")
+    endif()
+
+    file(READ "${MACRDP_FREERDP_SHADOW_HEADER}" MACRDP_SHADOW_HEADER_CONTENT)
+    file(READ "${MACRDP_FREERDP_SHADOW_CLIENT}" MACRDP_SHADOW_CLIENT_CONTENT)
+    file(READ "${MACRDP_FREERDP_SHADOW_RDPSND_SOURCE}" MACRDP_SHADOW_RDPSND_CONTENT)
+    string(FIND "${MACRDP_SHADOW_HEADER_CONTENT}" "MACRDP_CLIENT_SESSION_STATE"
+        MACRDP_CLIENT_SESSION_HEADER_OFFSET)
+    string(FIND "${MACRDP_SHADOW_CLIENT_CONTENT}" "MACRDP_CLIENT_SESSION_LIFECYCLE"
+        MACRDP_CLIENT_SESSION_SOURCE_OFFSET)
+    string(FIND "${MACRDP_SHADOW_RDPSND_CONTENT}" "MACRDP_RDPSND_SESSION_GATE"
+        MACRDP_CLIENT_SESSION_RDPSND_OFFSET)
+endif()
+if(MACRDP_CLIENT_SESSION_HEADER_OFFSET EQUAL -1
+   OR MACRDP_CLIENT_SESSION_SOURCE_OFFSET EQUAL -1
+   OR MACRDP_CLIENT_SESSION_RDPSND_OFFSET EQUAL -1)
+    message(FATAL_ERROR
+        "FreeRDP client session lifecycle patch is partial or missing")
+endif()
+
 file(WRITE "${MACRDP_FREERDP_PATCH_STAMP}" "${MACRDP_FREERDP_PATCH_HASH}\n")
 
 foreach(MACRDP_FREERDP_CODEC_TARGET IN ITEMS freerdp-codecs freerdp)
@@ -1182,7 +1237,17 @@ add_executable(macrdp-access-policy-test
     src/access_policy_test.cpp
 )
 
+add_executable(macrdp-client-session-lifecycle-test
+    src/client_session_lifecycle_test.cpp
+)
+
 target_compile_options(macrdp-access-policy-test PRIVATE
+    -Wall
+    -Wextra
+    -Wpedantic
+)
+
+target_compile_options(macrdp-client-session-lifecycle-test PRIVATE
     -Wall
     -Wextra
     -Wpedantic
@@ -1197,7 +1262,20 @@ target_include_directories(macrdp-access-policy-test PRIVATE
     ${freerdp_BINARY_DIR}/winpr/include
 )
 
+target_include_directories(macrdp-client-session-lifecycle-test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/macos
+    ${freerdp_SOURCE_DIR}/include
+    ${freerdp_SOURCE_DIR}/winpr/include
+    ${freerdp_BINARY_DIR}/include
+    ${freerdp_BINARY_DIR}/winpr/include
+)
+
 target_link_libraries(macrdp-access-policy-test PRIVATE
+    macrdp_freerdp_shadow
+)
+
+target_link_libraries(macrdp-client-session-lifecycle-test PRIVATE
     macrdp_freerdp_shadow
 )
 
@@ -1337,6 +1415,11 @@ add_test(
 add_test(
     NAME access_policy
     COMMAND macrdp-access-policy-test
+)
+
+add_test(
+    NAME client_session_lifecycle
+    COMMAND macrdp-client-session-lifecycle-test
 )
 
 add_test(
@@ -1529,6 +1612,7 @@ add_test(
 set_tests_properties(
     access_policy
     async_completion
+    client_session_lifecycle
     clipboard_transfer
     display_capture_lifecycle
     display_topology

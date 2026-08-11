@@ -1,0 +1,172 @@
+--- a/include/freerdp/server/shadow.h
++++ b/include/freerdp/server/shadow.h
+@@ -138,6 +138,8 @@
+ 		LONG macrdpAudioMessagesDropped;
+ 		LONGLONG macrdpAudioSuppressedUntil;
+ 		LONG macrdpRdpsndActivated;
++		LONG macrdpSessionState;
++		/* MACRDP_CLIENT_SESSION_STATE */
+ 		UINT64 macrdpOutputQueueMaxDepth;
+ 		UINT64 macrdpOutputQueueMaxCapacity;
+ 		UINT64 macrdpTransportQueueMaxBytes;
+@@ -455,6 +457,17 @@
+ 	WINPR_ATTR_NODISCARD
+ 	FREERDP_API UINT32 shadow_encoder_inflight_frames(rdpShadowEncoder* encoder);
+ 
++	WINPR_ATTR_NODISCARD
++	FREERDP_API BOOL macrdp_shadow_client_session_start(rdpShadowClient* client);
++
++	WINPR_ATTR_NODISCARD
++	FREERDP_API BOOL macrdp_shadow_client_session_begin_stop(rdpShadowClient* client);
++
++	FREERDP_API void macrdp_shadow_client_session_finish_stop(rdpShadowClient* client);
++
++	WINPR_ATTR_NODISCARD
++	FREERDP_API BOOL macrdp_shadow_client_session_is_active(rdpShadowClient* client);
++
+ 	WINPR_ATTR_NODISCARD
+ 	FREERDP_API BOOL shadow_client_rdpsnd_is_active(rdpShadowClient* client);
+ 
+--- a/server/shadow/shadow_client.c
++++ b/server/shadow/shadow_client.c
+@@ -56,6 +56,47 @@
+ 
+ static BOOL shadow_client_h264_wait_idle(rdpShadowClient* client);
+ 
++enum
++{
++	MACRDP_CLIENT_SESSION_NEW = 0,
++	MACRDP_CLIENT_SESSION_ACTIVE = 1,
++	MACRDP_CLIENT_SESSION_STOPPING = 2,
++	MACRDP_CLIENT_SESSION_STOPPED = 3
++};
++
++BOOL macrdp_shadow_client_session_start(rdpShadowClient* client)
++{
++	if (!client)
++		return FALSE;
++	return InterlockedCompareExchange(&client->macrdpSessionState,
++	                                  MACRDP_CLIENT_SESSION_ACTIVE,
++	                                  MACRDP_CLIENT_SESSION_NEW) ==
++	       MACRDP_CLIENT_SESSION_NEW;
++}
++
++BOOL macrdp_shadow_client_session_begin_stop(rdpShadowClient* client)
++{
++	if (!client)
++		return FALSE;
++	return InterlockedCompareExchange(&client->macrdpSessionState,
++	                                  MACRDP_CLIENT_SESSION_STOPPING,
++	                                  MACRDP_CLIENT_SESSION_ACTIVE) ==
++	       MACRDP_CLIENT_SESSION_ACTIVE;
++}
++
++void macrdp_shadow_client_session_finish_stop(rdpShadowClient* client)
++{
++	if (client)
++		InterlockedExchange(&client->macrdpSessionState, MACRDP_CLIENT_SESSION_STOPPED);
++}
++
++BOOL macrdp_shadow_client_session_is_active(rdpShadowClient* client)
++{
++	return client && InterlockedCompareExchange(&client->macrdpSessionState, 0, 0) ==
++	                     MACRDP_CLIENT_SESSION_ACTIVE;
++}
++/* MACRDP_CLIENT_SESSION_LIFECYCLE */
++
+ static BOOL shadow_client_check_channel_fd(rdpShadowClient* client)
+ {
+ 	WINPR_ASSERT(client);
+@@ -344,6 +385,7 @@
+ 	srvSettings = server->settings;
+ 	WINPR_ASSERT(srvSettings);
+ 
++	InterlockedExchange(&client->macrdpSessionState, MACRDP_CLIENT_SESSION_NEW);
+ 	client->surfaceId = 1;
+ 	client->server = server;
+ 	client->subsystem = server->subsystem;
+@@ -676,12 +718,20 @@
+ 		}
+ 	}
+ 
++	BOOL connected = TRUE;
+ 	if (subsystem->ClientConnect)
+ 	{
+-		return subsystem->ClientConnect(subsystem, client);
++		connected = subsystem->ClientConnect(subsystem, client);
+ 	}
+ 
+-	return TRUE;
++	if (!connected)
++		return FALSE;
++	if (!macrdp_shadow_client_session_start(client))
++	{
++		IFCALL(subsystem->ClientDisconnect, subsystem, client);
++		return FALSE;
++	}
++	return TRUE;
+ }
+ 
+ /* Convert rects in sub rect coordinate to client/surface coordinate */
+@@ -3669,8 +3719,16 @@
+ 	}
+ 
+ fail:
++	const BOOL notifySubsystemDisconnect =
++	    macrdp_shadow_client_session_begin_stop(client);
++	client->activated = FALSE;
++	InterlockedExchange(&client->macrdpRdpsndActivated, FALSE);
++	if (notifySubsystemDisconnect)
++	{
++		IFCALL(subsystem->ClientDisconnect, subsystem, client);
++	}
+ 
+-	/* Free channels early because we establish channels in post connect */
++	/* Reject new work and notify the subsystem before releasing channels. */
+ #if defined(CHANNEL_AUDIN_SERVER)
+ 	if (client->audin && !IFCALLRESULT(TRUE, client->audin->IsOpen, client->audin))
+ 	{
+@@ -3697,6 +3755,7 @@
+ 	}
+ 
+ 	shadow_client_channels_free(client);
++	macrdp_shadow_client_session_finish_stop(client);
+ 
+ 	if (UpdateSubscriber)
+ 	{
+@@ -3704,11 +3763,6 @@
+ 		UpdateSubscriber = nullptr;
+ 	}
+ 
+-	if (peer->connected && subsystem->ClientDisconnect)
+-	{
+-		subsystem->ClientDisconnect(subsystem, client);
+-	}
+-
+ out:
+ 	if (client)
+ 	{
+@@ -3816,6 +3870,9 @@
+ 	if (!client || !message)
+ 		return FALSE;
+ 
++	if (!macrdp_shadow_client_session_is_active(client))
++		return FALSE;
++
+ 	if (message->id == SHADOW_MSG_OUT_AUDIO_OUT_SAMPLES_ID)
+ 	{
+ 		rdpTransport* transport = client->context.rdp ? client->context.rdp->transport : nullptr;
+--- a/server/shadow/shadow_rdpsnd.c
++++ b/server/shadow/shadow_rdpsnd.c
+@@ -36,8 +36,10 @@
+ BOOL shadow_client_rdpsnd_is_active(rdpShadowClient* client)
+ {
+ 	WINPR_ASSERT(client);
+-	return InterlockedCompareExchange(&client->macrdpRdpsndActivated, FALSE, FALSE) != FALSE;
++	return macrdp_shadow_client_session_is_active(client) &&
++	       InterlockedCompareExchange(&client->macrdpRdpsndActivated, FALSE, FALSE) != FALSE;
+ }
+ /* MACRDP_RDPSND_LIFECYCLE */
++/* MACRDP_RDPSND_SESSION_GATE */
+ 
+ static BOOL rdpsnd_select_preferred_format(

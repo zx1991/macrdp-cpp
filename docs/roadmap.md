@@ -76,6 +76,11 @@ are acceptance gates rather than promised dates.
   bounded polling, clients receive no audio work before successful format
   selection, and teardown clears negotiation state before releasing the
   channel; deterministic tests require neither capture nor a listener.
+- Atomically gate the complete FreeRDP client session lifecycle. Teardown
+  rejects new output before releasing channels, invokes subsystem disconnect
+  after every successful connect even when the socket is already closed, and
+  prevents late input callbacks from recreating old ownership. A 100-cycle
+  deterministic reconnect test covers input, clipboard, and RDPSND together.
 
 ## P0: correctness and lifecycle
 

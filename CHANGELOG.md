@@ -30,6 +30,10 @@ This project has not published a stable release yet.
   PCM across topology transitions and capture restarts, bounded stopped-stream
   polling, and gated per-client RDPSND work on a successfully selected format
   that is reset before channel teardown.
+- Added an atomic FreeRDP client session lifecycle that rejects output as soon
+  as teardown begins, invokes subsystem disconnect exactly once after every
+  successful connect even on socket failure, and prevents late input callbacks
+  from recreating ownership for a stopped client.
 - Reordered the roadmap around lifecycle reliability, remote-control policy,
   release compliance, and deployment-target validation.
 - Added finite ScreenCaptureKit discovery/start and stop waits, cleanup for

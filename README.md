@@ -23,8 +23,8 @@ shadow server.
 | Clipboard | Bidirectional `CF_UNICODETEXT` and `CF_TEXT` through `NSPasteboard`, with per-connection request correlation |
 | Audio | Generation-isolated screen audio and negotiation-gated RDPSND output; AAC or PCM depends on client formats |
 | Security | NLA and loopback-only listening by default, one concurrent client, explicit legacy-security opt-in, view-only and clipboard opt-out controls |
-| Reliability | Per-client input, clipboard, and audio state, bounded queues, capture restart backoff, and generation-isolated display lifecycles |
-| Validation | Local state-machine and injected capture-lifecycle tests, real FreeRDP loopback client, and deterministic shaped-network profiles |
+| Reliability | Atomically stopped per-client input, clipboard, audio, and output state, bounded queues, capture restart backoff, and generation-isolated display lifecycles |
+| Validation | Local state-machine, 100-cycle reconnect, and injected capture-lifecycle tests, real FreeRDP loopback client, and deterministic shaped-network profiles |
 
 The runtime separates capture, audio, input injection, per-client encoding, and
 FreeRDP transport work. See [Architecture](docs/architecture.md) for ownership

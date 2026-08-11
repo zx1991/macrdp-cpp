@@ -266,7 +266,15 @@ macrdp::InputClientId register_input_client(
 macrdp::InputClientId input_client_id(
     MacShadowSubsystem* subsystem,
     const rdpShadowClient* client) {
-    return register_input_client(subsystem, client);
+    if (subsystem == nullptr || client == nullptr) {
+        return 0;
+    }
+
+    // Only ClientConnect creates ownership. A callback racing teardown must
+    // not recreate state for a client that ClientDisconnect already removed.
+    std::lock_guard lock(subsystem->client_ids_mutex);
+    const auto existing = subsystem->client_ids.find(client);
+    return existing == subsystem->client_ids.end() ? 0 : existing->second;
 }
 
 macrdp::InputClientId unregister_input_client(
@@ -1226,6 +1234,9 @@ bool queue_keyboard_event(
     if (subsystem == nullptr) {
         return false;
     }
+    if (client_id == 0) {
+        return true;
+    }
     InputEvent event;
     event.kind = InputEventKind::keyboard;
     event.client_id = client_id;
@@ -1256,6 +1267,9 @@ bool queue_unicode_event(
     if (subsystem == nullptr) {
         return false;
     }
+    if (client_id == 0) {
+        return true;
+    }
     InputEvent event;
     event.kind = InputEventKind::unicode;
     event.client_id = client_id;
@@ -1271,6 +1285,9 @@ bool queue_synchronize_event(
     UINT32 flags) {
     if (subsystem == nullptr) {
         return false;
+    }
+    if (client_id == 0) {
+        return true;
     }
     InputEvent event;
     event.kind = InputEventKind::synchronize;
@@ -1289,6 +1306,9 @@ bool queue_mouse_event(
     UINT16 y) {
     if (subsystem == nullptr) {
         return false;
+    }
+    if (client_id == 0) {
+        return true;
     }
     {
         std::lock_guard lock(subsystem->input_mutex);
@@ -1339,6 +1359,9 @@ bool queue_extended_mouse_event(
     UINT16 y) {
     if (subsystem == nullptr) {
         return false;
+    }
+    if (client_id == 0) {
+        return true;
     }
     {
         std::lock_guard lock(subsystem->input_mutex);

@@ -61,6 +61,12 @@ removed, capture waits for the same ID to return instead of switching screens.
 
 ## Concurrency boundaries
 
+- Each FreeRDP shadow client has an atomic session state. A successful
+  subsystem connect moves it from new to active; teardown atomically moves it
+  to stopping before any channel resource is released. Broadcast dispatch and
+  RDPSND reject stopping clients. The subsystem disconnect callback runs once
+  for every successful connect regardless of the socket's final connected
+  flag, then channel teardown finishes the stopped state.
 - Screen capture is isolated from protocol callbacks. A capture failure can
   restart with bounded backoff without making the RDP listener thread own
   ScreenCaptureKit state. Content discovery and stream start share a 15-second
@@ -117,10 +123,13 @@ removed, capture waits for the same ID to return instead of switching screens.
   and the subsystem does not
   create its CoreGraphics event source or input worker. This remains the final
   policy boundary even if a FreeRDP control channel changes a client's
-  `mayInteract` flag.
+  `mayInteract` flag. Only `ClientConnect` registers an input client ID;
+  callbacks racing disconnect are acknowledged and discarded instead of
+  recreating ownership for the old pointer value.
 - FreeRDP checks the configured concurrent-client limit in its listener accept
   path before allocating a new shadow client. The default limit is one.
-- Shutdown joins capture, audio, publish, input, and encoder workers in a
+- Shutdown rejects new per-client work, clears subsystem ownership, and then
+  joins channel, capture, audio, publish, input, and encoder workers in a
   defined order before FreeRDP state is released.
 
 The output scheduler records message-queue depth, transport-queue bytes,

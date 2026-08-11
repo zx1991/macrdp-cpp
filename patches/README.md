@@ -1,13 +1,14 @@
 # FreeRDP adaptation patch
 
-`freerdp-macrdp-adaptations.patch` is applied by CMake to the generated
-FreeRDP 3.30.0 source tree. The exact archive URL and SHA-256 are declared in
-the top-level `CMakeLists.txt`.
+The checked-in patches are applied by CMake, in order, to the generated FreeRDP
+3.30.0 source tree. The exact archive URL, SHA-256, patch order, and combined
+patch stamp are declared in the top-level `CMakeLists.txt`.
 
-The patch is kept in this repository so changes to the upstream boundary are
-reviewable without committing a vendor tree. It adds the small hooks needed by
+The patches are kept in this repository so changes to the upstream boundary are
+reviewable without committing a vendor tree. They add the small hooks needed by
 the macOS shadow subsystem: frame snapshots, bounded output/message handling,
-H.264 integration, audio message coalescing, and diagnostics.
+H.264 integration, audio message coalescing, diagnostics, and the atomic client
+session boundary used during disconnect and reconnect.
 
 Do not edit `build/_deps/freerdp-src` directly. When the FreeRDP version
 changes, review every hunk against the new upstream source, update the archive
