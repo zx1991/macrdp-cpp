@@ -89,6 +89,9 @@ are acceptance gates rather than promised dates.
 
 ## P0: correctness and lifecycle
 
+- Correlate delayed FFmpeg H.264 packets with the metadata from their submitted
+  frame before treating the explicit FFmpeg encoder or AVC444 path as
+  Windows-validated.
 - Record the bounded start/stop paths under permission denial, display sleep,
   session lock, and rapid reconfiguration in the
   [supported-hardware matrix](hardware-matrix.md).
@@ -138,6 +141,10 @@ a signed artifact whose minimum OS, dependencies, and licensing are explicit.
   bounded subset belongs in regular CI.
 - Tune capture, encoder, and output scheduling from recorded pipeline metrics;
   retain input-first behavior and bounded queues as invariants.
+- Evaluate partial-frame H.264 conversion only with an implementation that
+  keeps both encoder reference buffers coherent and passes the persistent-canvas
+  multi-frame regression test; full-frame conversion remains the correctness
+  baseline.
 
 Performance work starts after the release-safety gates because benchmark wins
 do not offset an unbounded shutdown, ambiguous access policy, or an artifact

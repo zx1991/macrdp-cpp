@@ -28,6 +28,11 @@ install/upgrade/rollback/uninstall state machine, and server argument
 validation. It does not require Screen Recording permission for the synthetic
 encoder and state-machine tests.
 
+The AVC420 codec test keeps a persistent decoded desktop while changing two
+separated regions over successive frames, then checks both changed and unchanged
+pixels. This catches stale full-frame H.264 references hidden by valid packets
+and otherwise plausible dirty-rectangle metadata.
+
 The access-policy test instantiates the real macOS shadow subsystem without
 starting ScreenCaptureKit. It verifies that view-only synchronize, keyboard,
 Unicode, absolute, relative, and extended-pointer callbacks do not mutate the

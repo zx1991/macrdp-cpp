@@ -102,6 +102,10 @@ removed, capture waits for the same ID to return instead of switching screens.
   transport input and control-channel events before starting the next frame,
   and keeps completed H.264 output pending until the transport is writable, so
   video backpressure does not delay input or clipboard control traffic.
+  AVC420 and AVC444 always convert the complete assembled desktop into the
+  encoder's YUV reference frame. FreeRDP still emits RDPGFX metadata only for
+  changed tiles, but partial YUV conversion is unsafe because alternating
+  reference buffers can retain stale pixels outside the dirty region.
 - Clipboard publication does not begin until FreeRDP receives client
   capabilities. Monitor publications and channel callbacks are serialized per
   connection, and only a response correlated with an outstanding text request

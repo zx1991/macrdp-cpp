@@ -1215,7 +1215,7 @@ index 5aa3ab2..8494577 100644
 +
 +	if (!dirtyRegion || !encodeRegion || width == 0 || height == 0)
 +		return FALSE;
-+
++	fullFrame = TRUE; /* H.264 reference frames require complete YUV input. */
 +	if (fullFrame)
 +	{
 +		encodeRegion->left = 0;
@@ -1651,8 +1651,8 @@ index 5aa3ab2..8494577 100644
  		if (pStatus->gfxOpened && client->areGfxCapsReady)
  		{
 -			/* GFX/h264 always full screen encoded */
-+			/* Keep the GFX surface full-sized, but let H.264 encode only the
-+			 * current dirty region. The metadata still addresses the full surface. */
++			/* H.264 converts a complete reference frame; codec metadata still
++			 * limits the client update to changed tiles on the full GFX surface. */
  			nWidth = freerdp_settings_get_uint32(settings, FreeRDP_DesktopWidth);
  			nHeight = freerdp_settings_get_uint32(settings, FreeRDP_DesktopHeight);
  

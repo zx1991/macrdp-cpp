@@ -2,8 +2,10 @@
 #include <freerdp/codec/h264.h>
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cstdint>
+#include <cstdlib>
 #include <cstdio>
 #include <thread>
 #include <vector>
@@ -66,15 +68,61 @@ void fill_frame(std::vector<std::uint8_t>& frame, std::uint32_t width,
 
 void fill_region(std::vector<std::uint8_t>& frame, std::uint32_t width,
                  const RECTANGLE_16& region, std::uint32_t frame_index) {
+    constexpr std::array<std::array<std::uint8_t, 3>, 6> colors{{
+        {0x18, 0x28, 0xE8},
+        {0xE0, 0x30, 0x20},
+        {0x20, 0xD8, 0x38},
+        {0xD8, 0xD0, 0x20},
+        {0xD8, 0x28, 0xD0},
+        {0x28, 0xD0, 0xD8},
+    }};
+    const auto& color = colors[frame_index % colors.size()];
     for (std::uint32_t y = region.top; y < region.bottom; ++y) {
         for (std::uint32_t x = region.left; x < region.right; ++x) {
             auto* pixel = frame.data() + (static_cast<std::size_t>(y) * width + x) * 4;
-            pixel[0] = static_cast<std::uint8_t>((x + frame_index * 3) & 0xFF);
-            pixel[1] = static_cast<std::uint8_t>((y + frame_index * 5) & 0xFF);
-            pixel[2] = static_cast<std::uint8_t>((x + y + frame_index * 7) & 0xFF);
+            pixel[0] = color[0];
+            pixel[1] = color[1];
+            pixel[2] = color[2];
             pixel[3] = 0xFF;
         }
     }
+}
+
+bool frame_is_close(const std::vector<std::uint8_t>& decoded,
+                    const std::vector<std::uint8_t>& expected,
+                    std::uint32_t width, std::uint32_t height,
+                    std::uint32_t frame_index) {
+    std::uint64_t total_error = 0;
+    std::uint64_t severe_pixels = 0;
+    const auto pixel_count = static_cast<std::uint64_t>(width) * height;
+
+    for (std::uint64_t pixel_index = 0; pixel_index < pixel_count; ++pixel_index) {
+        std::uint8_t maximum_error = 0;
+        for (std::size_t channel = 0; channel < 3; ++channel) {
+            const auto offset = static_cast<std::size_t>(pixel_index) * 4 + channel;
+            const auto actual = static_cast<int>(decoded[offset]);
+            const auto target = static_cast<int>(expected[offset]);
+            const auto error = static_cast<std::uint8_t>(std::abs(actual - target));
+            total_error += error;
+            maximum_error = std::max(maximum_error, error);
+        }
+        severe_pixels += maximum_error > 64;
+    }
+
+    const double mean_error = static_cast<double>(total_error)
+        / static_cast<double>(pixel_count * 3);
+    const std::uint64_t severe_limit = std::max<std::uint64_t>(1, pixel_count / 50);
+    if (mean_error > 12.0 || severe_pixels > severe_limit) {
+        std::fprintf(stderr,
+                     "H.264 frame %u did not preserve the complete desktop "
+                     "(mean error %.2f, severe pixels %llu/%llu)\n",
+                     frame_index,
+                     mean_error,
+                     static_cast<unsigned long long>(severe_pixels),
+                     static_cast<unsigned long long>(pixel_count));
+        return false;
+    }
+    return true;
 }
 
 bool verify_avc444(std::uint32_t width, std::uint32_t height,
@@ -201,7 +249,10 @@ int main() {
     }
 
     const RECTANGLE_16 full_region = {0, 0, width, height};
-    const RECTANGLE_16 dirty_region = {32, 24, 160, 112};
+    constexpr std::array<RECTANGLE_16, 2> dirty_regions{{
+        {16, 16, 112, 80},
+        {208, 104, 304, 168},
+    }};
     std::vector<std::uint8_t> frame(static_cast<std::size_t>(stride) * height);
     std::vector<std::uint8_t> decoded(static_cast<std::size_t>(stride) * height);
     bool saw_idr = false;
@@ -212,11 +263,10 @@ int main() {
     for (std::uint32_t frame_index = 0; frame_index < 8; ++frame_index) {
         if (frame_index == 0) {
             fill_frame(frame, width, height, 0);
-        } else if (frame_index >= 2) {
-            fill_region(frame, width, dirty_region, frame_index);
+        } else {
+            fill_region(frame, width, dirty_regions[(frame_index - 1) % dirty_regions.size()],
+                        frame_index);
         }
-
-        const RECTANGLE_16& region = frame_index < 2 ? full_region : dirty_region;
 
         BYTE* encoded = nullptr;
         UINT32 encoded_size = 0;
@@ -228,7 +278,7 @@ int main() {
             stride,
             width,
             height,
-            &region,
+            &full_region,
             &encoded,
             &encoded_size,
             &meta);
@@ -248,17 +298,15 @@ int main() {
         }
         ++output_count;
         first_output_frame = std::min(first_output_frame, frame_index);
-        if (frame_index >= 2) {
-            for (std::uint32_t rect_index = 0; rect_index < meta.numRegionRects; ++rect_index) {
-                const RECTANGLE_16& rect = meta.regionRects[rect_index];
-                if (rect.left < dirty_region.left || rect.top < dirty_region.top
-                    || rect.right > dirty_region.right || rect.bottom > dirty_region.bottom) {
-                    free_h264_metablock(&meta);
-                    h264_context_free(encoder);
-                    h264_context_free(decoder);
-                    std::fprintf(stderr, "H.264 dirty rectangles escaped the changed region\n");
-                    return 1;
-                }
+        for (std::uint32_t rect_index = 0; rect_index < meta.numRegionRects; ++rect_index) {
+            const RECTANGLE_16& rect = meta.regionRects[rect_index];
+            if (rect.left >= rect.right || rect.top >= rect.bottom
+                || rect.right > width || rect.bottom > height) {
+                free_h264_metablock(&meta);
+                h264_context_free(encoder);
+                h264_context_free(decoder);
+                std::fprintf(stderr, "H.264 metadata contained an invalid desktop rectangle\n");
+                return 1;
             }
         }
         if (!has_annex_b_start_code(encoded, encoded_size)) {
@@ -269,7 +317,6 @@ int main() {
             return 1;
         }
 
-        std::fill(decoded.begin(), decoded.end(), 0);
         if (avc420_decompress(
                 decoder,
                 encoded,
@@ -285,6 +332,12 @@ int main() {
             h264_context_free(encoder);
             h264_context_free(decoder);
             std::fprintf(stderr, "FreeRDP H.264 output could not be decoded\n");
+            return 1;
+        }
+        if (!frame_is_close(decoded, frame, width, height, frame_index)) {
+            free_h264_metablock(&meta);
+            h264_context_free(encoder);
+            h264_context_free(decoder);
             return 1;
         }
 

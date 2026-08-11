@@ -10,7 +10,10 @@ the macOS shadow subsystem: frame snapshots, bounded output/message handling,
 H.264 integration, audio message coalescing, diagnostics, and the atomic client
 session boundary used during disconnect and reconnect. The final capability
 policy patch also keeps RDPGFX 8.1 and 10.x H.264 flag semantics separate so a
-modern client cannot lose AVC420 during capability confirmation.
+modern client cannot lose AVC420 during capability confirmation. AVC420 and
+AVC444 convert a complete desktop frame for every H.264 submission because the
+codec uses full-frame inter-frame references; RDPGFX metadata still limits the
+client update to tiles whose decoded pixels changed.
 
 Do not edit `build/_deps/freerdp-src` directly. When the FreeRDP version
 changes, review every hunk against the new upstream source, update the archive

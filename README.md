@@ -18,7 +18,7 @@ shadow server.
 | Area | Current implementation |
 | --- | --- |
 | Display | Exact selection of one active display with generation-tagged mode-change recovery and newest-frame coalescing |
-| Video | Version-aware GFX/AVC420 through direct VideoToolbox, FFmpeg fallback, optional AVC444, or classic SurfaceBits |
+| Video | Version-aware GFX/AVC420 through direct VideoToolbox, FFmpeg fallback, optional AVC444, or classic SurfaceBits; H.264 uses reference-safe full-frame input |
 | Input | Serialized keyboard, Unicode, pointer, button, drag, and wheel injection through a private CoreGraphics event source |
 | Clipboard | Bidirectional `CF_UNICODETEXT` and `CF_TEXT` through `NSPasteboard`, with per-connection request correlation |
 | Audio | Generation-isolated screen audio and negotiation-gated RDPSND output; AAC or PCM depends on client formats |
