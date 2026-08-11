@@ -112,8 +112,10 @@ removed, capture waits for the same ID to return instead of switching screens.
   stale rectangles on `mstsc`. AVC444 retains its codec-produced metadata.
   For negotiated H.264, the scheduler begins with one reserved or sent frame
   beyond the client's latest RDPGFX `FrameAcknowledge`. Twelve consecutive ACKs
-  no slower than 250 ms promote the bound to two. Slow ACKs, reported decoder
-  depth, transport blockage, queue pressure, or an ACK stall demote it to one.
+  no slower than 250 ms promote the bound to two. Slow ACKs, client-reported
+  buffered graphics bytes, transport blockage, queue pressure, or an ACK stall
+  demote it to one. RDPGFX `queueDepth` is measured in unprocessed bytes, not
+  frames; diagnostics retain its latest and maximum reported values.
   While the window is closed, new capture updates are consumed into the newest
   desktop and marked for retry instead of being encoded. Reservations are made
   before asynchronous encoding, and submissions that produce no packet release

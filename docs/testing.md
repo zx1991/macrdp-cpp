@@ -316,7 +316,10 @@ draining is logged as transport closure, not as a server-internal drain
 failure. `H.264 frame flow` reports the current adaptive window, output
 suppression, reserved and unacknowledged frames, ACK latency, average encoded
 bytes per frame, promotions, demotions, ACK stalls, and per-cause demotion
-counters. `recent_fps` and `recent_bitrate_kbps` cover the latest diagnostic
+counters. `client_queue_last` and `client_queue_max` are the latest and maximum
+client-reported unprocessed graphics bytes; zero means the protocol made queue
+depth unavailable and is not counted as a report. `recent_fps` and
+`recent_bitrate_kbps` cover the latest diagnostic
 interval and are the values to use for current responsiveness. The
 `session_fps` and `session_bitrate_kbps` values cover the whole connection and
 therefore fall during a long client-minimized or suppressed-output interval.

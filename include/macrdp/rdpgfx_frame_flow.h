@@ -33,6 +33,9 @@ typedef struct
 	UINT64 last_ack_latency_ms;
 	UINT64 total_ack_latency_ms;
 	UINT64 max_ack_latency_ms;
+	UINT32 last_client_queue_bytes;
+	UINT32 max_client_queue_bytes;
+	UINT64 client_queue_reports;
 	UINT64 window_promotions;
 	UINT64 window_demotions;
 	UINT64 ack_stalls;
@@ -55,6 +58,9 @@ typedef struct
 	UINT64 last_ack_latency_ms;
 	UINT64 average_ack_latency_ms;
 	UINT64 max_ack_latency_ms;
+	UINT32 last_client_queue_bytes;
+	UINT32 max_client_queue_bytes;
+	UINT64 client_queue_reports;
 	UINT64 oldest_outstanding_ms;
 	UINT64 encoded_bytes;
 	UINT64 average_frame_bytes;

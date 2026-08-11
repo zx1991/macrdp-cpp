@@ -20,7 +20,9 @@ This project has not published a stable release yet.
   from one to at most two frames only after stable ACKs, returns to one under
   decoder or transport pressure, and reports ACK latency, recent and
   session-wide FPS/bitrate, output suppression, and the exact reason for each
-  demotion while input and control traffic remain active.
+  demotion while input and control traffic remain active. Client RDPGFX queue
+  pressure is measured and reported in its protocol-defined unit of buffered
+  graphics bytes rather than frames.
 - Serialized macOS pasteboard access and expanded shaped-link reconnect,
   resize, and clipboard-change validation.
 - Added a capability-gated clipboard monitor, bounded FIFO correlation for

@@ -157,6 +157,17 @@ void macrdp_rdpgfx_frame_flow_acknowledge(macrdp_rdpgfx_frame_flow* flow,
 
 	flow->acknowledged_frames += acknowledged;
 	flow->stall_active = FALSE;
+	flow->last_client_queue_bytes =
+		queue_depth == SUSPEND_FRAME_ACKNOWLEDGEMENT
+			? QUEUE_DEPTH_UNAVAILABLE
+			: queue_depth;
+	if (queue_depth != QUEUE_DEPTH_UNAVAILABLE &&
+	    queue_depth != SUSPEND_FRAME_ACKNOWLEDGEMENT)
+	{
+		if (queue_depth > flow->max_client_queue_bytes)
+			flow->max_client_queue_bytes = queue_depth;
+		flow->client_queue_reports++;
+	}
 	if (sample_sent_at_ms > 0 && now_ms >= sample_sent_at_ms)
 	{
 		const UINT64 latency_ms = now_ms - sample_sent_at_ms;
@@ -171,7 +182,7 @@ void macrdp_rdpgfx_frame_flow_acknowledge(macrdp_rdpgfx_frame_flow* flow,
 			macrdp_rdpgfx_demote(flow, &flow->demotions_ack_latency);
 		}
 		else if (queue_depth != QUEUE_DEPTH_UNAVAILABLE &&
-		         queue_depth != SUSPEND_FRAME_ACKNOWLEDGEMENT && queue_depth >= 2)
+		         queue_depth != SUSPEND_FRAME_ACKNOWLEDGEMENT)
 		{
 			macrdp_rdpgfx_demote(flow, &flow->demotions_queue_depth);
 		}
@@ -271,6 +282,9 @@ void macrdp_rdpgfx_frame_flow_get_stats(const macrdp_rdpgfx_frame_flow* flow,
 	stats->acknowledged_samples = flow->acknowledged_samples;
 	stats->last_ack_latency_ms = flow->last_ack_latency_ms;
 	stats->max_ack_latency_ms = flow->max_ack_latency_ms;
+	stats->last_client_queue_bytes = flow->last_client_queue_bytes;
+	stats->max_client_queue_bytes = flow->max_client_queue_bytes;
+	stats->client_queue_reports = flow->client_queue_reports;
 	stats->window_promotions = flow->window_promotions;
 	stats->window_demotions = flow->window_demotions;
 	stats->ack_stalls = flow->ack_stalls;
