@@ -385,20 +385,22 @@ index 049696aa241572433c852c4b2635a1e0ba11b946..b4c71fa84444673bc2ba99282397ce1b
  #if LIBAVCODEC_VERSION_INT >= AV_VERSION_INT(56, 13, 100)
  	sys->codecEncoderContext->framerate =
  	    (AVRational){ WINPR_ASSERTING_INT_CAST(int, h264->FrameRate), 1 };
-@@ -238,6 +290,17 @@ static BOOL libavcodec_create_encoder_context(H264_CONTEXT* WINPR_RESTRICT h264)
+@@ -238,6 +290,19 @@ static BOOL libavcodec_create_encoder_context(H264_CONTEXT* WINPR_RESTRICT h264)
  	sys->codecEncoderContext->time_base =
  	    (AVRational){ 1, WINPR_ASSERTING_INT_CAST(int, h264->FrameRate) };
  	av_opt_set(sys->codecEncoderContext, "tune", "zerolatency", AV_OPT_SEARCH_CHILDREN);
++	sys->codecEncoderContext->profile = AV_PROFILE_H264_BASELINE;
++	if (av_opt_set(sys->codecEncoderContext, "coder", "vlc", AV_OPT_SEARCH_CHILDREN) < 0)
++		goto EXCEPTION;
 +#ifdef MACRDP_USE_VIDEOTOOLBOX_H264_ENCODING
-+		if (sys->codecEncoder == avcodec_find_encoder_by_name("h264_videotoolbox"))
-+		{
-+			/* MACRDP_VIDEOTOOLBOX_OPTIONS */
-+			if (av_opt_set(sys->codecEncoderContext, "profile", "constrained_baseline", AV_OPT_SEARCH_CHILDREN) < 0 ||
-+			    av_opt_set(sys->codecEncoderContext, "coder", "vlc", AV_OPT_SEARCH_CHILDREN) < 0 ||
-+			    av_opt_set(sys->codecEncoderContext, "realtime", "1", AV_OPT_SEARCH_CHILDREN) < 0 ||
-+			    av_opt_set(sys->codecEncoderContext, "prio_speed", "1", AV_OPT_SEARCH_CHILDREN) < 0)
-+				goto EXCEPTION;
-+		}
++	if (sys->codecEncoder == avcodec_find_encoder_by_name("h264_videotoolbox"))
++	{
++		/* MACRDP_VIDEOTOOLBOX_OPTIONS */
++		if (av_opt_set(sys->codecEncoderContext, "profile", "constrained_baseline", AV_OPT_SEARCH_CHILDREN) < 0 ||
++		    av_opt_set(sys->codecEncoderContext, "realtime", "1", AV_OPT_SEARCH_CHILDREN) < 0 ||
++		    av_opt_set(sys->codecEncoderContext, "prio_speed", "1", AV_OPT_SEARCH_CHILDREN) < 0)
++			goto EXCEPTION;
++	}
 +#endif
  
  	sys->codecEncoderContext->flags |= AV_CODEC_FLAG_LOOP_FILTER;
