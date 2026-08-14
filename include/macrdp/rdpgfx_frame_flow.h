@@ -2,6 +2,8 @@
 
 #include <winpr/wtypes.h>
 
+#include "macrdp/video_adaptation.h"
+
 #ifdef __cplusplus
 extern "C"
 {
@@ -25,6 +27,9 @@ typedef struct
 	UINT32 stable_ack_count;
 	BOOL output_pressure;
 	BOOL stall_active;
+	BOOL output_blocked_demoted;
+	UINT64 output_blocked_since_ms;
+	UINT64 promotion_blocked_until_ms;
 	UINT64 sent_frames;
 	UINT64 acknowledged_frames;
 	UINT64 acknowledged_samples;
@@ -44,6 +49,7 @@ typedef struct
 	UINT64 demotions_output_blocked;
 	UINT64 demotions_queue_pressure;
 	UINT64 demotions_ack_stall;
+	macrdp_video_adaptation video_adaptation;
 } macrdp_rdpgfx_frame_flow;
 
 typedef struct
@@ -78,6 +84,11 @@ typedef struct
 } macrdp_rdpgfx_frame_flow_stats;
 
 void macrdp_rdpgfx_frame_flow_init(macrdp_rdpgfx_frame_flow* flow);
+
+void macrdp_rdpgfx_frame_flow_init_limits(macrdp_rdpgfx_frame_flow* flow,
+	                                      UINT32 max_bitrate_bps,
+	                                      UINT32 max_fps,
+	                                      UINT64 now_ms);
 
 BOOL macrdp_rdpgfx_frame_flow_reserve(macrdp_rdpgfx_frame_flow* flow,
 	                                  UINT32 frame_id,

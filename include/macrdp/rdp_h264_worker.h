@@ -43,6 +43,12 @@ void macrdp_h264_worker_get_stats(
 	const macrdp_h264_worker* worker,
 	macrdp_h264_worker_stats* stats);
 
+/* Apply these per-client targets immediately before the next encode. */
+BOOL macrdp_h264_worker_set_targets(
+	macrdp_h264_worker* worker,
+	UINT32 bitrate_bps,
+	UINT32 frame_rate);
+
 /* Return 1 when accepted, 0 when a previous frame is still in flight, and
  * -1 for invalid input or an internal worker failure. */
 int macrdp_h264_worker_submit(

@@ -13,7 +13,7 @@ ScreenCaptureKit
         v
 capture thread -> newest-frame buffer -> per-client frame/encode worker
                                                    |
-                                      VideoToolbox AVC420 or FFmpeg
+                              OpenH264, VideoToolbox, or FFmpeg
                                                    |
                                              FreeRDP shadow
                                                    |
@@ -32,10 +32,28 @@ RDPGFX capability interpretation is version-aware and per client. Version 8.1
 uses `AVC420_ENABLED`; versions 10 through 10.7 use the inverse
 `AVC_DISABLED` flag for both AVC420 and AVC444 availability. Unknown versions
 are treated as unsupported. The negotiated result chooses only a codec path;
-it does not change the server-wide capture rate or H.264 bitrate because codec
-support is not evidence of current transport capacity. Bounded output queues,
-deferred H.264 completion, and frame coalescing respond to a slow transport
-without creating an unverified bitrate-control loop.
+codec support is not evidence of current transport capacity. The configured
+bitrate and FPS are ceilings. Each client owns an adaptive controller and H.264
+encoder. It tolerates brief blocked writes, reduces bitrate only after two
+seconds of continuous output pressure, and lowers send pacing by one FPS when
+a pressure interval lasts 750 ms. The latter applies only once per continuous
+interval. ACKs of at least two seconds or a 2.5-second ACK stall apply stronger
+send-pacing reductions. Reductions have a cooldown so one congestion interval
+cannot repeatedly collapse the targets. Four ACKs of 1.25 seconds or less
+trigger fast recovery from the conservative start. Above those
+initial targets, recovery becomes additive and requires eight healthy ACKs over
+at least three seconds. Any pressure clears accumulated healthy samples; blocked
+output holds recovery for two seconds, while transport or client queue pressure
+holds it for five. Capture continues at the global FPS ceiling, while bounded
+output queues, deferred H.264 completion, and frame coalescing preserve only the
+newest update for each client's next paced encode.
+
+Per-client pacing applies to every H.264 backend. OpenH264 updates its bitrate
+and frame-rate controls before encoding the next frame, and the direct
+VideoToolbox bridge updates `AverageBitRate` and `ExpectedFrameRate` on its live
+session. The explicit generic FFmpeg encoder path currently receives adaptive
+pacing but does not guarantee that a bitrate change takes effect after its
+codec context has opened.
 
 Audio and clipboard have separate service paths. Audio capture/pacing runs in
 its own loop and publishes bounded PCM chunks to the FreeRDP shadow clients.
@@ -109,18 +127,24 @@ removed, capture waits for the same ID to return instead of switching screens.
   can retain stale pixels outside a dirty region. Default AVC420 also presents
   each packet with one full-desktop RDPGFX rectangle; combining a full-frame
   inter-coded packet with partial presentation metadata can otherwise leave
-  stale rectangles on `mstsc`. The direct VideoToolbox path uses Baseline
+  stale rectangles on `mstsc`. Both VideoToolbox paths use Constrained Baseline
   profile and CAVLC entropy coding so mstsc receives a conservative inter-frame
   stream after the initial IDR. The encoder requests one reference frame where
   the hardware exposes that control. AVC444 retains its codec-produced metadata.
   For negotiated H.264, the scheduler begins with one reserved or sent frame
-  beyond the client's latest RDPGFX `FrameAcknowledge`. Twelve consecutive ACKs
-  no slower than 250 ms promote the bound to two. Slow ACKs, client-reported
-  buffered graphics bytes, transport blockage, queue pressure, or an ACK stall
-  demote it to one. RDPGFX `queueDepth` is measured in unprocessed bytes, not
-  frames; diagnostics retain its latest, maximum, and current demotion threshold.
-  The threshold tracks two average encoded frames and is clamped to 16-64 KiB,
-  so a transient partial-frame buffer does not collapse a healthy two-frame window.
+  beyond the client's latest RDPGFX `FrameAcknowledge`. Four consecutive ACKs
+  no slower than 1.25 seconds open the initial two-frame pipeline; this avoids
+  treating stop-and-wait latency as insufficient capacity. An ACK of at least
+  1.5 seconds, client-reported buffered graphics bytes, transport queue pressure,
+  1.5 seconds of continuous blocked writes, or a 2.5-second ACK stall demotes it
+  to one. Reopening after a demotion requires a five-second cooldown followed by
+  six ACKs no slower than 750 ms. RDPGFX `queueDepth` is measured in unprocessed
+  bytes, not frames; diagnostics retain its latest, maximum, and current
+  demotion threshold.
+  The threshold tracks two average encoded frames with a 16 KiB minimum, so one
+  large encoded frame or a transient partial-frame buffer does not collapse a
+  healthy two-frame window. After any demotion, promotion remains disabled for
+  five seconds to prevent the window oscillating on intermittent queue reports.
   While the window is closed, new capture updates are consumed into the newest
   desktop and marked for retry instead of being encoded. Reservations are made
   before asynchronous encoding, and submissions that produce no packet release

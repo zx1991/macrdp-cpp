@@ -321,6 +321,12 @@ formula_groups.keys.sort.each do |formula_name, formula_version|
 end
 File.write(notices_path, notice_lines.join("\n"))
 
+presets_documentation = compliance_dir.join("PRESETS.md")
+presets_documentation_source = project_source.join("docs", "presets.md")
+raise "preset documentation is missing: #{presets_documentation_source}" unless presets_documentation_source.file?
+
+FileUtils.cp(presets_documentation_source, presets_documentation)
+
 def compliance_properties(paths, package_dir)
   paths.sort.map do |path|
     relative = path.relative_path_from(package_dir).to_s
@@ -370,7 +376,10 @@ root_component = {
     { "name" => "macrdp:license-directory", "value" => "share/macrdp/licenses/macrdp-cpp" }
   ] + project_payload_relatives.map do |relative|
     { "name" => "macrdp:packaged-file-sha256", "value" => "#{relative}=#{sha256(package_dir.join(relative))}" }
-  end + compliance_properties(license_sets.fetch("macrdp-cpp") + [notices_path], package_dir)
+  end + compliance_properties(
+    license_sets.fetch("macrdp-cpp") + [notices_path, presets_documentation],
+    package_dir
+  )
 }
 
 freerdp_ref = "pkg:github/FreeRDP/FreeRDP@3.30.0"

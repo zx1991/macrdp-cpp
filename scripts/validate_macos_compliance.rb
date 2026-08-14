@@ -112,6 +112,10 @@ end
 
 notices = compliance_dir.join("THIRD_PARTY_NOTICES.md")
 raise "third-party notices are missing" unless notices.file? && notices.size.positive?
+presets_documentation = compliance_dir.join("PRESETS.md")
+unless presets_documentation.file? && presets_documentation.size.positive?
+  raise "preset documentation is missing"
+end
 ffmpeg_component = components.find { |component| component["name"] == "ffmpeg" }
 if ffmpeg_component
   configuration = compliance_dir.join("ffmpeg-build-configuration.txt")

@@ -29,6 +29,8 @@ struct EncodeJob {
     UINT32 codec_id = 0;
     RECTANGLE_16 region{};
     bool full_frame = false;
+    UINT32 bitrate_bps = 0;
+    UINT32 frame_rate = 0;
 };
 
 void clear_encoded_frame(macrdp_h264_encoded_frame& frame) {
@@ -96,6 +98,12 @@ struct macrdp_h264_worker {
         // Use a manual-reset event and clear it explicitly when a completion
         // is consumed or a new job is accepted.
         : encoder(encoder), done_event(CreateEvent(nullptr, TRUE, FALSE, nullptr)) {
+        if (encoder != nullptr && encoder->h264 != nullptr) {
+            target_bitrate_bps = h264_context_get_option(
+                encoder->h264, H264_CONTEXT_OPTION_BITRATE);
+            target_frame_rate = h264_context_get_option(
+                encoder->h264, H264_CONTEXT_OPTION_FRAMERATE);
+        }
         if (done_event != nullptr) {
             thread = std::thread([this] { run(); });
         }
@@ -202,10 +210,29 @@ struct macrdp_h264_worker {
             encoded.height = current.height;
             const auto encode_started = std::chrono::steady_clock::now();
             UINT64 output_bytes = 0;
+            const RECTANGLE_16 full_region{
+                0,
+                0,
+                static_cast<UINT16>(current.width),
+                static_cast<UINT16>(current.height),
+            };
 
             if (encoder == nullptr || encoder->h264 == nullptr) {
                 encoded.failed = TRUE;
+            } else if (!h264_context_set_option(
+                           encoder->h264,
+                           H264_CONTEXT_OPTION_BITRATE,
+                           current.bitrate_bps)
+                       || !h264_context_set_option(
+                           encoder->h264,
+                           H264_CONTEXT_OPTION_FRAMERATE,
+                           current.frame_rate)) {
+                encoded.failed = TRUE;
             } else if (current.codec_id == RDPGFX_CODECID_AVC420) {
+                // assembled_frame is the worker's complete desktop snapshot and
+                // the RDP metadata below exposes the packet as a full-frame update.
+                // Convert the complete snapshot so the encoder and client retain
+                // identical reference surfaces across partial capture updates.
                 encoded.codecId = current.codec_id;
                 BYTE* packet = nullptr;
                 UINT32 packet_size = 0;
@@ -216,13 +243,13 @@ struct macrdp_h264_worker {
                     assembled_stride,
                     current.width,
                     current.height,
-                    &current.region,
+                    &full_region,
                     &packet,
                     &packet_size,
                     &encoded.avc420.meta);
                 if (status < 0) {
                     encoded.failed = TRUE;
-                } else if (status > 0) {
+                } else if (status > 0 && packet != nullptr && packet_size > 0) {
                     encoded.avc420.length = packet_size;
                     output_bytes = packet_size;
                     if (!use_full_frame_metadata(
@@ -250,7 +277,7 @@ struct macrdp_h264_worker {
                     current.width,
                     current.height,
                     version,
-                    &current.region,
+                    &full_region,
                     &encoded.avc444.LC,
                     &packet,
                     &packet_size,
@@ -324,6 +351,8 @@ struct macrdp_h264_worker {
     BOOL completion = FALSE;
     BOOL busy = FALSE;
     BOOL stopping = FALSE;
+    UINT32 target_bitrate_bps = 1'000'000;
+    UINT32 target_frame_rate = 30;
     macrdp_h264_worker_stats stats{};
 };
 
@@ -378,6 +407,22 @@ extern "C" void macrdp_h264_worker_get_stats(
     }
     std::lock_guard lock(worker->mutex);
     *stats = worker->stats;
+}
+
+extern "C" BOOL macrdp_h264_worker_set_targets(
+    macrdp_h264_worker* worker,
+    UINT32 bitrate_bps,
+    UINT32 frame_rate) {
+    if (worker == nullptr || bitrate_bps == 0 || frame_rate == 0) {
+        return FALSE;
+    }
+    std::lock_guard lock(worker->mutex);
+    if (worker->stopping) {
+        return FALSE;
+    }
+    worker->target_bitrate_bps = bitrate_bps;
+    worker->target_frame_rate = frame_rate;
+    return TRUE;
 }
 
 extern "C" int macrdp_h264_worker_submit(
@@ -463,6 +508,8 @@ extern "C" int macrdp_h264_worker_submit(
         if (!ResetEvent(worker->done_event)) {
             return -1;
         }
+        next.bitrate_bps = worker->target_bitrate_bps;
+        next.frame_rate = worker->target_frame_rate;
         worker->job = std::move(next);
         worker->busy = TRUE;
         ++worker->stats.submitted;

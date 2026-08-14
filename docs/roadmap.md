@@ -83,9 +83,9 @@ are acceptance gates rather than promised dates.
   deterministic reconnect test covers input, clipboard, and RDPSND together.
 - Make RDPGFX H.264 capability handling version-aware. Version 8.1 uses
   `AVC420_ENABLED`, 10.x uses `AVC_DISABLED`, the 10.6 errata value is covered,
-  and unknown versions fail closed. Codec negotiation remains per client while
-  bitrate and capture rate stay explicit until transport measurements justify
-  a stable control loop.
+  and unknown versions fail closed. Codec negotiation remains per client, and
+  configured bitrate/FPS values are explicit ceilings for the per-client
+  adaptive delivery controller.
 - Make default AVC420 presentation and scheduling client-consistent. Each
   packet uses one full-desktop RDPGFX rectangle. The H.264 window starts at one,
   promotes to a hard maximum of two after stable acknowledgements, and returns

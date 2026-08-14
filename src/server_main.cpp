@@ -10,6 +10,7 @@
 
 #include "macrdp/cliprdr_adapter.h"
 #include "macrdp/config_permissions.hpp"
+#include "macrdp/preset_config.hpp"
 #include "mac_shadow_subsystem.hpp"
 #include "macrdp/videotoolbox_h264.h"
 
@@ -28,6 +29,7 @@
 #include <iostream>
 #include <iterator>
 #include <limits>
+#include <pwd.h>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -48,6 +50,7 @@ enum class H264EncoderMode {
     automatic,
     videotoolbox,
     ffmpeg,
+    openh264,
 };
 
 struct Options {
@@ -62,6 +65,7 @@ struct Options {
     std::filesystem::path config_dir;
     std::uint32_t h264_bitrate = 16'000'000;
     std::uint32_t frame_rate = 30;
+    std::uint32_t h264_key_frame_interval = 0;
     std::uint32_t display_id = 0;
     std::uint32_t max_width = 0;
     std::uint32_t max_height = 0;
@@ -74,10 +78,28 @@ struct Options {
     bool clipboard_enabled = true;
     bool preflight = false;
     bool list_displays = false;
+    bool list_presets = false;
+    bool print_effective_config = false;
     bool password_from_stdin = false;
+    bool password_from_command_line = false;
     std::string password_file;
     std::string log_level = "INFO";
+    std::string preset_name;
+    std::string preset_description;
 };
+
+struct BuiltinPreset {
+    std::string_view name;
+    std::string_view description;
+};
+
+constexpr std::array<BuiltinPreset, 5> kBuiltinPresets{{
+    {"local", "Loopback-only stable OpenH264 session"},
+    {"standard", "Balanced adaptive OpenH264 session"},
+    {"high-quality", "Higher quality and frame-rate ceilings"},
+    {"resource-saving", "Lower resource ceilings with a 1280x720 size limit"},
+    {"view-only", "Screen sharing without input, clipboard, or audio"},
+}};
 
 volatile std::sig_atomic_t g_stop_requested = 0;
 
@@ -101,10 +123,103 @@ void clear_secret(std::string& value) {
     value.clear();
 }
 
+std::string current_username() {
+    const passwd* account = ::getpwuid(::geteuid());
+    return account != nullptr && account->pw_name != nullptr
+        ? account->pw_name
+        : std::string{};
+}
+
+void apply_compatible_defaults(Options& options) {
+    options.port = 3389;
+    options.security = SecurityMode::nla;
+    options.h264_bitrate = 16'000'000;
+    options.frame_rate = 30;
+    options.h264_key_frame_interval = 10;
+    options.display_id = 0;
+    options.max_clients = 1;
+    options.h264_encoder = H264EncoderMode::openh264;
+    options.audio_enabled = false;
+}
+
+bool apply_builtin_preset(std::string_view name, Options& options) {
+    std::string_view canonical_name = name;
+    if (name == "trusted-lan") {
+        canonical_name = "standard";
+    } else if (name == "smooth-lan") {
+        canonical_name = "high-quality";
+    } else if (name == "low-bandwidth") {
+        canonical_name = "resource-saving";
+    }
+
+    if (canonical_name == "local") {
+        apply_compatible_defaults(options);
+        options.bind_address = "127.0.0.1";
+    } else if (canonical_name == "standard") {
+        apply_compatible_defaults(options);
+        options.bind_address = "0.0.0.0";
+    } else if (canonical_name == "high-quality") {
+        apply_compatible_defaults(options);
+        options.bind_address = "0.0.0.0";
+        options.h264_bitrate = 24'000'000;
+        options.frame_rate = 30;
+        options.h264_key_frame_interval = 30;
+    } else if (canonical_name == "resource-saving") {
+        apply_compatible_defaults(options);
+        options.bind_address = "0.0.0.0";
+        options.h264_bitrate = 4'000'000;
+        options.frame_rate = 10;
+        options.h264_key_frame_interval = 25;
+        options.max_width = 1280;
+        options.max_height = 720;
+    } else if (name == "view-only") {
+        apply_compatible_defaults(options);
+        options.bind_address = "0.0.0.0";
+        options.view_only = true;
+        options.clipboard_enabled = false;
+    } else {
+        return false;
+    }
+    const auto preset = std::find_if(
+        kBuiltinPresets.begin(), kBuiltinPresets.end(), [canonical_name](const auto& candidate) {
+            return candidate.name == canonical_name;
+        });
+    options.preset_name = std::string(name);
+    options.preset_description = preset == kBuiltinPresets.end() ? std::string{}
+        : canonical_name == name ? std::string(preset->description)
+                                 : "Compatibility alias for '"
+            + std::string(canonical_name) + "': " + std::string(preset->description);
+    return true;
+}
+
+bool read_password_from_terminal(const std::string& username, std::string& password) {
+    if (!::isatty(STDIN_FILENO)) {
+        return false;
+    }
+
+    const std::string prompt = "RDP password for " + username + ": ";
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+    char* input = ::getpass(prompt.c_str());
+#pragma clang diagnostic pop
+    if (input == nullptr) {
+        return false;
+    }
+    password = input;
+    volatile char* secret = input;
+    while (*secret != '\0') {
+        *secret++ = '\0';
+    }
+    return !password.empty();
+}
+
 void print_usage(const char* program) {
     std::cout
         << "Usage: " << program << " [options]\n"
         << "\n"
+        << "  --preset <name>            Apply a built-in or user preset\n"
+        << "  --list-presets             List available presets and exit\n"
+        << "  --print-effective-config   Print merged non-secret settings and exit\n"
         << "  --preflight                 Check macOS capture/input access and exit\n"
         << "  --list-displays             List active display IDs and exit\n"
         << "  --display-id <number>       Capture one exact display (default: main)\n"
@@ -114,15 +229,23 @@ void print_usage(const char* program) {
         << "  --security <nla|tls|rdp>    Security protocol (default: nla)\n"
         << "  --allow-insecure-security   Required with TLS/RDP compatibility modes\n"
         << "  --view-only                 Disable remote keyboard and pointer input\n"
+        << "  --input                     Enable input when overriding a preset\n"
         << "  --no-clipboard              Disable clipboard redirection\n"
-        << "  --bitrate <value>           H.264 rate, e.g. 16M (default: 16M)\n"
-        << "  --fps <number>              Capture/encode rate, 1-60 (default: 30)\n"
+        << "  --clipboard                 Enable clipboard when overriding a preset\n"
+        << "  --max-bitrate <value>       Per-client adaptive H.264 ceiling, e.g. 16M\n"
+        << "  --bitrate <value>           Compatibility alias for --max-bitrate\n"
+        << "  --max-fps <number>          Capture/send ceiling, 1-60 (default: 30)\n"
+        << "  --fps <number>              Compatibility alias for --max-fps\n"
+        << "  --h264-keyint <frames>      Key-frame interval, 1-300 (1: diagnostic all-IDR)\n"
         << "  --max-width <pixels>        Optional capture width limit\n"
         << "  --max-height <pixels>       Optional capture height limit\n"
-        << "  --h264-encoder <mode>       H.264 path: auto, direct videotoolbox, or ffmpeg\n"
+        << "  --h264-encoder <mode>       H.264 path: auto, videotoolbox, ffmpeg, or openh264\n"
         << "  --avc444                    Use AVC444 (higher CPU and color fidelity)\n"
+        << "  --avc420                    Use AVC420 when overriding a preset\n"
         << "  --no-gfx                    Use incremental SurfaceBits updates instead of GFX/H.264\n"
+        << "  --gfx                       Enable GFX/H.264 when overriding a preset\n"
         << "  --no-audio                  Disable screen audio capture and RDPSND output\n"
+        << "  --audio                     Enable audio when overriding a preset\n"
         << "  --user <name>               Login user for generated SAM/TLS auth\n"
         << "  --domain <name>             Optional login domain\n"
         << "  --password <value>          Login password (visible in process list)\n"
@@ -133,7 +256,9 @@ void print_usage(const char* program) {
         << "  --log-level <level>         FreeRDP log level (default: INFO)\n"
         << "  --help                      Show this help\n"
         << "\n"
-        << "NLA requires --sam-file or a non-empty --user/--password pair.\n";
+        << "NLA requires --sam-file or a non-empty --user/--password pair.\n"
+        << "Presets use the current macOS user and main display unless overridden.\n"
+        << "User presets: <config-dir>/presets/<name>.conf (see docs/presets.md).\n";
 }
 
 bool parse_port(std::string_view value, std::uint16_t& port) {
@@ -220,6 +345,8 @@ bool parse_h264_encoder(std::string_view value, H264EncoderMode& mode) {
         mode = H264EncoderMode::videotoolbox;
     } else if (value == "ffmpeg") {
         mode = H264EncoderMode::ffmpeg;
+    } else if (value == "openh264") {
+        mode = H264EncoderMode::openh264;
     } else {
         return false;
     }
@@ -234,8 +361,224 @@ const char* h264_encoder_name(H264EncoderMode mode) {
         return "videotoolbox";
     case H264EncoderMode::ffmpeg:
         return "ffmpeg";
+    case H264EncoderMode::openh264:
+        return "openh264";
     }
     return "unknown";
+}
+
+const char* security_name(SecurityMode mode) {
+    switch (mode) {
+    case SecurityMode::nla:
+        return "nla";
+    case SecurityMode::tls:
+        return "tls";
+    case SecurityMode::rdp:
+        return "rdp";
+    }
+    return "unknown";
+}
+
+bool parse_boolean(std::string_view value, bool& result) {
+    if (value == "true") {
+        result = true;
+    } else if (value == "false") {
+        result = false;
+    } else {
+        return false;
+    }
+    return true;
+}
+
+std::filesystem::path preset_directory(const Options& options) {
+    return options.config_dir / "presets";
+}
+
+bool apply_preset_setting(const macrdp::PresetSetting& setting, Options& options,
+                          std::string& error) {
+    const auto invalid = [&](std::string_view expectation) {
+        error = "line " + std::to_string(setting.line) + ": '" + setting.key
+            + "' " + std::string(expectation);
+        return false;
+    };
+    const std::string_view value = setting.value;
+    if (setting.key == "description") {
+        options.preset_description = setting.value;
+    } else if (setting.key == "port") {
+        if (!parse_port(value, options.port)) {
+            return invalid("must be between 1 and 65535");
+        }
+    } else if (setting.key == "bind-address") {
+        if (value.empty() || value.find(',') != std::string_view::npos) {
+            return invalid("must be one address without commas");
+        }
+        options.bind_address = setting.value;
+    } else if (setting.key == "max-clients") {
+        if (!parse_uint32_range(value, 1, 64, options.max_clients)) {
+            return invalid("must be between 1 and 64");
+        }
+    } else if (setting.key == "security") {
+        if (!parse_security(value, options.security)) {
+            return invalid("must be nla, tls, or rdp");
+        }
+    } else if (setting.key == "allow-insecure-security") {
+        if (!parse_boolean(value, options.allow_insecure_security)) {
+            return invalid("must be true or false");
+        }
+    } else if (setting.key == "user") {
+        options.username = setting.value;
+    } else if (setting.key == "domain") {
+        options.domain = setting.value;
+    } else if (setting.key == "display-id") {
+        if (value == "main") {
+            options.display_id = 0;
+        } else if (!parse_uint32_range(
+                       value, 1, std::numeric_limits<std::uint32_t>::max(),
+                       options.display_id)) {
+            return invalid("must be main or an active display ID");
+        }
+    } else if (setting.key == "bitrate" || setting.key == "max-bitrate") {
+        if (!parse_bitrate(value, options.h264_bitrate)) {
+            return invalid("must be a positive bps, Kbps, or Mbps value");
+        }
+    } else if (setting.key == "fps" || setting.key == "max-fps") {
+        if (!parse_uint32_range(value, 1, 60, options.frame_rate)) {
+            return invalid("must be between 1 and 60");
+        }
+    } else if (setting.key == "h264-keyint") {
+        if (value == "auto") {
+            options.h264_key_frame_interval = 0;
+        } else if (!parse_uint32_range(value, 1, 300, options.h264_key_frame_interval)) {
+            return invalid("must be auto or between 1 and 300");
+        }
+    } else if (setting.key == "h264-encoder") {
+        if (!parse_h264_encoder(value, options.h264_encoder)) {
+            return invalid("must be auto, videotoolbox, ffmpeg, or openh264");
+        }
+    } else if (setting.key == "max-width") {
+        if (value == "none") {
+            options.max_width = 0;
+        } else if (!parse_uint32_range(value, 1, std::numeric_limits<std::uint16_t>::max(),
+                                       options.max_width)) {
+            return invalid("must be none or between 1 and 65535");
+        }
+    } else if (setting.key == "max-height") {
+        if (value == "none") {
+            options.max_height = 0;
+        } else if (!parse_uint32_range(value, 1, std::numeric_limits<std::uint16_t>::max(),
+                                       options.max_height)) {
+            return invalid("must be none or between 1 and 65535");
+        }
+    } else if (setting.key == "audio") {
+        if (!parse_boolean(value, options.audio_enabled)) {
+            return invalid("must be true or false");
+        }
+    } else if (setting.key == "input") {
+        bool enabled = false;
+        if (!parse_boolean(value, enabled)) {
+            return invalid("must be true or false");
+        }
+        options.view_only = !enabled;
+    } else if (setting.key == "clipboard") {
+        if (!parse_boolean(value, options.clipboard_enabled)) {
+            return invalid("must be true or false");
+        }
+    } else if (setting.key == "gfx") {
+        bool enabled = false;
+        if (!parse_boolean(value, enabled)) {
+            return invalid("must be true or false");
+        }
+        options.no_gfx = !enabled;
+    } else if (setting.key == "avc444") {
+        if (!parse_boolean(value, options.avc444)) {
+            return invalid("must be true or false");
+        }
+    } else if (setting.key == "log-level") {
+        options.log_level = setting.value;
+    } else if (setting.key == "extends") {
+        return true;
+    } else if (setting.key == "password-file") {
+        if (!std::filesystem::path(setting.value).is_absolute()) {
+            return invalid("must be an absolute path");
+        }
+        options.sam_file.clear();
+        options.password_file = setting.value;
+    } else if (setting.key == "sam-file") {
+        if (!std::filesystem::path(setting.value).is_absolute()) {
+            return invalid("must be an absolute path");
+        }
+        options.password_file.clear();
+        options.sam_file = setting.value;
+    } else if (setting.key == "password" || setting.key == "password-stdin") {
+        return invalid("is forbidden in presets; supply credentials at startup");
+    } else {
+        return invalid("is not a supported preset key");
+    }
+    return true;
+}
+
+bool load_named_preset(std::string_view name, Options& options,
+                       std::vector<std::string>& chain, std::string& error) {
+    if (!macrdp::valid_preset_name(name)) {
+        error = "Invalid preset name '" + std::string(name)
+            + "'; use letters, numbers, '.', '_', or '-'";
+        return false;
+    }
+    if (std::find(chain.begin(), chain.end(), name) != chain.end()) {
+        error = "Preset inheritance cycle at '" + std::string(name) + "'";
+        return false;
+    }
+    if (chain.size() >= 8) {
+        error = "Preset inheritance exceeds 8 levels";
+        return false;
+    }
+
+    if (apply_builtin_preset(name, options)) {
+        return true;
+    }
+
+    chain.emplace_back(name);
+    const auto path = preset_directory(options) / (std::string(name) + ".conf");
+    std::vector<macrdp::PresetSetting> settings;
+    if (!macrdp::load_preset_file(path, settings, error)) {
+        chain.pop_back();
+        return false;
+    }
+
+    const auto extends = std::find_if(settings.begin(), settings.end(), [](const auto& setting) {
+        return setting.key == "extends";
+    });
+    const auto password_file = std::find_if(
+        settings.begin(), settings.end(), [](const auto& setting) {
+            return setting.key == "password-file";
+        });
+    const auto sam_file = std::find_if(settings.begin(), settings.end(), [](const auto& setting) {
+        return setting.key == "sam-file";
+    });
+    if (password_file != settings.end() && sam_file != settings.end()) {
+        error = path.string() + ": specify only one of 'password-file' and 'sam-file'";
+        chain.pop_back();
+        return false;
+    }
+    if (extends != settings.end()
+        && !load_named_preset(extends->value, options, chain, error)) {
+        error = path.string() + ":" + std::to_string(extends->line) + ": " + error;
+        chain.pop_back();
+        return false;
+    }
+
+    options.preset_name = std::string(name);
+    options.preset_description = "User preset " + path.string();
+    for (const auto& setting : settings) {
+        std::string setting_error;
+        if (!apply_preset_setting(setting, options, setting_error)) {
+            error = path.string() + ":" + setting_error;
+            chain.pop_back();
+            return false;
+        }
+    }
+    chain.pop_back();
+    return true;
 }
 
 bool next_value(int& index, int argc, char** argv, std::string& value) {
@@ -315,16 +658,55 @@ bool read_password_file(const std::filesystem::path& path, std::string& password
 
 bool parse_options(int argc, char** argv, Options& options) {
     options.config_dir = default_config_dir();
+
+    // Resolve the configuration root first so preset lookup does not depend on
+    // whether --config-dir appears before or after --preset.
+    bool saw_cli_credential_source = false;
+    for (int index = 1; index < argc; ++index) {
+        if (std::string_view(argv[index]) == "--config-dir") {
+            if (index + 1 >= argc || argv[index + 1][0] == '\0') {
+                std::cerr << "--config-dir requires a non-empty value\n";
+                return false;
+            }
+            options.config_dir = argv[++index];
+        }
+    }
+
+    bool saw_preset = false;
+    for (int index = 1; index < argc; ++index) {
+        if (std::string_view(argv[index]) != "--preset") {
+            continue;
+        }
+        if (saw_preset || index + 1 >= argc) {
+            std::cerr << "--preset requires one preset name\n";
+            return false;
+        }
+        saw_preset = true;
+        const std::string_view preset = argv[++index];
+        std::vector<std::string> chain;
+        std::string error;
+        if (!load_named_preset(preset, options, chain, error)) {
+            std::cerr << "Unable to load preset '" << preset << "': " << error << '\n';
+            return false;
+        }
+    }
+
     for (int index = 1; index < argc; ++index) {
         const std::string_view argument = argv[index];
         std::string value;
         if (argument == "--help" || argument == "-h") {
             print_usage(argv[0]);
             return false;
+        } else if (argument == "--preset") {
+            ++index;
         } else if (argument == "--preflight") {
             options.preflight = true;
         } else if (argument == "--list-displays") {
             options.list_displays = true;
+        } else if (argument == "--list-presets") {
+            options.list_presets = true;
+        } else if (argument == "--print-effective-config") {
+            options.print_effective_config = true;
         } else if (argument == "--display-id") {
             if (!next_value(index, argc, argv, value)
                 || !parse_uint32_range(
@@ -362,16 +744,24 @@ bool parse_options(int argc, char** argv, Options& options) {
             }
         } else if (argument == "--allow-insecure-security") {
             options.allow_insecure_security = true;
-        } else if (argument == "--bitrate") {
+        } else if (argument == "--bitrate" || argument == "--max-bitrate") {
             if (!next_value(index, argc, argv, value)
                 || !parse_bitrate(value, options.h264_bitrate)) {
-                std::cerr << "--bitrate must be a positive value in bps, Kbps, or Mbps\n";
+                std::cerr << argument
+                          << " must be a positive value in bps, Kbps, or Mbps\n";
                 return false;
             }
-        } else if (argument == "--fps") {
+        } else if (argument == "--fps" || argument == "--max-fps") {
             if (!next_value(index, argc, argv, value)
                 || !parse_uint32_range(value, 1, 60, options.frame_rate)) {
-                std::cerr << "--fps must be between 1 and 60\n";
+                std::cerr << argument << " must be between 1 and 60\n";
+                return false;
+            }
+        } else if (argument == "--h264-keyint") {
+            if (!next_value(index, argc, argv, value)
+                || !parse_uint32_range(
+                    value, 1, 300, options.h264_key_frame_interval)) {
+                std::cerr << "--h264-keyint must be between 1 and 300\n";
                 return false;
             }
         } else if (argument == "--max-width") {
@@ -397,19 +787,29 @@ bool parse_options(int argc, char** argv, Options& options) {
         } else if (argument == "--h264-encoder") {
             if (!next_value(index, argc, argv, value)
                 || !parse_h264_encoder(value, options.h264_encoder)) {
-                std::cerr << "--h264-encoder must be auto, videotoolbox, or ffmpeg\n";
+                std::cerr << "--h264-encoder must be auto, videotoolbox, ffmpeg, or openh264\n";
                 return false;
             }
         } else if (argument == "--avc444") {
             options.avc444 = true;
+        } else if (argument == "--avc420") {
+            options.avc444 = false;
         } else if (argument == "--no-gfx") {
             options.no_gfx = true;
+        } else if (argument == "--gfx") {
+            options.no_gfx = false;
         } else if (argument == "--no-audio") {
             options.audio_enabled = false;
+        } else if (argument == "--audio") {
+            options.audio_enabled = true;
         } else if (argument == "--view-only") {
             options.view_only = true;
+        } else if (argument == "--input") {
+            options.view_only = false;
         } else if (argument == "--no-clipboard") {
             options.clipboard_enabled = false;
+        } else if (argument == "--clipboard") {
+            options.clipboard_enabled = true;
         } else if (argument == "--user") {
             if (!next_value(index, argc, argv, options.username)) {
                 std::cerr << "--user requires a non-empty value\n";
@@ -421,32 +821,53 @@ bool parse_options(int argc, char** argv, Options& options) {
                 return false;
             }
         } else if (argument == "--password") {
-            if (options.password_from_stdin || !options.password_file.empty()
+            if (saw_cli_credential_source
                 || !next_value(index, argc, argv, options.password)) {
-                std::cerr << "--password requires a non-empty value and cannot be combined with"
-                             " --password-stdin or --password-file\n";
+                std::cerr << "Use only one of --password, --password-stdin,"
+                             " --password-file, and --sam-file\n";
                 return false;
             }
+            saw_cli_credential_source = true;
+            options.password_from_command_line = true;
+            options.password_from_stdin = false;
+            options.password_file.clear();
+            options.sam_file.clear();
         } else if (argument == "--password-stdin") {
-            if (!options.password.empty() || options.password_from_stdin
-                || !options.password_file.empty()) {
-                std::cerr << "Use only one of --password, --password-stdin, and"
-                             " --password-file\n";
+            if (saw_cli_credential_source) {
+                std::cerr << "Use only one of --password, --password-stdin,"
+                             " --password-file, and --sam-file\n";
                 return false;
             }
+            saw_cli_credential_source = true;
+            clear_secret(options.password);
+            options.password_from_command_line = false;
             options.password_from_stdin = true;
+            options.password_file.clear();
+            options.sam_file.clear();
         } else if (argument == "--password-file") {
-            if (!next_value(index, argc, argv, options.password_file)
-                || !options.password.empty() || options.password_from_stdin) {
-                std::cerr << "Use only one of --password, --password-stdin, and"
-                             " --password-file\n";
+            if (saw_cli_credential_source
+                || !next_value(index, argc, argv, options.password_file)) {
+                std::cerr << "Use only one of --password, --password-stdin,"
+                             " --password-file, and --sam-file\n";
                 return false;
             }
+            saw_cli_credential_source = true;
+            clear_secret(options.password);
+            options.password_from_command_line = false;
+            options.password_from_stdin = false;
+            options.sam_file.clear();
         } else if (argument == "--sam-file") {
-            if (!next_value(index, argc, argv, options.sam_file)) {
-                std::cerr << "--sam-file requires a non-empty value\n";
+            if (saw_cli_credential_source
+                || !next_value(index, argc, argv, options.sam_file)) {
+                std::cerr << "Use only one of --password, --password-stdin,"
+                             " --password-file, and --sam-file\n";
                 return false;
             }
+            saw_cli_credential_source = true;
+            clear_secret(options.password);
+            options.password_from_command_line = false;
+            options.password_from_stdin = false;
+            options.password_file.clear();
         } else if (argument == "--config-dir") {
             if (!next_value(index, argc, argv, value)) {
                 std::cerr << "--config-dir requires a non-empty value\n";
@@ -465,14 +886,21 @@ bool parse_options(int argc, char** argv, Options& options) {
         }
     }
 
-    if (options.avc444 && options.h264_encoder == H264EncoderMode::videotoolbox) {
-        std::cerr << "--h264-encoder videotoolbox cannot be used with --avc444\n";
+    if (options.avc444
+        && (options.h264_encoder == H264EncoderMode::videotoolbox
+            || options.h264_encoder == H264EncoderMode::openh264)) {
+        std::cerr << "--h264-encoder videotoolbox/openh264 cannot be used with --avc444\n";
         return false;
     }
 
-    // Discovery and preflight deliberately avoid credential sources,
+    if (!options.preset_name.empty() && options.username.empty()) {
+        options.username = current_username();
+    }
+
+    // Discovery, inspection, and preflight deliberately avoid credential sources,
     // generated configuration, TLS initialization, and listener setup.
-    if (options.list_displays || options.preflight) {
+    if (options.list_displays || options.list_presets || options.print_effective_config
+        || options.preflight) {
         clear_secret(options.password);
         return true;
     }
@@ -508,6 +936,16 @@ bool parse_options(int argc, char** argv, Options& options) {
         const char* environment_password = std::getenv("MACRDP_PASSWORD");
         if (environment_password != nullptr) {
             options.password = environment_password;
+        }
+    }
+
+    if (!options.preset_name.empty() && options.security == SecurityMode::nla
+        && options.sam_file.empty()) {
+        if (options.password.empty()
+            && !read_password_from_terminal(options.username, options.password)
+            && ::isatty(STDIN_FILENO)) {
+            std::cerr << "Unable to read an interactive RDP password\n";
+            return false;
         }
     }
 
@@ -697,7 +1135,11 @@ bool configure_server(rdpShadowServer* server, const Options& options, const std
     // stream and therefore remains on FreeRDP's FFmpeg fallback path.
     const bool use_videotoolbox = !options.avc444
         && options.h264_encoder != H264EncoderMode::ffmpeg;
-    macrdp_vt_h264_encoder_set_enabled(use_videotoolbox ? 1 : 0);
+    const bool use_openh264 = options.h264_encoder == H264EncoderMode::openh264;
+    macrdp_h264_encoder_set_backend(
+        use_openh264 ? MACRDP_H264_BACKEND_OPENH264 : MACRDP_H264_BACKEND_FFMPEG);
+    macrdp_vt_h264_encoder_set_enabled(use_videotoolbox && !use_openh264 ? 1 : 0);
+    macrdp_vt_h264_encoder_set_key_frame_interval(options.h264_key_frame_interval);
     macrdp_shadow_set_capture_options(
         options.display_id,
         options.max_width,
@@ -773,6 +1215,80 @@ int list_displays() {
     return 0;
 }
 
+int list_presets(const Options& options) {
+    for (const auto& preset : kBuiltinPresets) {
+        std::cout << preset.name << "\tbuilt-in\t" << preset.description << '\n';
+    }
+
+    std::vector<std::string> names;
+    std::string error;
+    if (!macrdp::list_preset_files(preset_directory(options), names, error)) {
+        std::cerr << error << '\n';
+        return 1;
+    }
+    for (const auto& name : names) {
+        const bool shadows_builtin = std::any_of(
+            kBuiltinPresets.begin(), kBuiltinPresets.end(), [&name](const auto& preset) {
+                return preset.name == name;
+            });
+        if (!shadows_builtin) {
+            std::cout << name << "\tuser\t"
+                      << (preset_directory(options) / (name + ".conf")) << '\n';
+        }
+    }
+    return 0;
+}
+
+int print_effective_config(const Options& options) {
+    const char* credential_source = "none";
+    if (!options.sam_file.empty()) {
+        credential_source = "sam-file";
+    } else if (!options.password_file.empty()) {
+        credential_source = "password-file";
+    } else if (options.password_from_stdin) {
+        credential_source = "stdin";
+    } else if (options.password_from_command_line) {
+        credential_source = "command-line";
+    } else if (std::getenv("MACRDP_PASSWORD") != nullptr) {
+        credential_source = "environment";
+    } else if (!options.preset_name.empty() && options.security == SecurityMode::nla) {
+        credential_source = "interactive-prompt";
+    }
+
+    std::cout << "preset="
+              << (options.preset_name.empty() ? "none" : options.preset_name) << '\n'
+              << "description=" << options.preset_description << '\n'
+              << "port=" << options.port << '\n'
+              << "bind-address=" << options.bind_address << '\n'
+              << "max-clients=" << options.max_clients << '\n'
+              << "security=" << security_name(options.security) << '\n'
+              << "allow-insecure-security="
+              << (options.allow_insecure_security ? "true" : "false") << '\n'
+              << "user=" << options.username << '\n'
+              << "domain=" << options.domain << '\n'
+              << "credential-source=" << credential_source << '\n'
+              << "display-id="
+              << (options.display_id == 0 ? "main" : std::to_string(options.display_id)) << '\n'
+              << "max-bitrate=" << options.h264_bitrate << '\n'
+              << "max-fps=" << options.frame_rate << '\n'
+              << "h264-encoder=" << h264_encoder_name(options.h264_encoder) << '\n'
+              << "h264-keyint="
+              << (options.h264_key_frame_interval == 0
+                      ? "auto"
+                      : std::to_string(options.h264_key_frame_interval)) << '\n'
+              << "max-width="
+              << (options.max_width == 0 ? "none" : std::to_string(options.max_width)) << '\n'
+              << "max-height="
+              << (options.max_height == 0 ? "none" : std::to_string(options.max_height)) << '\n'
+              << "audio=" << (options.audio_enabled ? "true" : "false") << '\n'
+              << "input=" << (options.view_only ? "false" : "true") << '\n'
+              << "clipboard=" << (options.clipboard_enabled ? "true" : "false") << '\n'
+              << "gfx=" << (options.no_gfx ? "false" : "true") << '\n'
+              << "avc444=" << (options.avc444 ? "true" : "false") << '\n'
+              << "log-level=" << options.log_level << '\n';
+    return 0;
+}
+
 int run_preflight(const Options& options) {
     macrdp_shadow_set_capture_options(
         options.display_id,
@@ -822,6 +1338,12 @@ int main(int argc, char** argv) {
 
     if (options.list_displays) {
         return list_displays();
+    }
+    if (options.list_presets) {
+        return list_presets(options);
+    }
+    if (options.print_effective_config) {
+        return print_effective_config(options);
     }
 
     std::string display_error;
@@ -957,6 +1479,12 @@ int main(int argc, char** argv) {
         return 1;
     }
 
+    if (options.bind_address == "0.0.0.0" || options.bind_address == "[::]"
+        || options.bind_address == "::") {
+        std::cerr << "Warning: macrdp-server is listening on every network interface; "
+                     "use this only behind a firewall or on a trusted LAN/VPN.\n";
+    }
+
     std::signal(SIGINT, handle_signal);
     std::signal(SIGTERM, handle_signal);
     std::cout << "macrdp-server listening on port " << options.port
@@ -966,6 +1494,13 @@ int main(int argc, char** argv) {
                       ? "NLA"
                       : options.security == SecurityMode::tls ? "TLS" : "RDP")
               << " security h264_encoder=" << h264_encoder_name(options.h264_encoder)
+              << " max_bitrate=" << options.h264_bitrate
+              << " max_fps=" << options.frame_rate
+              << " adaptive_video=enabled"
+              << " h264_keyint="
+              << (options.h264_key_frame_interval == 0
+                      ? "auto"
+                      : std::to_string(options.h264_key_frame_interval))
               << " input=" << (options.view_only ? "disabled" : "enabled")
               << " clipboard=" << (options.clipboard_enabled ? "enabled" : "disabled")
               << " display_id=" << options.display_id

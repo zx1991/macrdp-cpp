@@ -38,10 +38,18 @@ The H.264 worker test initializes the real direct VideoToolbox path, changes
 only one region on its second frame, and requires each resulting AVC420 packet
 to carry exactly one full-desktop presentation rectangle. The separate RDPGFX
 flow test covers reservations, cumulative acknowledgements, promotion from one
-to two frames, slow-ACK and output-pressure demotion, empty encoder output,
-stalls, explicit acknowledgement suspension, metrics, and frame-ID wrap.
-Neither test starts a listener, capture session, or Windows client; final
-`mstsc` presentation remains part of the hardware matrix.
+to two frames, transient versus sustained output blockage, slow-ACK and
+output-pressure demotion, empty encoder output, stalls, explicit
+acknowledgement suspension, metrics, and frame-ID wrap. The video-adaptation
+test includes the observed Windows startup ACK sequence (893, 440, 243, and
+412 ms), verifies that it recovers instead of collapsing to the minimum target,
+and separately exercises sub-threshold pressure, one FPS reduction per
+sustained pressure interval, genuinely slow ACKs, recovery quiet periods, and
+stale healthy-sample invalidation. The frame-flow test also checks a
+stop-and-wait Windows startup sequence up to 1.117 seconds, interrupted
+initial probes, post-demotion promotion cooldown, and decoder queue thresholds
+for 80 KiB average frames. Neither test starts a listener, capture session, or
+Windows client; final `mstsc` presentation remains part of the hardware matrix.
 
 The access-policy test instantiates the real macOS shadow subsystem without
 starting ScreenCaptureKit. It verifies that view-only synchronize, keyboard,
@@ -325,6 +333,18 @@ interval and are the values to use for current responsiveness. The
 `session_fps` and `session_bitrate_kbps` values cover the whole connection and
 therefore fall during a long client-minimized or suppressed-output interval.
 Its `final` line retains the session-wide aggregate for short sessions.
+`Adaptive video initialized` reports the per-client conservative starting
+bitrate/FPS and their user ceilings. Later `Adaptive video` lines report each
+change and its reason (`output-blocked`, queue pressure, `ack-latency`,
+`ack-stall`, or `healthy-recovery`). A reason is logged only when a target
+actually changes. Blocked-write intervals below 750 ms are retained in output
+metrics without reducing targets. At 750 ms, one continuous pressure interval
+reduces send pacing by one FPS; it must remain continuous for two seconds before
+bitrate is reduced. Even a shorter pressure event clears pending healthy ACK
+samples and delays recovery for two seconds, or five seconds for
+transport/client queue pressure. Initial recovery is deliberately faster than
+subsequent additive increases. A minimized client is marked suppressed and does
+not reduce its targets merely because it stopped requesting output.
 
 Run the direct profile with:
 

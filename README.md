@@ -33,17 +33,25 @@ and backpressure details.
 RDPGFX codec support is negotiated per client. Version 8.1 clients enable
 AVC420 with `AVC420_ENABLED`, while 10.x clients enable AVC420 and AVC444 by
 omitting `AVC_DISABLED`; unknown versions do not enable either codec. Codec
-capabilities are not a bandwidth measurement, so `--bitrate` and `--fps`
-remain explicit server settings. Slow transports are handled by bounded output
-queues, deferred writes, and newest-frame coalescing rather than speculative
-rate changes. H.264 RDPGFX sessions start with one unacknowledged frame and
-promote to a maximum of two only after 12 stable acknowledgements at 250 ms or
-less. An ACK at 400 ms or more, decoder queue depth of two or more, blocked
-transport, a transport queue above one-sixteenth of its limit, or a 750 ms ACK
-stall immediately returns the window to one. Capture updates continue to be
-consumed and coalesced while the window is full, without delaying input or
-control channels. This keeps dependent AVC420 frames bounded while allowing a
-healthy Windows decoder to overlap one network acknowledgement cycle.
+capabilities are not a bandwidth measurement. `--max-bitrate` and `--max-fps`
+are ceilings; each H.264 client starts conservatively and independently adapts
+its encoder bitrate and send pacing from presentation ACK latency, decoder
+queue depth, transport queue pressure, and blocked writes. Brief write stalls
+are tolerated; a blocked interval reduces send pacing once after 750 ms, while
+bitrate reduction still requires two seconds of continuous pressure. Genuinely
+slow or stalled acknowledgements apply stronger reductions. Four healthy
+acknowledgements drive fast recovery from the conservative starting targets;
+later increases are additive and require a longer healthy interval. Any output
+pressure clears pending recovery samples, and queue pressure holds further
+increases for five seconds. Client output suppression is excluded from
+congestion decisions.
+Capture keeps the global maximum rate and newest updates coalesce before each
+client's next paced encode. The independent RDPGFX frame window starts at one
+and initially probes two after four acknowledgements of 1.25 seconds or less.
+A demotion blocks another promotion for five seconds; reopening then requires
+six acknowledgements of 750 ms or less. This keeps dependent AVC420 frames
+bounded without letting one slow client change another client's delivery
+policy.
 
 ## Current limits
 
@@ -54,6 +62,10 @@ healthy Windows decoder to overlap one network acknowledgement cycle.
 - Clipboard redirection is text-only. File, image, and directory transfer are
   not implemented.
 - RDPSND speaker output is supported, but microphone/AUDIN input is disabled.
+- Adaptive send pacing applies to every H.264 backend. OpenH264 and the direct
+  VideoToolbox bridge also apply bitrate changes to an open encoder; the
+  explicit generic FFmpeg path does not currently guarantee live bitrate
+  reconfiguration.
 - The pinned release dependency set and current Homebrew development packages
   target macOS 15. Older targets need a separately built compatible set.
 - The package and distribution targets create a relocatable, ad-hoc-signed
@@ -81,7 +93,7 @@ The prioritized acceptance gates are tracked in [Roadmap](docs/roadmap.md).
 Install the development dependencies with Homebrew:
 
 ```bash
-brew install cmake ffmpeg openssl@3
+brew install cmake ffmpeg openh264 openssl@3
 ```
 
 ## Build
@@ -150,6 +162,35 @@ Interactive sessions also require Accessibility permission.
 The server checks every permission required by the selected access policy before
 opening the RDP listener.
 
+For the shortest interactive startup, use the balanced OpenH264 preset:
+
+```bash
+./build/macrdp-server --preset standard
+```
+
+It uses TCP 3389, NLA, the current macOS username, the main display, a 16 Mbps
+adaptive bitrate ceiling, a 30 FPS capture/send ceiling, OpenH264, a 10-frame
+key-frame interval, one client, and no audio. It
+prompts for the RDP password without echoing it. The client must enter the
+username shown in that prompt. Override only values that differ, for example
+`--user Xian`, `--display-id 5`, or `--audio`. This preset listens on all
+interfaces and is therefore appropriate only behind a firewall or on a trusted
+LAN/VPN.
+
+The server also includes `local`, `high-quality`, `resource-saving`, and
+`view-only` presets. These names describe server resource and access policy,
+not an assumed client network. Users can add named preset files without
+recompiling the server, inherit another preset, and override any setting on the
+command line.
+See [Server presets](docs/presets.md) for the built-in values, complete file
+format, credential handling, permissions, and LaunchAgent examples. List and
+inspect configurations without starting capture or a listener:
+
+```bash
+./build/macrdp-server --list-presets
+./build/macrdp-server --preset standard --print-effective-config
+```
+
 List active displays without credentials, TCC prompts, or a listening socket:
 
 ```bash
@@ -212,9 +253,11 @@ Access and media controls can be appended to the server command above:
 | Disable clipboard redirection | `--no-clipboard` |
 | Capture a listed display | `--display-id <id>` |
 | Allow up to four concurrent clients | `--max-clients 4` |
-| Higher AVC420 bitrate | `--bitrate 24M` |
+| Raise the adaptive AVC420 bitrate ceiling | `--max-bitrate 24M` |
+| Limit capture and per-client send rate | `--max-fps 15` |
 | Require direct macOS AVC420 | `--h264-encoder videotoolbox` |
 | Use FreeRDP's FFmpeg AVC420 path | `--h264-encoder ffmpeg` |
+| Force every H.264 frame to IDR for diagnosis | `--h264-keyint 1` |
 | Higher chroma fidelity through FFmpeg | `--avc444` |
 | Classic incremental updates | `--no-gfx` |
 | Disable screen audio and RDPSND | `--no-audio` |
@@ -401,6 +444,8 @@ The standalone capture/encoder example remains available:
 
 - [Architecture](docs/architecture.md): runtime pipeline and ownership
   boundaries.
+- [Server presets](docs/presets.md): built-in presets, user files, inheritance,
+  overrides, and credential handling.
 - [Testing](docs/testing.md): local, loopback, and shaped-network validation.
 - [Hardware matrix](docs/hardware-matrix.md): P0 lifecycle and real Windows
   acceptance record.

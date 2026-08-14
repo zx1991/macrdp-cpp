@@ -14,6 +14,7 @@
 #include "macrdp/input_ownership.hpp"
 #include "macrdp/input_queue.hpp"
 #include "macrdp/input_translation.hpp"
+#include "macrdp/shadow_config.h"
 #include "mac_shadow_subsystem.hpp"
 #include "shadow_screen.h"
 
@@ -33,6 +34,7 @@
 #include <string>
 #include <thread>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -67,6 +69,7 @@ struct DisplaySessionGeometry {
 std::mutex g_capture_config_mutex;
 CaptureConfig g_capture_config;
 std::atomic_bool g_input_enabled{true};
+std::atomic_bool g_audio_enabled{true};
 
 void clear_secret(std::string& value) {
     volatile char* data = value.empty() ? nullptr : value.data();
@@ -126,6 +129,10 @@ struct mac_shadow_subsystem {
     std::thread audio_thread;
     std::atomic_bool stop_requested{false};
     std::mutex lifecycle_mutex;
+    std::mutex capture_clients_mutex;
+    std::condition_variable capture_clients_condition;
+    std::unordered_set<const rdpShadowClient*> capture_clients;
+    std::atomic<std::uint32_t> capture_client_count{0};
     std::mutex display_commit_mutex;
     std::mutex display_geometry_mutex;
     std::optional<DisplaySessionGeometry> display_geometry;
@@ -218,6 +225,71 @@ using MacShadowSubsystem = struct mac_shadow_subsystem;
 constexpr std::size_t kInputQueueLimit = 4096;
 constexpr std::uint16_t kExtendedKeyIdentityBit = 0x0100U;
 constexpr std::uint16_t kExtended1KeyIdentityBit = 0x0200U;
+
+bool register_capture_client(
+    MacShadowSubsystem* subsystem,
+    const rdpShadowClient* client) {
+    if (subsystem == nullptr || client == nullptr) {
+        return false;
+    }
+
+    std::lock_guard lock(subsystem->capture_clients_mutex);
+    if (subsystem->capture_clients.contains(client)) {
+        return true;
+    }
+
+    const bool first_client = subsystem->capture_clients.empty();
+    if (first_client && subsystem->capture != nullptr && !subsystem->capture->start()) {
+        WLog_ERR(TAG, "Unable to resume ScreenCaptureKit for a client: %s",
+                 subsystem->capture->last_error().c_str());
+        return false;
+    }
+
+    subsystem->capture_clients.insert(client);
+    subsystem->capture_client_count.store(
+        static_cast<std::uint32_t>(subsystem->capture_clients.size()),
+        std::memory_order_release);
+    subsystem->force_full_frame.store(true, std::memory_order_release);
+    subsystem->capture_clients_condition.notify_all();
+    if (first_client && subsystem->capture != nullptr) {
+        WLog_INFO(TAG, "Screen capture resumed for the first active client");
+    }
+    return true;
+}
+
+void unregister_capture_client(
+    MacShadowSubsystem* subsystem,
+    const rdpShadowClient* client) {
+    if (subsystem == nullptr || client == nullptr) {
+        return;
+    }
+
+    std::lock_guard lock(subsystem->capture_clients_mutex);
+    if (subsystem->capture_clients.erase(client) == 0) {
+        return;
+    }
+    subsystem->capture_client_count.store(
+        static_cast<std::uint32_t>(subsystem->capture_clients.size()),
+        std::memory_order_release);
+    if (!subsystem->capture_clients.empty()) {
+        return;
+    }
+
+    if (subsystem->capture != nullptr) {
+        subsystem->capture->stop();
+    }
+    {
+        std::lock_guard frame_lock(subsystem->pending_frame_mutex);
+        subsystem->pending_frame.reset();
+    }
+    subsystem->capture_clients_condition.notify_all();
+    WLog_INFO(TAG, "Screen capture paused: no active clients");
+}
+
+bool capture_has_clients(const MacShadowSubsystem* subsystem) {
+    return subsystem != nullptr
+        && subsystem->capture_client_count.load(std::memory_order_acquire) != 0;
+}
 
 std::uint16_t keyboard_key_identity(UINT16 flags, UINT8 code) noexcept {
     return static_cast<std::uint16_t>(code)
@@ -2076,6 +2148,17 @@ DisplayRefreshResult refresh_display_surface(MacShadowSubsystem* subsystem) {
 void capture_loop(MacShadowSubsystem* subsystem) {
     auto retry_delay = std::chrono::milliseconds{250};
     while (!subsystem->stop_requested.load()) {
+        {
+            std::unique_lock lock(subsystem->capture_clients_mutex);
+            subsystem->capture_clients_condition.wait(lock, [subsystem] {
+                return subsystem->stop_requested.load()
+                    || capture_has_clients(subsystem);
+            });
+        }
+        if (subsystem->stop_requested.load()) {
+            break;
+        }
+
         const auto display_status = refresh_display_surface(subsystem);
         if (display_status == DisplayRefreshResult::fatal) {
             request_capture_stop(
@@ -2090,6 +2173,10 @@ void capture_loop(MacShadowSubsystem* subsystem) {
 
         auto frame = subsystem->capture->next_frame(std::chrono::milliseconds{250});
         if (frame.has_value()) {
+            if (!capture_has_clients(subsystem)) {
+                subsystem->capture->recycle_frame(std::move(*frame));
+                continue;
+            }
             subsystem->captured_frames.fetch_add(1, std::memory_order_relaxed);
             subsystem->capture_copy_time_us_total.fetch_add(
                 frame->capture_copy_time_us,
@@ -2119,16 +2206,23 @@ void capture_loop(MacShadowSubsystem* subsystem) {
         }
 
         const std::string error = subsystem->capture->last_error();
-        if (!error.empty() && !subsystem->stop_requested.load()) {
+        if (!error.empty() && !subsystem->stop_requested.load()
+            && capture_has_clients(subsystem)) {
             WLog_WARN(TAG, "Screen capture stream stopped: %s; attempting restart",
                       error.c_str());
             subsystem->capture->stop();
             if (subsystem->stop_requested.load()) {
                 break;
             }
+            if (!capture_has_clients(subsystem)) {
+                continue;
+            }
             std::this_thread::sleep_for(retry_delay);
             if (subsystem->stop_requested.load()) {
                 break;
+            }
+            if (!capture_has_clients(subsystem)) {
+                continue;
             }
             if (!subsystem->capture->start()) {
                 WLog_WARN(TAG, "Screen capture restart failed: %s",
@@ -2288,6 +2382,12 @@ void audio_loop(MacShadowSubsystem* subsystem) {
     std::uint64_t timestamp_ms = 0;
     std::uint64_t test_tone_frame = 0;
     while (!subsystem->stop_requested.load(std::memory_order_acquire)) {
+        if (!capture_has_clients(subsystem)) {
+            pending.clear();
+            pending_display_generation.reset();
+            std::this_thread::sleep_for(std::chrono::milliseconds{50});
+            continue;
+        }
         std::optional<macrdp::AudioFrame> audio;
         if (test_tone_enabled) {
             const auto display_generation = active_display_generation(subsystem);
@@ -2494,17 +2594,10 @@ int mac_shadow_subsystem_start(rdpShadowSubsystem* base) {
     }
     const auto options = capture_options_for_geometry(subsystem, geometry);
     subsystem->capture = std::make_unique<macrdp::DisplayCapture>(options);
-    if (!subsystem->capture->start()) {
-        WLog_ERR(TAG, "Unable to start ScreenCaptureKit: %s",
-                 subsystem->capture->last_error().c_str());
-        subsystem->capture.reset();
-        return -1;
-    }
     if (subsystem->input_enabled) {
         subsystem->input_event_source = CGEventSourceCreate(kCGEventSourceStatePrivate);
         if (subsystem->input_event_source == nullptr) {
             WLog_ERR(TAG, "Unable to create private CoreGraphics input event source");
-            subsystem->capture->stop();
             subsystem->capture.reset();
             return -1;
         }
@@ -2572,6 +2665,11 @@ int mac_shadow_subsystem_start(rdpShadowSubsystem* base) {
         subsystem->client_ids.clear();
         subsystem->next_client_id = 1;
     }
+    {
+        std::lock_guard client_lock(subsystem->capture_clients_mutex);
+        subsystem->capture_clients.clear();
+        subsystem->capture_client_count.store(0, std::memory_order_release);
+    }
     try {
         if (subsystem->input_enabled) {
             subsystem->input_thread = std::thread(input_loop, subsystem);
@@ -2585,6 +2683,7 @@ int mac_shadow_subsystem_start(rdpShadowSubsystem* base) {
         subsystem->stop_requested.store(true);
         subsystem->input_stop_requested.store(true);
         subsystem->capture->stop();
+        subsystem->capture_clients_condition.notify_all();
         subsystem->pending_frame_condition.notify_all();
         subsystem->input_queue_condition.notify_all();
         subsystem->input_queue_space_condition.notify_all();
@@ -2623,6 +2722,7 @@ int mac_shadow_subsystem_stop(rdpShadowSubsystem* base) {
     std::lock_guard lock(subsystem->lifecycle_mutex);
     subsystem->stop_requested.store(true);
     subsystem->input_stop_requested.store(true);
+    subsystem->capture_clients_condition.notify_all();
     subsystem->input_queue_condition.notify_all();
     subsystem->input_queue_space_condition.notify_all();
     if (subsystem->capture != nullptr) {
@@ -2656,6 +2756,11 @@ int mac_shadow_subsystem_stop(rdpShadowSubsystem* base) {
     {
         std::lock_guard client_lock(subsystem->client_ids_mutex);
         subsystem->client_ids.clear();
+    }
+    {
+        std::lock_guard client_lock(subsystem->capture_clients_mutex);
+        subsystem->capture_clients.clear();
+        subsystem->capture_client_count.store(0, std::memory_order_release);
     }
     subsystem->capture.reset();
     if (subsystem->display_topology != nullptr) {
@@ -2814,11 +2919,22 @@ rdpShadowSubsystem* mac_shadow_subsystem_new() {
     };
     subsystem->common.ClientConnect = [](rdpShadowSubsystem* base, rdpShadowClient* client) {
         auto* mac = reinterpret_cast<MacShadowSubsystem*>(base);
-        return mac != nullptr && (!mac->input_enabled || register_input_client(mac, client) != 0);
+        if (mac == nullptr || !register_capture_client(mac, client)) {
+            return false;
+        }
+        if (mac->input_enabled && register_input_client(mac, client) == 0) {
+            unregister_capture_client(mac, client);
+            return false;
+        }
+        return true;
     };
     subsystem->common.ClientDisconnect = [](rdpShadowSubsystem* base, rdpShadowClient* client) {
         auto* mac = reinterpret_cast<MacShadowSubsystem*>(base);
-        if (mac == nullptr || !mac->input_enabled) {
+        if (mac == nullptr) {
+            return;
+        }
+        unregister_capture_client(mac, client);
+        if (!mac->input_enabled) {
             return;
         }
         const auto client_id = unregister_input_client(mac, client);
@@ -2871,10 +2987,23 @@ extern "C" void macrdp_shadow_set_capture_options(
     g_capture_config.max_height = max_height;
     g_capture_config.frame_rate = std::clamp(frame_rate, std::uint32_t{1}, std::uint32_t{60});
     g_capture_config.audio_enabled = audio_enabled;
+    g_audio_enabled.store(audio_enabled, std::memory_order_release);
+}
+
+extern "C" int macrdp_shadow_audio_is_enabled(void) {
+    return g_audio_enabled.load(std::memory_order_acquire) ? 1 : 0;
 }
 
 extern "C" void macrdp_shadow_set_input_enabled(bool enabled) {
     g_input_enabled.store(enabled, std::memory_order_release);
+}
+
+extern "C" std::uint32_t macrdp_shadow_capture_client_count(
+    rdpShadowSubsystem* subsystem) {
+    auto* mac = reinterpret_cast<MacShadowSubsystem*>(subsystem);
+    return mac == nullptr
+        ? 0
+        : mac->capture_client_count.load(std::memory_order_acquire);
 }
 
 bool macrdp_shadow_enumerate_displays(

@@ -1,6 +1,7 @@
 #include <freerdp/server/shadow.h>
 
 #include "macrdp/clipboard_transfer.hpp"
+#include "macrdp/shadow_config.h"
 #include "mac_shadow_subsystem.hpp"
 
 #include <cstddef>
@@ -21,6 +22,7 @@ bool test_reconnect_lifecycle_cycles() {
     constexpr std::size_t reconnect_cycles = 100;
 
     macrdp_shadow_set_input_enabled(true);
+    macrdp_shadow_set_capture_options(0, 0, 0, 30, false);
     RDP_SHADOW_ENTRY_POINTS entry_points{};
     if (!expect(macrdp_shadow_subsystem_entry(&entry_points) > 0,
                 "unable to load the macOS shadow subsystem")) {
@@ -35,8 +37,12 @@ bool test_reconnect_lifecycle_cycles() {
     rdpShadowServer server{};
     subsystem->server = &server;
     bool ok = true;
+    ok = expect(macrdp_shadow_audio_is_enabled() == 0,
+                "disabled audio policy was not observable") && ok;
     rdpShadowClient client{};
     RdpsndServerContext rdpsnd{};
+    ok = expect(macrdp_shadow_capture_client_count(subsystem) == 0,
+                "new subsystem unexpectedly had capture clients") && ok;
     for (std::size_t cycle = 0; cycle < reconnect_cycles; ++cycle) {
         client = rdpShadowClient{};
         rdpsnd = RdpsndServerContext{};
@@ -48,6 +54,8 @@ bool test_reconnect_lifecycle_cycles() {
                     "new client session started active") && ok;
         const bool connected = subsystem->ClientConnect(subsystem, &client);
         ok = expect(connected, "client input registration failed") && ok;
+        ok = expect(macrdp_shadow_capture_client_count(subsystem) == 1,
+                    "connected client did not activate capture") && ok;
         ok = expect(macrdp_shadow_client_session_start(&client),
                     "client session did not enter active state") && ok;
         ok = expect(macrdp_shadow_client_session_is_active(&client),
@@ -88,6 +96,8 @@ bool test_reconnect_lifecycle_cycles() {
         if (notify_disconnect && connected) {
             subsystem->ClientDisconnect(subsystem, &client);
         }
+        ok = expect(macrdp_shadow_capture_client_count(subsystem) == 0,
+                    "disconnected client kept capture active") && ok;
         clipboard.stop();
 
         const auto stopped_x = subsystem->pointerX;

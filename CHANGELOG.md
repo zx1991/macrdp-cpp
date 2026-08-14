@@ -4,6 +4,17 @@ This project has not published a stable release yet.
 
 ## Unreleased
 
+- Added built-in and owner-protected user presets with inheritance, command-line
+  overrides, effective-configuration inspection, secure credential references,
+  and an interactive password prompt for preset launches.
+- Added OpenH264 as an explicit AVC420 backend, including runtime backend and
+  key-frame controls, normalized encoder status handling, and deterministic
+  codec coverage.
+- Added per-client adaptive H.264 bitrate and send pacing driven by presentation
+  acknowledgements and output pressure, with bounded frame-window recovery and
+  detailed delivery diagnostics.
+- Paused ScreenCaptureKit and audio work while no clients are active, resuming
+  capture when the first authenticated client connects.
 - Experimental macOS RDP shadow server with NLA authentication.
 - ScreenCaptureKit display capture and VideoToolbox AVC420 encoding.
 - Constrained direct VideoToolbox AVC420 output to Baseline/CAVLC, avoiding

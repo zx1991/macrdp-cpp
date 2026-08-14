@@ -60,6 +60,7 @@ add_library(macrdp_macos STATIC
 
 add_library(macrdp_config STATIC
     src/config_permissions.cpp
+    src/preset_config.cpp
 )
 
 target_include_directories(macrdp_config PUBLIC
@@ -360,7 +361,8 @@ set(WITH_CLIENT_CHANNELS OFF CACHE BOOL "Do not build client channel plugins" FO
 set(WITH_SERVER_CHANNELS ON CACHE BOOL "Build the required server channels" FORCE)
 set(WITH_SMARTCARD_EMULATE OFF CACHE BOOL "Do not build smartcard emulation" FORCE)
 set(WITH_PCSC OFF CACHE BOOL "Do not build smartcard support" FORCE)
-set(WITH_OPENH264 OFF CACHE BOOL "Use FFmpeg instead of OpenH264" FORCE)
+set(WITH_OPENH264 ON CACHE BOOL "Build the independent OpenH264 AVC420 backend" FORCE)
+set(WITH_OPENH264_LOADING OFF CACHE BOOL "Link the detected OpenH264 library" FORCE)
 set(WITH_OPUS OFF CACHE BOOL "Do not build Opus audio support" FORCE)
 set(WITH_DSP_FFMPEG ON CACHE BOOL "Use FFmpeg audio DSP for RDPSND resampling" FORCE)
 set(WITH_MANPAGES OFF CACHE BOOL "Do not build FreeRDP manpages" FORCE)
@@ -444,6 +446,10 @@ set(MACRDP_FREERDP_RDPGFX_CAPABILITY_PATCH
     "${CMAKE_CURRENT_SOURCE_DIR}/patches/freerdp-rdpgfx-capability-policy.patch")
 set(MACRDP_FREERDP_H264_FLOW_CONTROL_PATCH
     "${CMAKE_CURRENT_SOURCE_DIR}/patches/freerdp-h264-flow-control.patch")
+set(MACRDP_FREERDP_ADAPTIVE_VIDEO_PATCH
+    "${CMAKE_CURRENT_SOURCE_DIR}/patches/freerdp-adaptive-video.patch")
+set(MACRDP_FREERDP_OPENH264_STATUS_PATCH
+    "${CMAKE_CURRENT_SOURCE_DIR}/patches/freerdp-openh264-status.patch")
 file(SHA256 "${MACRDP_FREERDP_PATCH}" MACRDP_FREERDP_PATCH_HASH)
 file(SHA256 "${MACRDP_FREERDP_SURFACE_OUTPUT_PRIORITY_PATCH}"
     MACRDP_FREERDP_SURFACE_OUTPUT_PRIORITY_PATCH_HASH)
@@ -457,8 +463,12 @@ file(SHA256 "${MACRDP_FREERDP_RDPGFX_CAPABILITY_PATCH}"
     MACRDP_RDPGFX_CAPABILITY_PATCH_HASH)
 file(SHA256 "${MACRDP_FREERDP_H264_FLOW_CONTROL_PATCH}"
     MACRDP_H264_FLOW_CONTROL_PATCH_HASH)
+file(SHA256 "${MACRDP_FREERDP_ADAPTIVE_VIDEO_PATCH}"
+    MACRDP_ADAPTIVE_VIDEO_PATCH_HASH)
+file(SHA256 "${MACRDP_FREERDP_OPENH264_STATUS_PATCH}"
+    MACRDP_OPENH264_STATUS_PATCH_HASH)
 string(SHA256 MACRDP_FREERDP_PATCH_HASH
-    "${MACRDP_FREERDP_PATCH_HASH}:${MACRDP_FREERDP_SURFACE_OUTPUT_PRIORITY_PATCH_HASH}:${MACRDP_FREERDP_AUDIO_QUEUE_BOUND_PATCH_HASH}:${MACRDP_OUTPUT_DIAGNOSTICS_PATCH_HASH}:${MACRDP_CLIENT_SESSION_LIFECYCLE_PATCH_HASH}:${MACRDP_RDPGFX_CAPABILITY_PATCH_HASH}:${MACRDP_H264_FLOW_CONTROL_PATCH_HASH}")
+    "${MACRDP_FREERDP_PATCH_HASH}:${MACRDP_FREERDP_SURFACE_OUTPUT_PRIORITY_PATCH_HASH}:${MACRDP_FREERDP_AUDIO_QUEUE_BOUND_PATCH_HASH}:${MACRDP_OUTPUT_DIAGNOSTICS_PATCH_HASH}:${MACRDP_CLIENT_SESSION_LIFECYCLE_PATCH_HASH}:${MACRDP_RDPGFX_CAPABILITY_PATCH_HASH}:${MACRDP_H264_FLOW_CONTROL_PATCH_HASH}:${MACRDP_ADAPTIVE_VIDEO_PATCH_HASH}:${MACRDP_OPENH264_STATUS_PATCH_HASH}")
 set(MACRDP_FREERDP_PATCH_STAMP
     "${CMAKE_CURRENT_BINARY_DIR}/macrdp-freerdp-patch.sha256")
 set(MACRDP_FREERDP_SOURCE_HINT
@@ -541,6 +551,8 @@ set(MACRDP_FREERDP_SHADOW_SCREEN_SOURCE
     "${freerdp_SOURCE_DIR}/server/shadow/shadow_screen.c")
 set(MACRDP_FREERDP_H264_SOURCE
     "${freerdp_SOURCE_DIR}/libfreerdp/codec/h264_ffmpeg.c")
+set(MACRDP_FREERDP_OPENH264_SOURCE
+    "${freerdp_SOURCE_DIR}/libfreerdp/codec/h264_openh264.c")
 set(MACRDP_FREERDP_H264_CORE_SOURCE
     "${freerdp_SOURCE_DIR}/libfreerdp/codec/h264.c")
 set(MACRDP_FREERDP_CHANNEL_SERVER_SOURCE
@@ -568,11 +580,14 @@ foreach(MACRDP_REQUIRED_PATCH_FILE IN ITEMS
     "${MACRDP_FREERDP_CLIENT_SESSION_LIFECYCLE_PATCH}"
     "${MACRDP_FREERDP_RDPGFX_CAPABILITY_PATCH}"
     "${MACRDP_FREERDP_H264_FLOW_CONTROL_PATCH}"
+    "${MACRDP_FREERDP_ADAPTIVE_VIDEO_PATCH}"
+    "${MACRDP_FREERDP_OPENH264_STATUS_PATCH}"
     "${MACRDP_FREERDP_SHADOW_HEADER}"
     "${MACRDP_FREERDP_SHADOW_CLIENT}"
     "${MACRDP_FREERDP_SHADOW_ENCODER_SOURCE}"
     "${MACRDP_FREERDP_SHADOW_SCREEN_SOURCE}"
     "${MACRDP_FREERDP_H264_SOURCE}"
+    "${MACRDP_FREERDP_OPENH264_SOURCE}"
     "${MACRDP_FREERDP_H264_CORE_SOURCE}"
     "${MACRDP_FREERDP_CHANNEL_SERVER_SOURCE}"
     "${MACRDP_FREERDP_SHADOW_SURFACE_SOURCE}"
@@ -763,6 +778,42 @@ else()
     message(FATAL_ERROR
         "Pinned FreeRDP has a partial macrdp adaptation patch; "
         "remove the generated FetchContent source and reconfigure")
+endif()
+
+file(READ "${MACRDP_FREERDP_OPENH264_SOURCE}" MACRDP_FREERDP_OPENH264_CONTENT)
+string(FIND "${MACRDP_FREERDP_OPENH264_CONTENT}"
+    "return status > 0 ? -status : status;"
+    MACRDP_OPENH264_STATUS_OFFSET)
+if(MACRDP_OPENH264_STATUS_OFFSET EQUAL -1)
+    find_program(MACRDP_PATCH_EXECUTABLE patch)
+    if(NOT MACRDP_PATCH_EXECUTABLE)
+        message(FATAL_ERROR
+            "The 'patch' utility is required for OpenH264 status handling")
+    endif()
+
+    execute_process(
+        COMMAND "${MACRDP_PATCH_EXECUTABLE}" -N -t -F 0 -p1
+            -i "${MACRDP_FREERDP_OPENH264_STATUS_PATCH}"
+        WORKING_DIRECTORY "${freerdp_SOURCE_DIR}"
+        RESULT_VARIABLE MACRDP_OPENH264_STATUS_PATCH_RESULT
+        OUTPUT_VARIABLE MACRDP_OPENH264_STATUS_PATCH_OUTPUT
+        ERROR_VARIABLE MACRDP_OPENH264_STATUS_PATCH_ERROR
+    )
+    if(NOT MACRDP_OPENH264_STATUS_PATCH_RESULT EQUAL 0)
+        message(FATAL_ERROR
+            "Unable to apply the FreeRDP OpenH264 status patch.\n"
+            "stdout: ${MACRDP_OPENH264_STATUS_PATCH_OUTPUT}\n"
+            "stderr: ${MACRDP_OPENH264_STATUS_PATCH_ERROR}")
+    endif()
+
+    file(READ "${MACRDP_FREERDP_OPENH264_SOURCE}" MACRDP_FREERDP_OPENH264_CONTENT)
+    string(FIND "${MACRDP_FREERDP_OPENH264_CONTENT}"
+        "return status > 0 ? -status : status;"
+        MACRDP_OPENH264_STATUS_OFFSET)
+endif()
+if(MACRDP_OPENH264_STATUS_OFFSET EQUAL -1)
+    message(FATAL_ERROR
+        "FreeRDP OpenH264 status patch is missing")
 endif()
 
 file(READ "${MACRDP_FREERDP_SHADOW_CLIENT}" MACRDP_SHADOW_CLIENT_CONTENT)
@@ -1041,6 +1092,42 @@ if(MACRDP_H264_FLOW_CONTROL_OFFSET EQUAL -1)
         "FreeRDP H.264 frame flow-control patch is missing")
 endif()
 
+file(READ "${MACRDP_FREERDP_SHADOW_CLIENT}" MACRDP_SHADOW_CLIENT_CONTENT)
+string(FIND "${MACRDP_SHADOW_CLIENT_CONTENT}"
+    "Adaptive video: reason="
+    MACRDP_ADAPTIVE_VIDEO_OFFSET)
+if(MACRDP_ADAPTIVE_VIDEO_OFFSET EQUAL -1)
+    find_program(MACRDP_PATCH_EXECUTABLE patch)
+    if(NOT MACRDP_PATCH_EXECUTABLE)
+        message(FATAL_ERROR
+            "The 'patch' utility is required for adaptive video delivery")
+    endif()
+
+    execute_process(
+        COMMAND "${MACRDP_PATCH_EXECUTABLE}" -N -t -F 0 -p1
+            -i "${MACRDP_FREERDP_ADAPTIVE_VIDEO_PATCH}"
+        WORKING_DIRECTORY "${freerdp_SOURCE_DIR}"
+        RESULT_VARIABLE MACRDP_ADAPTIVE_VIDEO_PATCH_RESULT
+        OUTPUT_VARIABLE MACRDP_ADAPTIVE_VIDEO_PATCH_OUTPUT
+        ERROR_VARIABLE MACRDP_ADAPTIVE_VIDEO_PATCH_ERROR
+    )
+    if(NOT MACRDP_ADAPTIVE_VIDEO_PATCH_RESULT EQUAL 0)
+        message(FATAL_ERROR
+            "Unable to apply the FreeRDP adaptive video patch.\n"
+            "stdout: ${MACRDP_ADAPTIVE_VIDEO_PATCH_OUTPUT}\n"
+            "stderr: ${MACRDP_ADAPTIVE_VIDEO_PATCH_ERROR}")
+    endif()
+
+    file(READ "${MACRDP_FREERDP_SHADOW_CLIENT}" MACRDP_SHADOW_CLIENT_CONTENT)
+    string(FIND "${MACRDP_SHADOW_CLIENT_CONTENT}"
+        "Adaptive video: reason="
+        MACRDP_ADAPTIVE_VIDEO_OFFSET)
+endif()
+if(MACRDP_ADAPTIVE_VIDEO_OFFSET EQUAL -1)
+    message(FATAL_ERROR
+        "FreeRDP adaptive video patch is missing")
+endif()
+
 file(WRITE "${MACRDP_FREERDP_PATCH_STAMP}" "${MACRDP_FREERDP_PATCH_HASH}\n")
 
 foreach(MACRDP_FREERDP_CODEC_TARGET IN ITEMS freerdp-codecs freerdp)
@@ -1057,6 +1144,10 @@ add_library(macrdp_rdpgfx_capabilities STATIC
 
 add_library(macrdp_rdpgfx_frame_flow STATIC
     src/rdpgfx_frame_flow.c
+)
+
+add_library(macrdp_video_adaptation STATIC
+    src/video_adaptation.c
 )
 
 target_include_directories(macrdp_rdpgfx_capabilities
@@ -1091,6 +1182,20 @@ target_compile_options(macrdp_rdpgfx_frame_flow PRIVATE
     -Wpedantic
 )
 
+target_include_directories(macrdp_video_adaptation PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+
+target_compile_options(macrdp_video_adaptation PRIVATE
+    -Wall
+    -Wextra
+    -Wpedantic
+)
+
+target_link_libraries(macrdp_rdpgfx_frame_flow PUBLIC
+    macrdp_video_adaptation
+)
+
 set(MACRDP_FREERDP_SHADOW_SOURCES
     ${freerdp_SOURCE_DIR}/server/shadow/shadow_client.c
     ${freerdp_SOURCE_DIR}/server/shadow/shadow_lobby.c
@@ -1120,6 +1225,7 @@ target_sources(macrdp_freerdp_shadow PRIVATE
 
 target_link_libraries(macrdp_freerdp_shadow PRIVATE
     macrdp_rdpgfx_frame_flow
+    macrdp_video_adaptation
 )
 
 target_include_directories(macrdp_freerdp_shadow
@@ -1329,6 +1435,7 @@ if(MACRDP_FREERDP_WITH_FFMPEG)
     )
 
     target_include_directories(macrdp-freerdp-h264-test PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
         ${freerdp_SOURCE_DIR}/include
         ${freerdp_SOURCE_DIR}/winpr/include
         ${freerdp_BINARY_DIR}/include
@@ -1384,6 +1491,10 @@ add_executable(macrdp-config-permissions-test
     src/config_permissions_test.cpp
 )
 
+add_executable(macrdp-preset-config-test
+    src/preset_config_test.cpp
+)
+
 add_executable(macrdp-access-policy-test
     src/access_policy_test.cpp
 )
@@ -1398,6 +1509,10 @@ add_executable(macrdp-rdpgfx-capabilities-test
 
 add_executable(macrdp-rdpgfx-frame-flow-test
     src/rdpgfx_frame_flow_test.cpp
+)
+
+add_executable(macrdp-video-adaptation-test
+    src/video_adaptation_test.cpp
 )
 
 target_compile_options(macrdp-access-policy-test PRIVATE
@@ -1424,6 +1539,12 @@ target_compile_options(macrdp-rdpgfx-frame-flow-test PRIVATE
     -Wpedantic
 )
 
+target_compile_options(macrdp-video-adaptation-test PRIVATE
+    -Wall
+    -Wextra
+    -Wpedantic
+)
+
 target_include_directories(macrdp-rdpgfx-capabilities-test PRIVATE
     ${freerdp_SOURCE_DIR}/include
     ${freerdp_SOURCE_DIR}/winpr/include
@@ -1444,6 +1565,10 @@ target_link_libraries(macrdp-rdpgfx-capabilities-test PRIVATE
 
 target_link_libraries(macrdp-rdpgfx-frame-flow-test PRIVATE
     macrdp_rdpgfx_frame_flow
+)
+
+target_link_libraries(macrdp-video-adaptation-test PRIVATE
+    macrdp_video_adaptation
 )
 
 target_include_directories(macrdp-access-policy-test PRIVATE
@@ -1479,6 +1604,14 @@ target_compile_options(macrdp-config-permissions-test PRIVATE
 )
 
 target_link_libraries(macrdp-config-permissions-test PRIVATE macrdp_config)
+
+target_compile_options(macrdp-preset-config-test PRIVATE
+    -Wall
+    -Wextra
+    -Wpedantic
+)
+
+target_link_libraries(macrdp-preset-config-test PRIVATE macrdp_config)
 
 target_compile_options(macrdp-input-ownership-test PRIVATE
     -Wall
@@ -1551,6 +1684,11 @@ add_test(
 )
 
 add_test(
+    NAME video_adaptation
+    COMMAND macrdp-video-adaptation-test
+)
+
+add_test(
     NAME display_dimensions
     COMMAND macrdp-display-dimensions-test
 )
@@ -1608,6 +1746,18 @@ add_test(
 add_test(
     NAME config_permissions
     COMMAND macrdp-config-permissions-test
+)
+
+add_test(
+    NAME preset_config
+    COMMAND macrdp-preset-config-test
+)
+
+add_test(
+    NAME preset_cli
+    COMMAND bash
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests/preset_cli_test.sh
+        $<TARGET_FILE:macrdp-server>
 )
 
 add_test(
@@ -1742,6 +1892,15 @@ add_test(
 set_tests_properties(server_invalid_fps PROPERTIES WILL_FAIL TRUE)
 
 add_test(
+    NAME server_invalid_h264_keyint
+    COMMAND macrdp-server
+        --h264-keyint 0
+        --user macrdp-test-user
+        --password test
+)
+set_tests_properties(server_invalid_h264_keyint PROPERTIES WILL_FAIL TRUE)
+
+add_test(
     NAME server_invalid_display_id
     COMMAND bash
         ${CMAKE_CURRENT_SOURCE_DIR}/tests/expect_command_failure.sh
@@ -1777,6 +1936,24 @@ add_test(
         --password test
 )
 set_tests_properties(server_invalid_h264_encoder PROPERTIES WILL_FAIL TRUE)
+
+add_test(
+    NAME server_invalid_preset
+    COMMAND bash
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests/expect_command_failure.sh
+        "Invalid preset name"
+        $<TARGET_FILE:macrdp-server>
+        --preset ../invalid
+)
+
+add_test(
+    NAME server_standard_preset_requires_password_without_tty
+    COMMAND bash
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests/expect_command_failure.sh
+        "NLA requires --sam-file or non-empty --user and --password"
+        $<TARGET_FILE:macrdp-server>
+        --preset standard
+)
 
 add_test(
     NAME server_incompatible_h264_encoder

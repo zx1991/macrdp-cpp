@@ -50,6 +50,8 @@ The final target validates the binary package and generates
 
 The generated `build/macrdp-dist/share/macrdp` directory contains:
 
+- `PRESETS.md`: built-in and user preset reference, including credentials and
+  file permissions.
 - `sbom.cdx.json`: a deterministic CycloneDX 1.6 inventory.
 - `THIRD_PARTY_NOTICES.md`: versions, declared licenses, homepages, packaged
   files, and bundled license locations.

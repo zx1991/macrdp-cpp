@@ -29,6 +29,8 @@ void macrdp_shadow_set_capture_options(
 
 void macrdp_shadow_set_input_enabled(bool enabled);
 
+std::uint32_t macrdp_shadow_capture_client_count(rdpShadowSubsystem* subsystem);
+
 #ifdef __cplusplus
 }
 

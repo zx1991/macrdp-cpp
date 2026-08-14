@@ -23,6 +23,8 @@ namespace {
 
 constexpr std::uint8_t kAnnexBStartCode[] = {0x00, 0x00, 0x00, 0x01};
 std::atomic_bool g_encoder_enabled{true};
+std::atomic<std::uint32_t> g_key_frame_interval{0};
+std::atomic<macrdp_h264_backend> g_backend{MACRDP_H264_BACKEND_FFMPEG};
 
 std::string status_description(OSStatus status, const char* operation) {
     return std::string(operation) + " failed with OSStatus "
@@ -366,7 +368,8 @@ extern "C" macrdp_vt_h264_encoder* macrdp_vt_h264_encoder_new(
     encoder->width = width;
     encoder->height = height;
     encoder->frame_rate = std::clamp(frame_rate == 0 ? 30U : frame_rate, 1U, 60U);
-    encoder->key_frame_interval = key_frame_interval == 0 ? 60 : key_frame_interval;
+    encoder->key_frame_interval = macrdp_vt_h264_encoder_get_key_frame_interval(
+        key_frame_interval == 0 ? 60 : key_frame_interval);
 
     NSDictionary* attributes = @{
         (__bridge id)kCVPixelBufferPixelFormatTypeKey:
@@ -416,7 +419,7 @@ extern "C" macrdp_vt_h264_encoder* macrdp_vt_h264_encoder_new(
         VTSessionSetProperty(
             encoder->session,
             kVTCompressionPropertyKey_ProfileLevel,
-            kVTProfileLevel_H264_Baseline_AutoLevel) == noErr
+            kVTProfileLevel_H264_ConstrainedBaseline_AutoLevel) == noErr
         && VTSessionSetProperty(
                encoder->session,
                kVTCompressionPropertyKey_H264EntropyMode,
@@ -457,6 +460,52 @@ extern "C" macrdp_vt_h264_encoder* macrdp_vt_h264_encoder_new(
 
 extern "C" void macrdp_vt_h264_encoder_set_enabled(int enabled) {
     g_encoder_enabled.store(enabled != 0, std::memory_order_release);
+}
+
+extern "C" void macrdp_h264_encoder_set_backend(macrdp_h264_backend backend) {
+    g_backend.store(backend, std::memory_order_release);
+}
+
+extern "C" macrdp_h264_backend macrdp_h264_encoder_get_backend() {
+    return g_backend.load(std::memory_order_acquire);
+}
+
+extern "C" void macrdp_vt_h264_encoder_set_key_frame_interval(
+    std::uint32_t interval) {
+    g_key_frame_interval.store(interval, std::memory_order_release);
+}
+
+extern "C" std::uint32_t macrdp_vt_h264_encoder_get_key_frame_interval(
+    std::uint32_t fallback) {
+    const auto interval = g_key_frame_interval.load(std::memory_order_acquire);
+    return interval == 0 ? fallback : interval;
+}
+
+extern "C" int macrdp_vt_h264_encoder_set_targets(
+    macrdp_vt_h264_encoder* encoder,
+    std::uint32_t bitrate,
+    std::uint32_t frame_rate) {
+    if (encoder == nullptr || encoder->session == nullptr
+        || bitrate == 0 || frame_rate == 0) {
+        return 0;
+    }
+    const auto bounded_bitrate = static_cast<std::int32_t>(
+        std::min<std::uint32_t>(
+            bitrate,
+            static_cast<std::uint32_t>(std::numeric_limits<std::int32_t>::max())));
+    const auto bounded_frame_rate = static_cast<std::int32_t>(
+        std::clamp(frame_rate, 1U, 60U));
+    if (!set_number_property(
+            encoder->session,
+            kVTCompressionPropertyKey_AverageBitRate,
+            bounded_bitrate)
+        || !set_number_property(
+            encoder->session,
+            kVTCompressionPropertyKey_ExpectedFrameRate,
+            bounded_frame_rate)) {
+        return 0;
+    }
+    return 1;
 }
 
 extern "C" void macrdp_vt_h264_encoder_free(macrdp_vt_h264_encoder* encoder) {
