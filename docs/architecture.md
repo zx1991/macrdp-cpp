@@ -196,14 +196,14 @@ blocked intervals, deferred/coalesced video updates, and drain attempts per
 client. This distinguishes network backpressure from capture or encoder delay
 without turning a normal client disconnect into an internal-error diagnostic.
 
-The exact backpressure behavior is part of the protocol adaptation patch. The
-patch adds bounded message budgets, a non-blocking output queue, and input-first
-event scheduling to the generated FreeRDP tree. The H.264 acknowledgement
-window follows the same consumer-feedback principle as RustDesk's bounded video
-delivery and recovery design, but is implemented independently with RDPGFX
-frame acknowledgements; no RustDesk code is reused. The adaptations are kept as
-source patches rather than a fork so the upstream version and local changes
-remain reviewable.
+The exact backpressure behavior is maintained in the pinned macrdp FreeRDP
+fork. It adds bounded message budgets, a non-blocking output queue, and
+input-first event scheduling. The H.264 acknowledgement window follows the
+same consumer-feedback principle as RustDesk's bounded video delivery and
+recovery design, but is implemented independently with RDPGFX frame
+acknowledgements; no RustDesk code is reused. The fork keeps each adaptation as
+a focused commit on top of FreeRDP 3.30.0 so changes remain reviewable and can
+be rebased or proposed upstream independently.
 
 ## C++ and Objective-C++
 

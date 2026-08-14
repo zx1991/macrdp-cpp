@@ -55,6 +55,8 @@ The generated `build/macrdp-dist/share/macrdp` directory contains:
 - `sbom.cdx.json`: a deterministic CycloneDX 1.6 inventory.
 - `THIRD_PARTY_NOTICES.md`: versions, declared licenses, homepages, packaged
   files, and bundled license locations.
+- `freerdp-source-provenance.json`: fork repository, upstream version, fixed
+  commit, source URL, and archive SHA-256.
 - `ffmpeg-build-configuration.txt`: the compiled FFmpeg configuration reported
   by the packaged build.
 - `ffmpeg-source-provenance.json`: source URL and hash, patches, configure

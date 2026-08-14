@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "name": "FreeRDP",
+  "version": "3.30.0-macrdp.1",
+  "upstreamVersion": "3.30.0",
+  "licenseExpression": "Apache-2.0",
+  "homepage": "https://www.freerdp.com/",
+  "repository": "https://github.com/zx1991/FreeRDP",
+  "branch": "macrdp-3.30",
+  "tag": "3.30.0-macrdp.1",
+  "commit": "0fb704d78fa541b2cc5286ce1d9d2855f75b65d5",
+  "source": {
+    "url": "https://codeload.github.com/zx1991/FreeRDP/tar.gz/0fb704d78fa541b2cc5286ce1d9d2855f75b65d5",
+    "sha256": "db36564519b0284b3de5b5cab71f4870e70fd3bf07363dff48ef63725310dda6"
+  }
+}

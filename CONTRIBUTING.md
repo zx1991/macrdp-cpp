@@ -39,9 +39,12 @@ cmake -S . -B build \
   -DMACRDP_FFMPEG_PROVENANCE="$PWD/build/third_party/ffmpeg/provenance.json"
 ```
 
-The first configure downloads a hash-pinned FreeRDP 3.30.0 archive. Do not
-edit files under `build/_deps`; update the checked-in patch under `patches/`
-instead.
+The first configure downloads the hash-pinned macrdp FreeRDP 3.30.0 fork. Do
+not edit files under `build/_deps`. Make FreeRDP changes on the
+`zx1991/FreeRDP` `macrdp-3.30` branch and update
+`third_party/freerdp/manifest.json` to the resulting immutable commit and
+archive SHA-256. For cross-repository development, configure with
+`-DFETCHCONTENT_SOURCE_DIR_FREERDP=/path/to/FreeRDP`.
 
 ## Tests
 
@@ -113,8 +116,8 @@ build trees in a pull request.
 - Update README/docs and focused tests when behavior or a command changes.
 - Keep FFmpeg source hashes, patches, configure flags, runtime probes, package
   allowlists, and source-distribution instructions consistent as one change.
-- Keep FreeRDP changes in the pinned patch and update patch markers in
-  `CMakeLists.txt` when the adaptation surface changes.
+- Keep FreeRDP changes as focused commits on the `macrdp-3.30` fork branch and
+  update the source manifest, documentation, and integration tests together.
 
 ## Pull requests
 

@@ -5,8 +5,8 @@
 
 An experimental C++/Objective-C++ RDP server for sharing the logged-in macOS
 desktop with a Windows Remote Desktop (`mstsc`) client. It combines
-ScreenCaptureKit, CoreGraphics, VideoToolbox, and a pinned FreeRDP 3.30.0
-shadow server.
+ScreenCaptureKit, CoreGraphics, VideoToolbox, and a pinned macrdp FreeRDP
+3.30.0 fork.
 
 > **Project status: Alpha.** The server is useful for development and trusted
 > network testing, but it is not yet a production-ready or officially released
@@ -106,10 +106,10 @@ cmake --build build --parallel 8
 ctest --test-dir build --output-on-failure
 ```
 
-The first configure downloads and hash-verifies FreeRDP 3.30.0. Project
-adaptations are applied in a hash-stamped order from the checked-in files under
-`patches/` to the generated `build/_deps` tree. Do not edit generated
-dependency sources directly.
+The first configure downloads and hash-verifies the macrdp FreeRDP 3.30.0 fork
+at an immutable commit. Its repository, commit, archive URL, and SHA-256 are
+declared in `third_party/freerdp/manifest.json`. Do not edit generated
+dependency sources under `build/_deps` directly.
 
 The command above is the shortest development setup and may use Homebrew's GPL
 FFmpeg build. It is not the dependency path used for official binary artifacts.
@@ -436,7 +436,7 @@ The standalone capture/encoder example remains available:
 - `src/macos/`: Objective-C++ adapters for Apple frameworks and FreeRDP.
 - `tools/`: loopback client, network shaper, and smoke-test scripts.
 - `scripts/`: packaging and LaunchAgent helpers.
-- `patches/`: version-pinned FreeRDP adaptations.
+- `third_party/freerdp/`: pinned macrdp FreeRDP fork manifest.
 - `third_party/ffmpeg/`: pinned LGPL FFmpeg manifest, patches, and build policy.
 - `docs/`: architecture, testing, and roadmap documentation.
 
@@ -457,8 +457,9 @@ The standalone capture/encoder example remains available:
 ## Contributing and security
 
 Keep changes focused, update tests and documentation together, and never commit
-generated `build/_deps` content. Changes to the FreeRDP boundary must update the
-checked-in patch and its pinned-version assumptions together.
+generated `build/_deps` content. FreeRDP changes belong on the
+`zx1991/FreeRDP` `macrdp-3.30` branch; update its pinned commit, archive URL,
+SHA-256, and dependency documentation in this repository together.
 
 This software exposes the desktop and, unless disabled, clipboard, audio, and
 input injection. Treat every listener and credential as security-sensitive,

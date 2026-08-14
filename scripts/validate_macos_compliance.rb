@@ -116,6 +116,29 @@ presets_documentation = compliance_dir.join("PRESETS.md")
 unless presets_documentation.file? && presets_documentation.size.positive?
   raise "preset documentation is missing"
 end
+freerdp_component = components.find { |component| component["name"] == "FreeRDP" }
+raise "FreeRDP component is missing" unless freerdp_component
+freerdp_provenance_path = compliance_dir.join("freerdp-source-provenance.json")
+unless freerdp_provenance_path.file? && freerdp_provenance_path.size.positive?
+  raise "FreeRDP source provenance is missing"
+end
+freerdp_provenance = JSON.parse(freerdp_provenance_path.read)
+unless freerdp_provenance["schemaVersion"] == 1
+  raise "unexpected FreeRDP source provenance schema"
+end
+unless freerdp_provenance["version"] == freerdp_component["version"]
+  raise "FreeRDP provenance version mismatch"
+end
+freerdp_source_hash = freerdp_provenance.dig("source", "sha256")
+unless freerdp_source_hash&.match?(/\A[0-9a-f]{64}\z/)
+  raise "invalid FreeRDP source provenance hash"
+end
+freerdp_component_hash = freerdp_component.fetch("properties").find do |property|
+  property["name"] == "macrdp:source-archive-sha256"
+end
+unless freerdp_component_hash&.fetch("value") == freerdp_source_hash
+  raise "FreeRDP component source hash mismatch"
+end
 ffmpeg_component = components.find { |component| component["name"] == "ffmpeg" }
 if ffmpeg_component
   configuration = compliance_dir.join("ffmpeg-build-configuration.txt")

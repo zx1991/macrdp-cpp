@@ -21,6 +21,24 @@ project_source = Pathname.new(ARGV[2]).realpath
 freerdp_source = Pathname.new(ARGV[3]).realpath
 project_version = ARGV[4]
 ffmpeg_provenance_path = ARGV[5].to_s.empty? ? nil : Pathname.new(ARGV[5]).realpath
+freerdp_manifest_path = project_source.join("third_party", "freerdp", "manifest.json")
+raise "FreeRDP source manifest is missing" unless freerdp_manifest_path.file?
+
+freerdp_manifest = JSON.parse(freerdp_manifest_path.read)
+raise "unexpected FreeRDP manifest schema" unless freerdp_manifest["schemaVersion"] == 1
+raise "unexpected FreeRDP dependency" unless freerdp_manifest["name"] == "FreeRDP"
+freerdp_commit = freerdp_manifest.fetch("commit")
+unless freerdp_commit.match?(/\A[0-9a-f]{40}\z/)
+  raise "invalid FreeRDP commit"
+end
+freerdp_source_sha256 = freerdp_manifest.dig("source", "sha256")
+unless freerdp_source_sha256&.match?(/\A[0-9a-f]{64}\z/)
+  raise "invalid FreeRDP source SHA-256"
+end
+freerdp_source_url = freerdp_manifest.dig("source", "url")
+unless freerdp_source_url&.end_with?("/#{freerdp_commit}")
+  raise "FreeRDP source URL does not match its commit"
+end
 
 def relative_package_path(value)
   path = Pathname.new(value)
@@ -242,6 +260,11 @@ end
 
 ffmpeg_configuration = compliance_dir.join("ffmpeg-build-configuration.txt")
 ffmpeg_source_provenance = compliance_dir.join("ffmpeg-source-provenance.json")
+freerdp_source_provenance = compliance_dir.join("freerdp-source-provenance.json")
+File.write(
+  freerdp_source_provenance,
+  JSON.pretty_generate(freerdp_manifest) + "\n"
+)
 if managed_ffmpeg
   FileUtils.cp(managed_ffmpeg.fetch(:configuration_file), ffmpeg_configuration)
   provenance = managed_ffmpeg.fetch(:provenance)
@@ -275,10 +298,15 @@ notice_lines = [
   "This inventory is generated from the exact dynamic libraries copied into this package.",
   "The bundled license files remain authoritative.",
   "",
-  "## FreeRDP 3.30.0",
+  "## FreeRDP #{freerdp_manifest.fetch("version")}",
   "",
-  "- License: Apache-2.0",
-  "- Homepage: https://www.freerdp.com/",
+  "- Upstream version: #{freerdp_manifest.fetch("upstreamVersion")}",
+  "- License: #{freerdp_manifest.fetch("licenseExpression")}",
+  "- Homepage: #{freerdp_manifest.fetch("homepage")}",
+  "- Repository: #{freerdp_manifest.fetch("repository")}",
+  "- Revision: #{freerdp_commit}",
+  "- Source: #{freerdp_source_url}",
+  "- Source SHA-256: #{freerdp_source_sha256}",
   "- Linkage: statically linked",
   "- License files: #{license_sets.fetch("FreeRDP").map { |path| path.relative_path_from(package_dir) }.join(", ")}",
   ""
@@ -382,20 +410,30 @@ root_component = {
   )
 }
 
-freerdp_ref = "pkg:github/FreeRDP/FreeRDP@3.30.0"
+freerdp_ref = "pkg:github/zx1991/FreeRDP@#{freerdp_commit}"
 freerdp_component = {
   "type" => "library",
   "bom-ref" => freerdp_ref,
-  "group" => "FreeRDP",
+  "group" => "zx1991",
   "name" => "FreeRDP",
-  "version" => "3.30.0",
+  "version" => freerdp_manifest.fetch("version"),
   "purl" => freerdp_ref,
-  "licenses" => [{ "expression" => "Apache-2.0" }],
-  "externalReferences" => [{ "type" => "website", "url" => "https://www.freerdp.com/" }],
+  "licenses" => [{ "expression" => freerdp_manifest.fetch("licenseExpression") }],
+  "externalReferences" => [
+    { "type" => "website", "url" => freerdp_manifest.fetch("homepage") },
+    { "type" => "vcs", "url" => "#{freerdp_manifest.fetch("repository")}##{freerdp_commit}" },
+    { "type" => "distribution", "url" => freerdp_source_url }
+  ],
   "properties" => [
     { "name" => "macrdp:linkage", "value" => "static" },
+    { "name" => "macrdp:upstream-version", "value" => freerdp_manifest.fetch("upstreamVersion") },
+    { "name" => "macrdp:git-revision", "value" => freerdp_commit },
+    { "name" => "macrdp:source-archive-sha256", "value" => freerdp_source_sha256 },
     { "name" => "macrdp:license-directory", "value" => "share/macrdp/licenses/FreeRDP" }
-  ] + compliance_properties(license_sets.fetch("FreeRDP"), package_dir)
+  ] + compliance_properties(
+    license_sets.fetch("FreeRDP") + [freerdp_source_provenance],
+    package_dir
+  )
 }
 
 formula_refs = {}
