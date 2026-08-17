@@ -325,6 +325,9 @@ struct macrdp_h264_worker {
             stats.encodeTimeMsMax = std::max(stats.encodeTimeMsMax, encode_time_ms);
             stats.lastEncodeTimeMs = encode_time_ms;
             stats.outputBytes += output_bytes;
+            if (!encoded.failed && !encoded.hasData) {
+                ++stats.noOutputFrames;
+            }
             (void)SetEvent(done_event);
         }
     }

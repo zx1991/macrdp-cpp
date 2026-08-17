@@ -31,6 +31,7 @@ typedef struct
 	UINT64 encodeTimeMsMax;
 	UINT64 lastEncodeTimeMs;
 	UINT64 outputBytes;
+	UINT64 noOutputFrames;
 } macrdp_h264_worker_stats;
 
 macrdp_h264_worker* macrdp_h264_worker_new(rdpShadowEncoder* encoder);

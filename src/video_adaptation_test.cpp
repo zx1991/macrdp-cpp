@@ -2,6 +2,8 @@
 
 #include <cstdint>
 #include <iostream>
+#include <limits>
+#include <string>
 
 namespace {
 
@@ -164,6 +166,46 @@ int main() {
     ok = expect(intermittent.current_bitrate_bps == 3'500'000
                     && intermittent.current_fps == 8,
                 "steady recovery did not resume additively after queue pressure") && ok;
+
+    macrdp_video_adaptation encoder_limited{};
+    macrdp_video_adaptation_init(&encoder_limited, 16'000'000, 30, 0);
+    auto encoder_sample = observation(1000, 0, 0);
+    encoder_sample.encoder_completed_frames = 5;
+    reasons = macrdp_video_adaptation_observe(&encoder_limited, &encoder_sample);
+    encoder_sample.now_ms = 2100;
+    encoder_sample.encoder_completed_frames = 15;
+    encoder_sample.encoder_no_output_frames = 2;
+    reasons = macrdp_video_adaptation_observe(&encoder_limited, &encoder_sample);
+    ok = expect((reasons & MACRDP_VIDEO_ADAPT_ENCODER_NO_OUTPUT) != 0
+                    && encoder_limited.current_bitrate_bps == 2'000'000
+                    && encoder_limited.current_fps == 3,
+                "sustained encoder no-output did not reduce FPS independently") && ok;
+    ok = expect(std::string(macrdp_video_adaptation_reason_name(reasons))
+                    == "encoder-no-output",
+                "encoder no-output reason was not reported") && ok;
+    auto encoder_quiet = observation(2200, 1, 100);
+    encoder_quiet.encoder_completed_frames = 16;
+    encoder_quiet.encoder_no_output_frames = 2;
+    reasons = macrdp_video_adaptation_observe(&encoder_limited, &encoder_quiet);
+    ok = expect(reasons == MACRDP_VIDEO_ADAPT_NONE
+                    && encoder_limited.current_fps == 3,
+                "encoder pressure did not hold recovery during its quiet period") && ok;
+
+    macrdp_video_adaptation large_encoder_counters{};
+    macrdp_video_adaptation_init(&large_encoder_counters, 16'000'000, 30, 0);
+    auto large_encoder_sample = observation(1, 0, 0);
+    large_encoder_sample.encoder_completed_frames =
+        std::numeric_limits<std::uint64_t>::max();
+    reasons = macrdp_video_adaptation_observe(
+        &large_encoder_counters,
+        &large_encoder_sample);
+    large_encoder_sample.now_ms = 1001;
+    reasons = macrdp_video_adaptation_observe(
+        &large_encoder_counters,
+        &large_encoder_sample);
+    ok = expect(reasons == MACRDP_VIDEO_ADAPT_NONE
+                    && large_encoder_counters.current_fps == 5,
+                "large encoder counters overflowed the no-output threshold") && ok;
 
     macrdp_video_adaptation repeated_pressure{};
     macrdp_video_adaptation_init(&repeated_pressure, 16'000'000, 30, 0);

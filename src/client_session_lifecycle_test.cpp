@@ -135,8 +135,66 @@ bool test_reconnect_lifecycle_cycles() {
     return ok;
 }
 
+bool test_suppressed_clients_control_video_demand() {
+    macrdp_shadow_set_input_enabled(false);
+    RDP_SHADOW_ENTRY_POINTS entry_points{};
+    if (!expect(macrdp_shadow_subsystem_entry(&entry_points) > 0,
+                "unable to load the subsystem for suppress-output lifecycle")) {
+        return false;
+    }
+
+    rdpShadowSubsystem* subsystem = entry_points.New();
+    if (!expect(subsystem != nullptr, "unable to create suppress-output subsystem")) {
+        return false;
+    }
+    rdpShadowServer server{};
+    subsystem->server = &server;
+    rdpShadowClient first{};
+    rdpShadowClient second{};
+    bool ok = expect(subsystem->ClientConnect(subsystem, &first),
+                     "first suppress-output client failed to connect")
+        && expect(subsystem->ClientConnect(subsystem, &second),
+                  "second suppress-output client failed to connect")
+        && expect(macrdp_shadow_capture_client_count(subsystem) == 2,
+                  "connected suppress-output clients were not registered")
+        && expect(macrdp_shadow_capture_output_client_count(subsystem) == 2,
+                  "new clients did not request video output");
+
+    ok = expect(subsystem->ClientSuppressOutput(subsystem, &first, TRUE),
+                "first client suppression was rejected") && ok;
+    ok = expect(macrdp_shadow_capture_output_client_count(subsystem) == 1,
+                "one suppressed client paused shared video") && ok;
+    ok = expect(subsystem->ClientSuppressOutput(subsystem, &second, TRUE),
+                "second client suppression was rejected") && ok;
+    ok = expect(macrdp_shadow_capture_output_client_count(subsystem) == 0,
+                "all suppressed clients kept video demand active") && ok;
+    ok = expect(subsystem->ClientSuppressOutput(subsystem, &first, FALSE),
+                "first client resume was rejected") && ok;
+    ok = expect(macrdp_shadow_capture_output_client_count(subsystem) == 1,
+                "resumed client did not reactivate video demand") && ok;
+
+    subsystem->ClientDisconnect(subsystem, &first);
+    ok = expect(macrdp_shadow_capture_client_count(subsystem) == 1
+                    && macrdp_shadow_capture_output_client_count(subsystem) == 0,
+                "disconnecting the only output client kept video active") && ok;
+    ok = expect(subsystem->ClientSuppressOutput(subsystem, &second, FALSE),
+                "remaining client resume was rejected") && ok;
+    ok = expect(macrdp_shadow_capture_output_client_count(subsystem) == 1,
+                "remaining client did not reactivate video") && ok;
+    subsystem->ClientDisconnect(subsystem, &second);
+    ok = expect(macrdp_shadow_capture_client_count(subsystem) == 0
+                    && macrdp_shadow_capture_output_client_count(subsystem) == 0,
+                "disconnected clients retained capture demand") && ok;
+
+    entry_points.Free(subsystem);
+    return ok;
+}
+
 } // namespace
 
 int main() {
-    return test_reconnect_lifecycle_cycles() ? 0 : 1;
+    return test_suppressed_clients_control_video_demand()
+            && test_reconnect_lifecycle_cycles()
+        ? 0
+        : 1;
 }

@@ -86,7 +86,9 @@ bool expect_worker_stats(const macrdp_h264_worker* worker, UINT64 expected_jobs)
         && expect(stats.encodeTimeMsMax >= stats.lastEncodeTimeMs,
                    "worker statistics reported an invalid maximum encode time")
         && expect(stats.outputBytes == 0,
-                   "failed worker jobs unexpectedly reported encoded output");
+                   "failed worker jobs unexpectedly reported encoded output")
+        && expect(stats.noOutputFrames == 0,
+                   "failed worker jobs were counted as rate-control skips");
 }
 
 void fill_frame(std::vector<BYTE>& frame, UINT32 width, UINT32 height) {
@@ -385,6 +387,10 @@ bool run_openh264_adaptive_target_test() {
                 "OpenH264 regression did not exercise rate-control skipping") && ok;
     ok = expect(saw_output_after_recovery,
                 "OpenH264 did not resume output after adaptive target recovery") && ok;
+    macrdp_h264_worker_stats stats{};
+    macrdp_h264_worker_get_stats(worker, &stats);
+    ok = expect(stats.noOutputFrames > 0,
+                "OpenH264 rate-control skips were not counted") && ok;
 
     macrdp_h264_worker_free(worker);
     h264_context_free(h264);

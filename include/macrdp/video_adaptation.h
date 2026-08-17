@@ -17,7 +17,8 @@ typedef enum
 	MACRDP_VIDEO_ADAPT_ACK_LATENCY = 1U << 3,
 	MACRDP_VIDEO_ADAPT_ACK_STALL = 1U << 4,
 	MACRDP_VIDEO_ADAPT_RECOVER_BITRATE = 1U << 5,
-	MACRDP_VIDEO_ADAPT_RECOVER_FPS = 1U << 6
+	MACRDP_VIDEO_ADAPT_RECOVER_FPS = 1U << 6,
+	MACRDP_VIDEO_ADAPT_ENCODER_NO_OUTPUT = 1U << 7
 } macrdp_video_adaptation_reason;
 
 typedef struct
@@ -26,6 +27,8 @@ typedef struct
 	uint64_t acknowledged_samples;
 	uint64_t last_ack_latency_ms;
 	uint64_t ack_stalls;
+	uint64_t encoder_completed_frames;
+	uint64_t encoder_no_output_frames;
 	bool output_blocked;
 	bool transport_queue_pressure;
 	bool client_queue_pressure;
@@ -45,6 +48,11 @@ typedef struct
 	uint32_t healthy_fps_samples;
 	uint64_t observed_ack_samples;
 	uint64_t observed_ack_stalls;
+	uint64_t observed_encoder_completed_frames;
+	uint64_t observed_encoder_no_output_frames;
+	uint64_t encoder_window_completed_frames;
+	uint64_t encoder_window_no_output_frames;
+	uint64_t encoder_window_started_ms;
 	uint64_t last_bitrate_change_ms;
 	uint64_t last_fps_change_ms;
 	uint64_t last_frame_submitted_ms;

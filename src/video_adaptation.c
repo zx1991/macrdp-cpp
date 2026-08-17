@@ -18,6 +18,10 @@
 #define MACRDP_VIDEO_REDUCTION_COOLDOWN_MS 1500U
 #define MACRDP_VIDEO_FPS_PRESSURE_MS 750U
 #define MACRDP_VIDEO_PERSISTENT_PRESSURE_MS 2000U
+#define MACRDP_VIDEO_ENCODER_WINDOW_MS 1000U
+#define MACRDP_VIDEO_ENCODER_MIN_SAMPLES 10U
+#define MACRDP_VIDEO_ENCODER_SKIP_PERCENT 10U
+#define MACRDP_VIDEO_ENCODER_RECOVERY_QUIET_MS 5000U
 
 static uint32_t macrdp_video_max_u32(uint32_t left, uint32_t right)
 {
@@ -155,12 +159,55 @@ uint32_t macrdp_video_adaptation_observe(
 	bool pressure_started = false;
 	bool fps_pressure = false;
 	bool persistent_pressure = false;
+	bool encoder_pressure = false;
 
 	if (!adaptation || !observation)
 		return MACRDP_VIDEO_ADAPT_NONE;
 
 	adaptation->observed_ack_samples = observation->acknowledged_samples;
 	adaptation->observed_ack_stalls = observation->ack_stalls;
+	if (observation->encoder_completed_frames <
+	        adaptation->observed_encoder_completed_frames ||
+	    observation->encoder_no_output_frames <
+	        adaptation->observed_encoder_no_output_frames)
+	{
+		adaptation->encoder_window_completed_frames = 0;
+		adaptation->encoder_window_no_output_frames = 0;
+		adaptation->encoder_window_started_ms = 0;
+		adaptation->observed_encoder_completed_frames = 0;
+		adaptation->observed_encoder_no_output_frames = 0;
+	}
+	if (observation->encoder_completed_frames >
+	    adaptation->observed_encoder_completed_frames)
+	{
+		adaptation->encoder_window_completed_frames +=
+			observation->encoder_completed_frames -
+			adaptation->observed_encoder_completed_frames;
+		adaptation->encoder_window_no_output_frames +=
+			observation->encoder_no_output_frames -
+			adaptation->observed_encoder_no_output_frames;
+		if (adaptation->encoder_window_started_ms == 0)
+			adaptation->encoder_window_started_ms = observation->now_ms;
+	}
+	adaptation->observed_encoder_completed_frames = observation->encoder_completed_frames;
+	adaptation->observed_encoder_no_output_frames = observation->encoder_no_output_frames;
+	if (adaptation->encoder_window_started_ms != 0 &&
+	    macrdp_video_elapsed(observation->now_ms,
+	                         adaptation->encoder_window_started_ms,
+	                         MACRDP_VIDEO_ENCODER_WINDOW_MS))
+	{
+		const uint64_t completed = adaptation->encoder_window_completed_frames;
+		const uint64_t skip_threshold =
+			(completed / 100U) * MACRDP_VIDEO_ENCODER_SKIP_PERCENT +
+			((completed % 100U) * MACRDP_VIDEO_ENCODER_SKIP_PERCENT + 99U) /
+				100U;
+		encoder_pressure =
+			completed >= MACRDP_VIDEO_ENCODER_MIN_SAMPLES &&
+			adaptation->encoder_window_no_output_frames >= skip_threshold;
+		adaptation->encoder_window_completed_frames = 0;
+		adaptation->encoder_window_no_output_frames = 0;
+		adaptation->encoder_window_started_ms = 0;
+	}
 	if (observation->output_suppressed)
 	{
 		macrdp_video_reset_health(adaptation);
@@ -168,7 +215,18 @@ uint32_t macrdp_video_adaptation_observe(
 		adaptation->pressure_started_ms = 0;
 		adaptation->fps_pressure_applied = false;
 		adaptation->stalled_ack_pending = false;
+		adaptation->encoder_window_completed_frames = 0;
+		adaptation->encoder_window_no_output_frames = 0;
+		adaptation->encoder_window_started_ms = 0;
 		return MACRDP_VIDEO_ADAPT_NONE;
+	}
+	if (encoder_pressure)
+	{
+		const uint64_t quiet_deadline = macrdp_video_deadline(
+			observation->now_ms, MACRDP_VIDEO_ENCODER_RECOVERY_QUIET_MS);
+		macrdp_video_reset_health(adaptation);
+		if (quiet_deadline > adaptation->recovery_not_before_ms)
+			adaptation->recovery_not_before_ms = quiet_deadline;
 	}
 	if (ack_after_stall)
 		adaptation->stalled_ack_pending = false;
@@ -224,6 +282,11 @@ uint32_t macrdp_video_adaptation_observe(
 			macrdp_video_reduce_fps(adaptation, 1, 2, observation->now_ms);
 		if (bitrate_changed || fps_changed)
 			reasons |= MACRDP_VIDEO_ADAPT_ACK_LATENCY;
+	}
+	else if (encoder_pressure &&
+	         macrdp_video_reduce_fps(adaptation, 3, 4, observation->now_ms))
+	{
+		reasons |= MACRDP_VIDEO_ADAPT_ENCODER_NO_OUTPUT;
 	}
 	else
 	{
@@ -370,6 +433,8 @@ const char* macrdp_video_adaptation_reason_name(uint32_t reasons)
 {
 	if (reasons & MACRDP_VIDEO_ADAPT_ACK_STALL)
 		return "ack-stall";
+	if (reasons & MACRDP_VIDEO_ADAPT_ENCODER_NO_OUTPUT)
+		return "encoder-no-output";
 	if (reasons & MACRDP_VIDEO_ADAPT_OUTPUT_BLOCKED)
 		return "output-blocked";
 	if (reasons & MACRDP_VIDEO_ADAPT_TRANSPORT_QUEUE)

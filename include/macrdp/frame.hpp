@@ -30,6 +30,8 @@ struct Frame {
     std::uint64_t display_generation = 0;
     // Time spent by ScreenCaptureKit's callback copying this sample into BGRA.
     std::uint64_t capture_copy_time_us = 0;
+    // Bytes copied from the ScreenCaptureKit pixel buffer for this sample.
+    std::uint64_t capture_copy_bytes = 0;
     // Pixels are tightly represented as BGRA rows with `stride` bytes per row.
     std::vector<std::uint8_t> bgra;
     // ScreenCaptureKit reports the portions redrawn for this frame. An empty

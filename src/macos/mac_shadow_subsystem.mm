@@ -132,7 +132,9 @@ struct mac_shadow_subsystem {
     std::mutex capture_clients_mutex;
     std::condition_variable capture_clients_condition;
     std::unordered_set<const rdpShadowClient*> capture_clients;
+    std::unordered_set<const rdpShadowClient*> suppressed_capture_clients;
     std::atomic<std::uint32_t> capture_client_count{0};
+    std::atomic<std::uint32_t> capture_output_client_count{0};
     std::mutex display_commit_mutex;
     std::mutex display_geometry_mutex;
     std::optional<DisplaySessionGeometry> display_geometry;
@@ -179,6 +181,14 @@ struct mac_shadow_subsystem {
     std::atomic<std::uint64_t> published_frames{0};
     std::atomic<std::uint64_t> changed_frames{0};
     std::atomic<std::uint64_t> copied_bytes{0};
+    std::atomic<std::uint64_t> capture_copied_bytes{0};
+    std::atomic<std::uint64_t> dirty_region_frames{0};
+    std::atomic<std::uint64_t> dirty_region_rects{0};
+    std::atomic<std::uint64_t> full_copy_frames{0};
+    std::atomic<std::uint64_t> full_copy_forced_frames{0};
+    std::atomic<std::uint64_t> full_copy_no_metadata_frames{0};
+    std::atomic<std::uint64_t> full_copy_scaled_frames{0};
+    std::atomic<std::uint64_t> full_scan_frames{0};
     std::atomic<std::uint64_t> capture_copy_time_us_total{0};
     std::atomic<std::uint64_t> capture_copy_time_us_max{0};
     std::atomic<std::uint64_t> surface_copy_time_us_total{0};
@@ -249,10 +259,63 @@ bool register_capture_client(
     subsystem->capture_client_count.store(
         static_cast<std::uint32_t>(subsystem->capture_clients.size()),
         std::memory_order_release);
+    subsystem->capture_output_client_count.store(
+        static_cast<std::uint32_t>(
+            subsystem->capture_clients.size() - subsystem->suppressed_capture_clients.size()),
+        std::memory_order_release);
+    if (subsystem->capture != nullptr) {
+        subsystem->capture->set_video_enabled(true);
+    }
     subsystem->force_full_frame.store(true, std::memory_order_release);
     subsystem->capture_clients_condition.notify_all();
     if (first_client && subsystem->capture != nullptr) {
         WLog_INFO(TAG, "Screen capture resumed for the first active client");
+    }
+    return true;
+}
+
+bool set_capture_client_suppressed(
+    MacShadowSubsystem* subsystem,
+    const rdpShadowClient* client,
+    bool suppressed) {
+    if (subsystem == nullptr || client == nullptr) {
+        return false;
+    }
+
+    std::lock_guard lock(subsystem->capture_clients_mutex);
+    if (!subsystem->capture_clients.contains(client)) {
+        return true;
+    }
+    const bool was_suppressed = subsystem->suppressed_capture_clients.contains(client);
+    if (was_suppressed == suppressed) {
+        return true;
+    }
+
+    const bool had_output_clients = subsystem->suppressed_capture_clients.size()
+        < subsystem->capture_clients.size();
+    if (suppressed) {
+        subsystem->suppressed_capture_clients.insert(client);
+    } else {
+        subsystem->suppressed_capture_clients.erase(client);
+    }
+    const auto output_clients = static_cast<std::uint32_t>(
+        subsystem->capture_clients.size() - subsystem->suppressed_capture_clients.size());
+    subsystem->capture_output_client_count.store(output_clients, std::memory_order_release);
+    if (subsystem->capture != nullptr) {
+        subsystem->capture->set_video_enabled(output_clients != 0);
+    }
+
+    if (output_clients == 0) {
+        std::lock_guard frame_lock(subsystem->pending_frame_mutex);
+        subsystem->pending_frame.reset();
+    } else if (!had_output_clients) {
+        subsystem->force_full_frame.store(true, std::memory_order_release);
+    }
+    subsystem->capture_clients_condition.notify_all();
+    if (output_clients == 0) {
+        WLog_INFO(TAG, "Screen video paused: all clients suppressed output");
+    } else if (!had_output_clients) {
+        WLog_INFO(TAG, "Screen video resumed for an output client");
     }
     return true;
 }
@@ -265,13 +328,27 @@ void unregister_capture_client(
     }
 
     std::lock_guard lock(subsystem->capture_clients_mutex);
+    const bool had_output_clients = subsystem->suppressed_capture_clients.size()
+        < subsystem->capture_clients.size();
     if (subsystem->capture_clients.erase(client) == 0) {
         return;
     }
+    subsystem->suppressed_capture_clients.erase(client);
     subsystem->capture_client_count.store(
         static_cast<std::uint32_t>(subsystem->capture_clients.size()),
         std::memory_order_release);
+    const auto output_clients = static_cast<std::uint32_t>(
+        subsystem->capture_clients.size() - subsystem->suppressed_capture_clients.size());
+    subsystem->capture_output_client_count.store(output_clients, std::memory_order_release);
     if (!subsystem->capture_clients.empty()) {
+        if (subsystem->capture != nullptr) {
+            subsystem->capture->set_video_enabled(output_clients != 0);
+        }
+        if (had_output_clients && output_clients == 0) {
+            std::lock_guard frame_lock(subsystem->pending_frame_mutex);
+            subsystem->pending_frame.reset();
+            WLog_INFO(TAG, "Screen video paused: remaining clients suppressed output");
+        }
         return;
     }
 
@@ -289,6 +366,11 @@ void unregister_capture_client(
 bool capture_has_clients(const MacShadowSubsystem* subsystem) {
     return subsystem != nullptr
         && subsystem->capture_client_count.load(std::memory_order_acquire) != 0;
+}
+
+bool capture_has_output_clients(const MacShadowSubsystem* subsystem) {
+    return subsystem != nullptr
+        && subsystem->capture_output_client_count.load(std::memory_order_acquire) != 0;
 }
 
 std::uint16_t keyboard_key_identity(UINT16 flags, UINT8 code) noexcept {
@@ -1834,10 +1916,17 @@ bool copy_frame_to_surface(MacShadowSubsystem* subsystem, const macrdp::Frame& f
     bool changed = false;
     bool copy_succeeded = true;
     std::uint64_t copied_bytes = 0;
+    std::uint64_t copied_dirty_rects = 0;
+    bool used_dirty_regions = false;
+    bool full_copy_forced = false;
+    bool full_copy_no_metadata = false;
+    bool full_copy_scaled = false;
+    bool full_scan = false;
     const bool matching_dimensions = frame.width == surface->width
         && frame.height == surface->height;
     const bool force_full_copy = subsystem->force_full_frame.load(std::memory_order_acquire);
     if (matching_dimensions && !force_full_copy && !frame.dirty_rects.empty()) {
+        used_dirty_regions = true;
         // ScreenCaptureKit supplies complete frames but also identifies the
         // portions that changed. Keep the surface copy proportional to that
         // metadata and let the RDP layer carry the exact invalid region.
@@ -1863,6 +1952,7 @@ bool copy_frame_to_surface(MacShadowSubsystem* subsystem, const macrdp::Frame& f
                     static_cast<std::size_t>(right - left) * 4);
                 copied_bytes += static_cast<std::uint64_t>(right - left) * 4;
             }
+            ++copied_dirty_rects;
 
             RECTANGLE_16 dirty{};
             dirty.left = static_cast<UINT16>(left);
@@ -1881,7 +1971,9 @@ bool copy_frame_to_surface(MacShadowSubsystem* subsystem, const macrdp::Frame& f
     } else if (matching_dimensions) {
         if (force_full_copy) {
             changed = true;
+            full_copy_forced = true;
         } else {
+            full_scan = true;
             for (std::uint32_t y = 0; y < surface->height; ++y) {
                 auto* destination = surface->data + y * surface->scanline;
                 const auto* source = frame.bgra.data() + y * frame.stride;
@@ -1893,6 +1985,7 @@ bool copy_frame_to_surface(MacShadowSubsystem* subsystem, const macrdp::Frame& f
             }
         }
         if (changed) {
+            full_copy_no_metadata = !force_full_copy;
             for (std::uint32_t y = 0; y < surface->height; ++y) {
                 auto* destination = surface->data + y * surface->scanline;
                 const auto* source = frame.bgra.data() + y * frame.stride;
@@ -1904,6 +1997,7 @@ bool copy_frame_to_surface(MacShadowSubsystem* subsystem, const macrdp::Frame& f
             copied_bytes = static_cast<std::uint64_t>(surface->width) * surface->height * 4;
         }
     } else {
+        full_copy_scaled = true;
         // ScreenCaptureKit and RDP may use different Retina coordinate spaces.
         // Resample into the framebuffer dimensions instead of rejecting a valid
         // capture when the display mode changes.
@@ -1959,6 +2053,22 @@ bool copy_frame_to_surface(MacShadowSubsystem* subsystem, const macrdp::Frame& f
 
     subsystem->published_frames.fetch_add(1, std::memory_order_relaxed);
     subsystem->copied_bytes.fetch_add(copied_bytes, std::memory_order_relaxed);
+    if (full_scan) {
+        subsystem->full_scan_frames.fetch_add(1, std::memory_order_relaxed);
+    }
+    if (used_dirty_regions && changed) {
+        subsystem->dirty_region_frames.fetch_add(1, std::memory_order_relaxed);
+        subsystem->dirty_region_rects.fetch_add(copied_dirty_rects, std::memory_order_relaxed);
+    } else if (copied_bytes != 0) {
+        subsystem->full_copy_frames.fetch_add(1, std::memory_order_relaxed);
+        if (full_copy_forced) {
+            subsystem->full_copy_forced_frames.fetch_add(1, std::memory_order_relaxed);
+        } else if (full_copy_no_metadata) {
+            subsystem->full_copy_no_metadata_frames.fetch_add(1, std::memory_order_relaxed);
+        } else if (full_copy_scaled) {
+            subsystem->full_copy_scaled_frames.fetch_add(1, std::memory_order_relaxed);
+        }
+    }
     if (changed) {
         subsystem->changed_frames.fetch_add(1, std::memory_order_relaxed);
     }
@@ -2152,7 +2262,7 @@ void capture_loop(MacShadowSubsystem* subsystem) {
             std::unique_lock lock(subsystem->capture_clients_mutex);
             subsystem->capture_clients_condition.wait(lock, [subsystem] {
                 return subsystem->stop_requested.load()
-                    || capture_has_clients(subsystem);
+                    || capture_has_output_clients(subsystem);
             });
         }
         if (subsystem->stop_requested.load()) {
@@ -2173,13 +2283,16 @@ void capture_loop(MacShadowSubsystem* subsystem) {
 
         auto frame = subsystem->capture->next_frame(std::chrono::milliseconds{250});
         if (frame.has_value()) {
-            if (!capture_has_clients(subsystem)) {
+            if (!capture_has_output_clients(subsystem)) {
                 subsystem->capture->recycle_frame(std::move(*frame));
                 continue;
             }
             subsystem->captured_frames.fetch_add(1, std::memory_order_relaxed);
             subsystem->capture_copy_time_us_total.fetch_add(
                 frame->capture_copy_time_us,
+                std::memory_order_relaxed);
+            subsystem->capture_copied_bytes.fetch_add(
+                frame->capture_copy_bytes,
                 std::memory_order_relaxed);
             record_atomic_max(
                 subsystem->capture_copy_time_us_max,
@@ -2207,21 +2320,21 @@ void capture_loop(MacShadowSubsystem* subsystem) {
 
         const std::string error = subsystem->capture->last_error();
         if (!error.empty() && !subsystem->stop_requested.load()
-            && capture_has_clients(subsystem)) {
+            && capture_has_output_clients(subsystem)) {
             WLog_WARN(TAG, "Screen capture stream stopped: %s; attempting restart",
                       error.c_str());
             subsystem->capture->stop();
             if (subsystem->stop_requested.load()) {
                 break;
             }
-            if (!capture_has_clients(subsystem)) {
+            if (!capture_has_output_clients(subsystem)) {
                 continue;
             }
             std::this_thread::sleep_for(retry_delay);
             if (subsystem->stop_requested.load()) {
                 break;
             }
-            if (!capture_has_clients(subsystem)) {
+            if (!capture_has_output_clients(subsystem)) {
                 continue;
             }
             if (!subsystem->capture->start()) {
@@ -2276,7 +2389,12 @@ void publish_loop(MacShadowSubsystem* subsystem) {
             WLog_INFO(TAG,
                       "Frame pipeline: captured=%" PRIu64 " published=%" PRIu64
                       " changed=%" PRIu64 " coalesced=%" PRIu64 " copied=%" PRIu64
-                      " bytes capture_copy_avg=%" PRIu64 "ms capture_copy_max=%" PRIu64
+                      " bytes capture_copied=%" PRIu64
+                      " dirty_frames=%" PRIu64 " dirty_rects=%" PRIu64
+                      " full_frames=%" PRIu64 " full_forced=%" PRIu64
+                      " full_no_metadata=%" PRIu64 " full_scaled=%" PRIu64
+                      " full_scans=%" PRIu64 " video_suppressed=%" PRIu64
+                      " capture_copy_avg=%" PRIu64 "ms capture_copy_max=%" PRIu64
                       "ms surface_copy_avg=%" PRIu64 "ms surface_copy_max=%" PRIu64
                       "ms publish_wait_avg=%" PRIu64 "ms publish_wait_max=%" PRIu64 "ms",
                       captured,
@@ -2284,6 +2402,17 @@ void publish_loop(MacShadowSubsystem* subsystem) {
                       changed,
                       subsystem->coalesced_frames.load(std::memory_order_relaxed),
                       subsystem->copied_bytes.load(std::memory_order_relaxed),
+                      subsystem->capture_copied_bytes.load(std::memory_order_relaxed),
+                      subsystem->dirty_region_frames.load(std::memory_order_relaxed),
+                      subsystem->dirty_region_rects.load(std::memory_order_relaxed),
+                      subsystem->full_copy_frames.load(std::memory_order_relaxed),
+                      subsystem->full_copy_forced_frames.load(std::memory_order_relaxed),
+                      subsystem->full_copy_no_metadata_frames.load(std::memory_order_relaxed),
+                      subsystem->full_copy_scaled_frames.load(std::memory_order_relaxed),
+                      subsystem->full_scan_frames.load(std::memory_order_relaxed),
+                      subsystem->capture == nullptr
+                          ? 0
+                          : subsystem->capture->suppressed_video_frames(),
                       captured == 0 ? 0 : capture_total_us / captured / 1000,
                       subsystem->capture_copy_time_us_max.load(std::memory_order_relaxed) / 1000,
                       published == 0 ? 0 : surface_total_us / published / 1000,
@@ -2616,6 +2745,14 @@ int mac_shadow_subsystem_start(rdpShadowSubsystem* base) {
     subsystem->published_frames.store(0, std::memory_order_relaxed);
     subsystem->changed_frames.store(0, std::memory_order_relaxed);
     subsystem->copied_bytes.store(0, std::memory_order_relaxed);
+    subsystem->capture_copied_bytes.store(0, std::memory_order_relaxed);
+    subsystem->dirty_region_frames.store(0, std::memory_order_relaxed);
+    subsystem->dirty_region_rects.store(0, std::memory_order_relaxed);
+    subsystem->full_copy_frames.store(0, std::memory_order_relaxed);
+    subsystem->full_copy_forced_frames.store(0, std::memory_order_relaxed);
+    subsystem->full_copy_no_metadata_frames.store(0, std::memory_order_relaxed);
+    subsystem->full_copy_scaled_frames.store(0, std::memory_order_relaxed);
+    subsystem->full_scan_frames.store(0, std::memory_order_relaxed);
     subsystem->capture_copy_time_us_total.store(0, std::memory_order_relaxed);
     subsystem->capture_copy_time_us_max.store(0, std::memory_order_relaxed);
     subsystem->surface_copy_time_us_total.store(0, std::memory_order_relaxed);
@@ -2668,7 +2805,9 @@ int mac_shadow_subsystem_start(rdpShadowSubsystem* base) {
     {
         std::lock_guard client_lock(subsystem->capture_clients_mutex);
         subsystem->capture_clients.clear();
+        subsystem->suppressed_capture_clients.clear();
         subsystem->capture_client_count.store(0, std::memory_order_release);
+        subsystem->capture_output_client_count.store(0, std::memory_order_release);
     }
     try {
         if (subsystem->input_enabled) {
@@ -2760,7 +2899,9 @@ int mac_shadow_subsystem_stop(rdpShadowSubsystem* base) {
     {
         std::lock_guard client_lock(subsystem->capture_clients_mutex);
         subsystem->capture_clients.clear();
+        subsystem->suppressed_capture_clients.clear();
         subsystem->capture_client_count.store(0, std::memory_order_release);
+        subsystem->capture_output_client_count.store(0, std::memory_order_release);
     }
     subsystem->capture.reset();
     if (subsystem->display_topology != nullptr) {
@@ -2945,6 +3086,15 @@ rdpShadowSubsystem* mac_shadow_subsystem_new() {
     subsystem->common.ClientCapabilities = [](rdpShadowSubsystem*, rdpShadowClient*) {
         return true;
     };
+    subsystem->common.ClientSuppressOutput = [](
+        rdpShadowSubsystem* base,
+        rdpShadowClient* client,
+        BOOL suppressed) {
+        return set_capture_client_suppressed(
+            reinterpret_cast<MacShadowSubsystem*>(base),
+            client,
+            suppressed != FALSE);
+    };
     return &subsystem->common;
 }
 
@@ -3004,6 +3154,14 @@ extern "C" std::uint32_t macrdp_shadow_capture_client_count(
     return mac == nullptr
         ? 0
         : mac->capture_client_count.load(std::memory_order_acquire);
+}
+
+extern "C" std::uint32_t macrdp_shadow_capture_output_client_count(
+    rdpShadowSubsystem* subsystem) {
+    auto* mac = reinterpret_cast<MacShadowSubsystem*>(subsystem);
+    return mac == nullptr
+        ? 0
+        : mac->capture_output_client_count.load(std::memory_order_acquire);
 }
 
 bool macrdp_shadow_enumerate_displays(

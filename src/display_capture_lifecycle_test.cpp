@@ -343,6 +343,52 @@ bool test_stop_and_reconfigure_are_serialized() {
     return ok;
 }
 
+bool test_video_suppression_keeps_audio_active() {
+    auto backend = std::make_unique<FakeCaptureBackend>();
+    auto* fake = backend.get();
+    macrdp::DisplayCapture capture({}, std::move(backend));
+    bool ok = expect(capture.start(), "fake capture did not start before video suppression");
+    const auto session = fake->session(0);
+
+    ok = expect(macrdp::detail::capture_backend_publish_frame(
+                    session.state,
+                    session.generation,
+                    test_frame(1)),
+                "initial video frame was rejected") && ok;
+    capture.set_video_enabled(false);
+    ok = expect(!capture.video_enabled(), "video suppression was not observable") && ok;
+    ok = expect(!capture.next_frame(0ms).has_value(),
+                "queued video survived output suppression") && ok;
+    ok = expect(!macrdp::detail::capture_backend_publish_frame(
+                    session.state,
+                    session.generation,
+                    test_frame(2)),
+                "suppressed video frame was accepted") && ok;
+    ok = expect(capture.suppressed_video_frames() == 1,
+                "suppressed video frame was not counted") && ok;
+    ok = expect(macrdp::detail::capture_backend_publish_audio(
+                    session.state,
+                    session.generation,
+                    test_audio(3)),
+                "video suppression also suppressed audio") && ok;
+    const auto audio = capture.next_audio(0ms);
+    ok = expect(audio.has_value() && audio->pcm.front() == 3,
+                "audio was not delivered while video was suppressed") && ok;
+
+    capture.set_video_enabled(true);
+    ok = expect(capture.video_enabled(), "video resume was not observable") && ok;
+    ok = expect(macrdp::detail::capture_backend_publish_frame(
+                    session.state,
+                    session.generation,
+                    test_frame(4)),
+                "resumed video frame was rejected") && ok;
+    const auto frame = capture.next_frame(0ms);
+    ok = expect(frame.has_value() && frame->bgra.front() == 4,
+                "resumed video frame was not delivered") && ok;
+    capture.stop();
+    return ok;
+}
+
 } // namespace
 
 int main() {
@@ -351,5 +397,6 @@ int main() {
     ok = test_reconfigure_rejects_old_generation_callbacks() && ok;
     ok = test_stop_during_backend_start_is_rejected() && ok;
     ok = test_stop_and_reconfigure_are_serialized() && ok;
+    ok = test_video_suppression_keeps_audio_active() && ok;
     return ok ? 0 : 1;
 }

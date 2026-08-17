@@ -71,6 +71,10 @@ bool capture_backend_publish_frame(
         if (state->generation != generation || !state->accepting_frames) {
             return false;
         }
+        if (!state->video_enabled) {
+            ++state->suppressed_video_frames;
+            return false;
+        }
         if (state->latest_frame.has_value()) {
             coalesce_dropped_frame_dirty_regions(*state->latest_frame, frame);
         }
@@ -252,6 +256,7 @@ bool copy_sample_buffer(CMSampleBufferRef sample_buffer, macrdp::Frame& frame) {
     frame.stride = bytes_per_row;
     frame.timestamp_us = timestamp_us();
     frame.capture_copy_time_us = 0;
+    frame.capture_copy_bytes = 0;
     frame.dirty_rects.clear();
 
     for (std::size_t y = 0; y < height; ++y) {
@@ -276,6 +281,7 @@ bool copy_sample_buffer(CMSampleBufferRef sample_buffer, macrdp::Frame& frame) {
         std::chrono::duration_cast<std::chrono::microseconds>(
             std::chrono::steady_clock::now() - copy_started)
             .count());
+    frame.capture_copy_bytes = static_cast<std::uint64_t>(bytes_per_row) * height;
     return true;
 }
 
@@ -752,6 +758,10 @@ std::pair<std::size_t, std::size_t> output_size(
         if (state->generation != generation_ || !state->accepting_frames) {
             return;
         }
+        if (!state->video_enabled) {
+            ++state->suppressed_video_frames;
+            return;
+        }
 
         if (state->latest_frame.has_value()) {
             frame = std::move(*state->latest_frame);
@@ -850,6 +860,9 @@ struct DisplayCapture::Impl {
     [[nodiscard]] std::optional<Frame> next_frame(std::chrono::milliseconds timeout);
     [[nodiscard]] std::optional<AudioFrame> next_audio(std::chrono::milliseconds timeout);
     void recycle_frame(Frame frame) noexcept;
+    void set_video_enabled(bool enabled) noexcept;
+    [[nodiscard]] bool video_enabled() const;
+    [[nodiscard]] std::uint64_t suppressed_video_frames() const;
     [[nodiscard]] bool reconfigure(DisplayCaptureOptions next_options);
     void stop() noexcept;
     [[nodiscard]] std::string last_error() const;
@@ -1320,6 +1333,35 @@ void DisplayCapture::Impl::recycle_frame(Frame frame) noexcept {
     }
 }
 
+void DisplayCapture::Impl::set_video_enabled(bool enabled) noexcept {
+    try {
+        {
+            std::lock_guard lock(state->mutex);
+            if (state->video_enabled == enabled) {
+                return;
+            }
+            state->video_enabled = enabled;
+            if (!enabled && state->latest_frame.has_value()) {
+                recycle_frame_locked(*state, std::move(*state->latest_frame));
+                state->latest_frame.reset();
+            }
+        }
+        state->frame_condition.notify_all();
+    } catch (...) {
+        // Video demand changes are advisory and must not affect stream teardown.
+    }
+}
+
+bool DisplayCapture::Impl::video_enabled() const {
+    std::lock_guard lock(state->mutex);
+    return state->video_enabled;
+}
+
+std::uint64_t DisplayCapture::Impl::suppressed_video_frames() const {
+    std::lock_guard lock(state->mutex);
+    return state->suppressed_video_frames;
+}
+
 void DisplayCapture::Impl::stop() noexcept {
     std::lock_guard lifecycle_lock(lifecycle_mutex);
     {
@@ -1375,6 +1417,18 @@ std::optional<AudioFrame> DisplayCapture::next_audio(std::chrono::milliseconds t
 
 void DisplayCapture::recycle_frame(Frame frame) noexcept {
     impl_->recycle_frame(std::move(frame));
+}
+
+void DisplayCapture::set_video_enabled(bool enabled) noexcept {
+    impl_->set_video_enabled(enabled);
+}
+
+bool DisplayCapture::video_enabled() const {
+    return impl_->video_enabled();
+}
+
+std::uint64_t DisplayCapture::suppressed_video_frames() const {
+    return impl_->suppressed_video_frames();
 }
 
 bool DisplayCapture::reconfigure(DisplayCaptureOptions options) {

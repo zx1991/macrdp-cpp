@@ -48,12 +48,21 @@ holds it for five. Capture continues at the global FPS ceiling, while bounded
 output queues, deferred H.264 completion, and frame coalescing preserve only the
 newest update for each client's next paced encode.
 
+FreeRDP suppress-output demand is aggregated across clients. While every
+connected client suppresses output, ScreenCaptureKit keeps running for audio
+but discards screen samples before the BGRA copy. The capture and publish loops
+hold no stale video in that state. Resuming any client reenables video and
+forces the next published surface update to cover the full frame.
+
 Per-client pacing applies to every H.264 backend. OpenH264 updates its bitrate
 and frame-rate controls before encoding the next frame, and the direct
 VideoToolbox bridge updates `AverageBitRate` and `ExpectedFrameRate` on its live
 session. The explicit generic FFmpeg encoder path currently receives adaptive
 pacing but does not guarantee that a bitrate change takes effect after its
-codec context has opened.
+codec context has opened. Completed encodes that intentionally produce no
+packet are measured in one-second windows. When at least ten samples contain
+ten percent no-output results, the controller reduces FPS without reducing
+bitrate and holds recovery for five seconds.
 
 Audio and clipboard have separate service paths. Audio capture/pacing runs in
 its own loop and publishes bounded PCM chunks to the FreeRDP shadow clients.

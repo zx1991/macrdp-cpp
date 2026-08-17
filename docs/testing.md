@@ -309,11 +309,17 @@ macOS key code, private-source flags, ownership-derived modifier flags, posted
 flags, and whether the event was recovered or treated as autorepeat.
 The smoke test also requires all four Pause constituents to be suppressed and
 rejects any Keypad Clear injection from its Pause and synchronization probes.
-The `H.264
-pipeline` diagnostic reports encoder time, coalesced frames, and
-`output_deferred`, the number of completed encodes held until the transport
-became writable. For H.264, deferred and coalesced video-update counters also
-include capture updates consumed while the preceding RDPGFX frame awaits client
+The `Frame pipeline` diagnostic separates bytes copied from ScreenCaptureKit
+(`capture_copied`) from bytes copied into the FreeRDP surface (`copied`). Dirty
+metadata usage is reported by `dirty_frames` and `dirty_rects`; full copies are
+split into forced, missing-metadata, and scaled-frame causes. `full_scans`
+counts full-surface comparisons, while `video_suppressed` counts screen samples
+discarded before the BGRA copy while every client suppresses output. Audio
+continues in that state. The `H.264 pipeline` diagnostic reports encoder time,
+coalesced frames, `no_output` rate-control skips, and `output_deferred`, the
+number of completed encodes held until the transport became writable. For
+H.264, deferred and coalesced video-update counters also include capture
+updates consumed while the preceding RDPGFX frame awaits client
 acknowledgement. The regular `Output pipeline` diagnostic reports the current
 and maximum FreeRDP message-queue depth and capacity, the current and maximum
 bytes in the non-blocking transport queue, deferred/coalesced video updates,
@@ -336,15 +342,19 @@ Its `final` line retains the session-wide aggregate for short sessions.
 `Adaptive video initialized` reports the per-client conservative starting
 bitrate/FPS and their user ceilings. Later `Adaptive video` lines report each
 change and its reason (`output-blocked`, queue pressure, `ack-latency`,
-`ack-stall`, or `healthy-recovery`). A reason is logged only when a target
-actually changes. Blocked-write intervals below 750 ms are retained in output
-metrics without reducing targets. At 750 ms, one continuous pressure interval
-reduces send pacing by one FPS; it must remain continuous for two seconds before
-bitrate is reduced. Even a shorter pressure event clears pending healthy ACK
-samples and delays recovery for two seconds, or five seconds for
-transport/client queue pressure. Initial recovery is deliberately faster than
-subsequent additive increases. A minimized client is marked suppressed and does
-not reduce its targets merely because it stopped requesting output.
+`ack-stall`, `encoder-no-output`, or `healthy-recovery`). A reason is logged
+only when a target actually changes. `encoder-no-output` means at least ten
+completed encodes in a one-second window produced at least ten percent
+rate-control skips; it reduces FPS by 25 percent, leaves bitrate unchanged, and
+holds recovery for five seconds. Blocked-write intervals below 750 ms are
+retained in output metrics without reducing targets. At 750 ms, one continuous
+pressure interval reduces send pacing by one FPS; it must remain continuous for
+two seconds before bitrate is reduced. Even a shorter pressure event clears
+pending healthy ACK samples and delays recovery for two seconds, or five
+seconds for transport/client queue pressure. Initial recovery is deliberately
+faster than subsequent additive increases. A minimized client is marked
+suppressed and does not reduce its targets merely because it stopped requesting
+output.
 
 Run the direct profile with:
 

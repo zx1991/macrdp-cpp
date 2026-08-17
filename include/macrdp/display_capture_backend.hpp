@@ -27,7 +27,9 @@ struct DisplayCaptureState {
     std::string error;
     CaptureGeneration generation = 0;
     bool accepting_frames = false;
+    bool video_enabled = true;
     bool stopped = true;
+    std::uint64_t suppressed_video_frames = 0;
 };
 
 struct DisplayCaptureBackendStartResult {

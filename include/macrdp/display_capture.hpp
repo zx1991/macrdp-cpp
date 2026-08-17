@@ -122,6 +122,12 @@ public:
     // callback. The frame may be dropped when the stream is stopping.
     void recycle_frame(Frame frame) noexcept;
 
+    // Enables or disables video publication without stopping the shared SCK
+    // stream. Audio remains active while every RDP client suppresses output.
+    void set_video_enabled(bool enabled) noexcept;
+    [[nodiscard]] bool video_enabled() const;
+    [[nodiscard]] std::uint64_t suppressed_video_frames() const;
+
     // Rebuilds the ScreenCaptureKit stream with new output limits. This is
     // used when macOS changes the selected display's pixel dimensions.
     [[nodiscard]] bool reconfigure(DisplayCaptureOptions options);
