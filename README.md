@@ -9,7 +9,7 @@ Windows Remote Desktop (`mstsc`) or a FreeRDP client. It combines
 ScreenCaptureKit, CoreGraphics, VideoToolbox, and a pinned macrdp FreeRDP
 3.30.0 fork.
 
-[Quick start](#quick-start) · [Capabilities](#capabilities) · [Current limits](#current-limits) · [Roadmap](docs/roadmap.md)
+[Quick start](#quick-start) · [Capabilities](#capabilities) · [Current limits](#current-limits) · [Releases](https://github.com/zx1991/macrdp-cpp/releases) · [Roadmap](docs/roadmap.md)
 
 > **Project status: Alpha.** The server is useful for development and trusted
 > network/VPN testing, but it is not yet a production-ready or officially
