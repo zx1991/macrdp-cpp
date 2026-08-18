@@ -2,18 +2,67 @@
 
 [![macOS build](https://github.com/zx1991/macrdp-cpp/actions/workflows/macos.yml/badge.svg)](https://github.com/zx1991/macrdp-cpp/actions/workflows/macos.yml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+[![Platform](https://img.shields.io/badge/platform-macOS%2015%2B%20%7C%20Apple%20Silicon-lightgrey.svg)](docs/hardware-matrix.md)
 
-An experimental C++/Objective-C++ RDP server for sharing the logged-in macOS
-desktop with a Windows Remote Desktop (`mstsc`) client. It combines
+Native macOS RDP server for connecting to the logged-in Mac desktop from
+Windows Remote Desktop (`mstsc`) or a FreeRDP client. It combines
 ScreenCaptureKit, CoreGraphics, VideoToolbox, and a pinned macrdp FreeRDP
 3.30.0 fork.
 
+[Quick start](#quick-start) · [Capabilities](#capabilities) · [Current limits](#current-limits) · [Roadmap](docs/roadmap.md)
+
 > **Project status: Alpha.** The server is useful for development and trusted
-> network testing, but it is not yet a production-ready or officially released
-> remote desktop product. Read the [security policy](SECURITY.md) and
+> network/VPN testing, but it is not yet a production-ready or officially
+> released remote desktop product. Read the [security policy](SECURITY.md) and
 > [release gates](docs/roadmap.md) before exposing a listener.
 
-## What works
+## At a glance
+
+| | | | |
+| --- | --- | --- | --- |
+| **Target** | macOS 15+ on Apple Silicon | **Client** | Windows Remote Desktop or FreeRDP |
+| **Transport** | RDP with NLA by default | **License** | Apache-2.0 for project code |
+| **Best for** | Development, lab use, and trusted LAN/VPN access | **Distribution** | Build from source; public signed binaries are not available yet |
+
+## Quick start
+
+The shortest path is a local development build. A graphical macOS login is
+required; Screen Recording permission is needed for capture, and Accessibility
+permission is needed for keyboard and pointer input.
+
+1. Install the [prerequisites](#requirements):
+
+   ```bash
+   brew install cmake ffmpeg openh264 openssl@3
+   ```
+
+2. Build and run the test suite:
+
+   ```bash
+   cmake -S . -B build -G "Unix Makefiles" \
+     -DCMAKE_BUILD_TYPE=Release \
+     -DCMAKE_OSX_ARCHITECTURES=arm64
+   cmake --build build --parallel 8
+   ctest --test-dir build --output-on-failure
+   ```
+
+3. Start the server on a trusted LAN or VPN:
+
+   ```bash
+   ./build/macrdp-server --preset standard
+   ```
+
+   The server prints the RDP username and prompts for its password without
+   echoing it. On Windows, open `mstsc`, connect to the Mac's address on port
+   `3389`, and use that username and password. The `standard` preset listens
+   on all interfaces; use `--preset local` for loopback-only testing or read
+   [Server presets](docs/presets.md) before exposing a listener.
+
+For a remote session, use a trusted LAN/VPN address. Do not forward port 3389
+to the public internet. The [security policy](SECURITY.md) explains the
+authentication, permissions, and access-policy requirements.
+
+## Capabilities
 
 | Area | Current implementation |
 | --- | --- |
@@ -29,6 +78,9 @@ ScreenCaptureKit, CoreGraphics, VideoToolbox, and a pinned macrdp FreeRDP
 The runtime separates capture, audio, input injection, per-client encoding, and
 FreeRDP transport work. See [Architecture](docs/architecture.md) for ownership
 and backpressure details.
+
+<details>
+<summary>Adaptive video delivery details</summary>
 
 RDPGFX codec support is negotiated per client. Version 8.1 clients enable
 AVC420 with `AVC420_ENABLED`, while 10.x clients enable AVC420 and AVC444 by
@@ -52,6 +104,8 @@ A demotion blocks another promotion for five seconds; reopening then requires
 six acknowledgements of 750 ms or less. This keeps dependent AVC420 frames
 bounded without letting one slow client change another client's delivery
 policy.
+
+</details>
 
 ## Current limits
 
