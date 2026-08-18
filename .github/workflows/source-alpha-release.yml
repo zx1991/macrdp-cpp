@@ -1,28 +1,119 @@
-name: Source alpha release
+name: Alpha release
 
 on:
   push:
     tags:
       - 'v*-alpha*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing alpha tag to build, for example v0.1.0-alpha
+        required: true
+        type: string
 
 permissions:
   contents: write
 
 jobs:
-  publish:
-    runs-on: ubuntu-latest
+  build:
+    name: Build macOS arm64 developer preview
+    runs-on: macos-15
+    timeout-minutes: 60
+    env:
+      RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
 
     steps:
       - name: Check out tagged source
         uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
 
-      - name: Create source-only GitHub release
+      - name: Install release dependencies
+        run: brew install openh264 openssl@3
+
+      - name: Build pinned LGPL FFmpeg
+        run: |
+          MACRDP_FFMPEG_JOBS=3 \
+            scripts/build_macos_ffmpeg.sh build/third_party/ffmpeg arm64 15.0
+
+      - name: Configure
+        run: |
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_OSX_ARCHITECTURES=arm64 \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET=15.0 \
+            -DOPENSSL_ROOT_DIR="$(brew --prefix openssl@3)" \
+            -DCMAKE_PREFIX_PATH="$(brew --prefix openh264);$(brew --prefix openssl@3)" \
+            -DMACRDP_FFMPEG_ROOT="$GITHUB_WORKSPACE/build/third_party/ffmpeg/prefix" \
+            -DMACRDP_FFMPEG_PROVENANCE="$GITHUB_WORKSPACE/build/third_party/ffmpeg/provenance.json"
+
+      - name: Build and test
+        run: |
+          cmake --build build --parallel 3
+          ctest --test-dir build --output-on-failure
+
+      - name: Build and validate developer distribution
+        run: cmake --build build --target macrdp-distribution-validate
+
+      - name: Stage release artifacts
+        run: |
+          set -euo pipefail
+          mkdir -p release-artifacts
+          cp build/macrdp-cpp-0.1.0-macos-arm64.dmg \
+            release-artifacts/macrdp-cpp-0.1.0-macos-arm64-developer-preview.dmg
+          cp build/macrdp-ffmpeg-sources-7.1.1.tar.gz \
+            release-artifacts/macrdp-ffmpeg-sources-7.1.1.tar.gz
+          (cd release-artifacts && shasum -a 256 *.dmg *.tar.gz > SHA256SUMS)
+          shasum -a 256 release-artifacts/*
+
+      - name: Upload release artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: macrdp-${{ env.RELEASE_TAG }}-developer-preview
+          path: release-artifacts/*
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: Attach developer preview to Release
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+
+    steps:
+      - name: Check out release metadata
+        uses: actions/checkout@v4
+        with:
+          # Build uses the requested tag above; this job uses the workflow
+          # commit so a manual rebuild can update notes for an older tag.
+          ref: ${{ github.sha }}
+
+      - name: Download release artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: macrdp-${{ env.RELEASE_TAG }}-developer-preview
+          path: release-artifacts
+
+      - name: Create or update Release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" \
+          set -euo pipefail
+          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release edit "$RELEASE_TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "macrdp-cpp $RELEASE_TAG" \
+              --notes-file .github/release-notes/alpha.md
+          else
+            gh release create "$RELEASE_TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "macrdp-cpp $RELEASE_TAG" \
+              --prerelease \
+              --notes-file .github/release-notes/alpha.md
+          fi
+          gh release upload "$RELEASE_TAG" \
             --repo "$GITHUB_REPOSITORY" \
-            --title "macrdp-cpp $GITHUB_REF_NAME" \
-            --verify-tag \
-            --prerelease \
-            --notes-file .github/release-notes/alpha.md
+            release-artifacts/* \
+            --clobber

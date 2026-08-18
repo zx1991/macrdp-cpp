@@ -4,13 +4,14 @@ This project has not published a stable release yet.
 
 ## 0.1.0-alpha - 2026-08-18
 
-First public source-only Alpha snapshot. It includes the native macOS RDP
-server, ScreenCaptureKit display capture, H.264 AVC420 paths, remote input,
-text clipboard, RDPSND speaker output, NLA authentication, adaptive per-client
-delivery, deterministic lifecycle coverage, and validated developer packaging.
+First public source and developer-preview Alpha snapshot. It includes the
+native macOS RDP server, ScreenCaptureKit display capture, H.264 AVC420 paths,
+remote input, text clipboard, RDPSND speaker output, NLA authentication,
+adaptive per-client delivery, deterministic lifecycle coverage, and validated
+developer packaging.
 
-There is no signed or notarized binary attached to this source release. The
-remaining release gates are tracked in the [Roadmap](docs/roadmap.md).
+The matching arm64 DMG is ad-hoc signed and not notarized. The remaining
+release gates are tracked in the [Roadmap](docs/roadmap.md).
 
 ## Unreleased
 
